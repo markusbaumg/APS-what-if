@@ -66,7 +66,7 @@ class NightscoutSource:
         self.entries = self.client.entries(start - LOOKBACK_MS, end)
         self.ns_profiles = self.client.profiles()
         self.profiles = ns_profile.ProfileBuilder(self.ns_profiles, self.treatments, self.settings)
-        self.iob = ns_iob.IobCalculator(self.treatments, self.profiles.basal_at, self.settings)
+        self.iob = ns_iob.IobCalculator(self.treatments, self.profiles.basal_at, self.settings, dia_at=self.profiles.dia_hours)
         self.glucose = ns_glucose.GlucoseHistory(self.entries, self.devicestatus, self.settings)
         self._loaded = True
         self.log_msg(f'  {len(self.devicestatus)} loop runs, {len(self.entries)} CGM values, {len(self.treatments)} treatments')

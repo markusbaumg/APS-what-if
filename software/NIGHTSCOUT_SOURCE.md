@@ -39,14 +39,14 @@ Times: unix **milliseconds UTC** everywhere (`now_ms`). NS ISO strings are parse
 `glucose, date, delta, short_avgdelta, long_avgdelta, noise, dura_ISF_minutes, dura_ISF_average, parabola_fit_minutes, parabola_fit_correlation, parabola_fit_a0, parabola_fit_a1, parabola_fit_a2, parabola_fit_last_delta, parabola_fit_next_delta, bg_acceleration`
 `glucose` is the value the loop saw (`record['openaps']['suggested']['bg']` when present), `date` the timestamp of that CGM reading. Return `None` if no CGM value within 12 min before `now_ms`.
 
-### ns_iob.IobCalculator(treatments, basal_at, settings)
-`basal_at(ms)` -> profile basal U/h (callable, supplied by ns_profile).
+### ns_iob.IobCalculator(treatments, basal_at, settings, dia_at=None)
+`basal_at(ms)` -> profile basal U/h and `dia_at(ms)` -> DIA hours (callables, supplied by ns_profile; DIA falls back to `settings.insulin.dia_hours` or 6).
 `iob_array(now_ms, sensitivity_ratio=1.0)` -> list of 48 dicts (t = now + i*5 min): `{'time': t_ms, 'iob', 'activity', 'basaliob', 'bolussnooze', 'netbasalinsulin', 'hightempinsulin', 'iobWithZeroTemp': {'iob','activity','basaliob'}}` following AAPS `calculateIobArrayForSMB` (bolus IOB + temp-basal IOB net of profile basal * sensitivity_ratio; `iobWithZeroTemp` = same but with the running temp cut at now and a 0 U/h temp for 240 min from now).
 `iob_at(t_ms, now_ms, sensitivity_ratio)` -> one such dict. `last_bolus_time(now_ms)` -> ms or 0. `current_temp(now_ms)` -> `{'rate': U/h, 'duration': minutes left (0 = none), 'start': ms}`. `last_temp(now_ms)` -> `{'date': start ms, 'rate', 'duration': full minutes}` of the most recent temp started at or before now (see oref0 `lastTemp`).
 
 ### ns_profile.ProfileBuilder(ns_profiles, treatments, settings)
 `profile_at(now_ms, console_error=None)` -> the full `profile` dict for `determine_basal.py` (every key it reads; see list in the module). Includes `current_basal`, `sens`, `carb_ratio`, `min_bg`, `max_bg`, `target_bg`, `temptargetSet`, `dia`, `max_daily_basal`, `out_units`, `profile_percentage`, `autoISF_version`, all settings sections copied 1:1, `profile_history` applied by time.
-`basal_at(ms)` -> U/h scheduled basal incl. profile switch percentage. `activity_monitor_json(console_error, now_ms)` -> dict `{recentSteps5Minutes ... recentSteps60Minutes, phone_moved, time_since_start}` reproducing the state printed in consoleError.
+`basal_at(ms)` -> U/h scheduled basal incl. profile switch percentage. `dia_hours(ms)` -> DIA of the active profile. `activity_monitor_json(console_error, now_ms)` -> dict `{recentSteps5Minutes ... recentSteps60Minutes, phone_moved, time_since_start}` reproducing the state printed in consoleError.
 
 ### ns_source.NightscoutSource(url_or_ns, start_iso, end_iso)
 `loops()` yields one dict per original loop run inside the window, in time order:

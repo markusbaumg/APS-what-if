@@ -2,10 +2,11 @@
 ns_iob.py  -  AAPS insulin-on-board calculation from Nightscout treatments.
 
 Contract (see NIGHTSCOUT_SOURCE.md):
-    calc = IobCalculator(treatments, basal_at, settings)
+    calc = IobCalculator(treatments, basal_at, settings, dia_at=None)
         treatments : ascending NS treatment records covering at least DIA hours before the first loop
         basal_at   : callable(ms) -> scheduled profile basal U/h (from ns_profile.ProfileBuilder)
         settings   : the ns_settings.json dict  (insulin.peak_minutes, insulin.min_dia_hours, insulin.dia_hours)
+        dia_at     : callable(ms) -> DIA hours of the active profile (None -> settings.insulin.dia_hours or 6)
     calc.iob_array(now_ms, sensitivity_ratio=1.0)   -> list of 48 dicts, 5 min apart, starting at now
     calc.iob_at(t_ms, now_ms, sensitivity_ratio)     -> one dict
     calc.last_bolus_time(now_ms)                     -> ms (0 if none)
@@ -28,7 +29,7 @@ import sys
 
 
 class IobCalculator:
-    def __init__(self, treatments, basal_at, settings):
+    def __init__(self, treatments, basal_at, settings, dia_at=None):
         raise NotImplementedError('to be implemented - see module docstring')
 
     def iob_array(self, now_ms, sensitivity_ratio=1.0):

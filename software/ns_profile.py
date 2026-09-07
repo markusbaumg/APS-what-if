@@ -5,6 +5,7 @@ temporary targets, profile switches and ns_settings.json.
 Contract (see NIGHTSCOUT_SOURCE.md):
     pb = ProfileBuilder(ns_profiles, treatments, settings)
     pb.basal_at(ms)                              -> scheduled basal U/h at ms (incl. profile-switch percentage)
+    pb.dia_hours(ms)                             -> DIA hours of the active profile at ms
     pb.profile_at(now_ms, console_error=None)    -> full profile dict for determine_basal.py  (mg/dl inside)
     pb.activity_monitor_json(console_error, now_ms) -> {'recentSteps5Minutes', 'recentSteps10Minutes', 'recentSteps15Minutes',
                                                         'recentSteps30Minutes', 'recentSteps60Minutes', 'phone_moved', 'time_since_start'}
@@ -47,6 +48,9 @@ class ProfileBuilder:
         raise NotImplementedError('to be implemented - see module docstring')
 
     def basal_at(self, ms):
+        raise NotImplementedError
+
+    def dia_hours(self, ms):
         raise NotImplementedError
 
     def profile_at(self, now_ms, console_error=None):
