@@ -771,7 +771,7 @@ def TreatLoop33(st, log, lcount, fn):
             SMBreason['lastTempAge'] = eval(what[wo_anf+13:wo_end])
             #print('lastTempAge', str(SMBreason['lastTempAge']), 'found in row', str(lcount), 'from', what)
         elif what.find('ISF unchanged:')==0:                # first reference
-            SMBreason['origISF'] = eval(what[16:-1])
+            SMBreason['origISF'] = float(what[what.find(':')+1:].strip(' ;,\r\n'))
             #print (str(lcount), str(origISF))
         elif what.find('ISF from ')==0:                     # here, insert the original autosens modified line handling
             isf_anf = what.find(' to ')

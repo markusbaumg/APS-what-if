@@ -39,7 +39,7 @@ def calculate_expected_delta(target_bg, eventual_bg, bgi):
     return expectedDelta
 
 def convert_bg(value, profile):
-    if ('out_units' in profile and profile['out_units'] == "mmol\\/L") :     # escape "\" remained part of string
+    if ('out_units' in profile and str(profile['out_units']).replace('\\','') == "mmol/L") :     # escape "\" remained part of string
         return round(value / 18, 1)
     else:
         return round(value, 0)
@@ -251,7 +251,7 @@ def loop_smb(microBolusAllowed, profile, iob_data, useIobTh, iobThEffective, thi
         #else :
         #    msgType = "profile target "
 
-        if ('out_units' in profile and profile['out_units'] == "mmol\\/L") :
+        if ('out_units' in profile and str(profile['out_units']).replace('\\','') == "mmol/L") :
             evenTarget = round(target*10, 0) %2 == 0
             msgUnits   = " has "
             msgTail    = " decimal"
