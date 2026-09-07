@@ -1,0 +1,21 @@
+# virtual environment (create with: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt)
+.venv/
+__pycache__/
+*.pyc
+
+# Nightscout download cache (re-created on demand by software/ns_client.py)
+software/ns_cache/
+
+# emulator result files
+software/results/
+*.orig.txt
+*.delta
+*.csv.pdf
+
+# OS / editor
+.DS_Store
+software/variants/*.csv
+software/variants/*.txt
+software/variants/*.log
+software/variants/*.delta
+software/variants/*.pdf

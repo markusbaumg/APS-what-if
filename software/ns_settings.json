@@ -1,0 +1,138 @@
+{
+  "_about": [
+    "AAPS preferences that Nightscout does NOT carry, needed to rebuild the oref1/autoISF profile object.",
+    "Values: decrypted preferences export 2026-09-07_2049_25_full.json (Markus), completed from devicestatus.configuration and consoleError.",
+    "Everything under 'nightscout', 'insulin', 'safety', 'smb', 'autoisf', 'activity_monitor', 'flags' is copied 1:1 into the",
+    "profile handed to determine_basal.py, so a VDF line  'profile  autoISF_max  1.3'  still overrides any of them per run.",
+    "Glucose values in this file are given in the AAPS/oref internal unit mg/dl unless the key name says otherwise.",
+    "Keys marked in '_assumed' were not in the export summary and are set to AAPS/autoISF defaults or inferred from consoleError."
+  ],
+
+  "nightscout": {
+    "url": "https://ns.vivikusi.ch",
+    "token": null,
+    "api_secret_sha1": null,
+    "cache_dir": null,
+    "profile_name": null,
+    "units": "mmol"
+  },
+
+  "insulin": {
+    "type": "Lyumjev",
+    "peak_minutes": 45,
+    "dia_hours": null,
+    "min_dia_hours": 5.0
+  },
+
+  "safety": {
+    "max_iob": 7.0,
+    "max_basal": 3.0,
+    "max_daily_safety_multiplier": 7.0,
+    "current_basal_safety_multiplier": 10.0,
+    "lgsThreshold": 72,
+    "treatmentssafety_maxbolus": 6.0,
+    "treatmentssafety_maxcarbs": 90,
+    "autosens_min": 0.7,
+    "autosens_max": 1.2,
+    "use_dynamic_sensitivity": false,
+    "DynISFAdjust": 110,
+    "openaps_smb_min_5m_carbimpact": 8,
+    "absorption_cutoff": 6,
+    "maxCarbAbsorptionRate": 30,
+    "bolus_increment": 0.05,
+    "carbsReqThreshold": 1,
+    "remainingCarbsCap": 90,
+    "maxCOB": 120
+  },
+
+  "smb": {
+    "enableSMB_always": true,
+    "enableSMB_with_COB": true,
+    "enableSMB_with_temptarget": true,
+    "enableSMB_after_carbs": true,
+    "allowSMB_with_high_temptarget": true,
+    "enableUAM": true,
+    "enableSMB_EvenOn_OddOff": true,
+    "enableSMB_EvenOn_OddOff_always": true,
+    "SMBInterval": 1,
+    "maxSMBBasalMinutes": 240,
+    "maxUAMSMBBasalMinutes": 240,
+    "smb_delivery_ratio": 0.2,
+    "smb_delivery_ratio_min": 0.1,
+    "smb_delivery_ratio_max": 0.5,
+    "smb_delivery_ratio_bg_range": 18.0,
+    "smb_max_range_extension": 1.15,
+    "iob_threshold_percent": 80
+  },
+
+  "autoisf": {
+    "enable_autoISF": true,
+    "autoISF_version": "3.2.0",
+    "autoISF_max": 1.5,
+    "autoISF_min": 0.3,
+    "bgAccel_ISF_weight": 0.09,
+    "bgBrake_ISF_weight": 0.03,
+    "dura_ISF_weight": 0.7,
+    "enable_dura_ISF_with_COB": true,
+    "pp_ISF_weight": 0.018,
+    "enable_pp_ISF_always": true,
+    "pp_ISF_hours": 0,
+    "lower_ISFrange_weight": 0.0,
+    "higher_ISFrange_weight": 0.4,
+    "delta_ISFrange_weight": 0.0,
+    "drift_ISF_weight": 0.0,
+    "meal_type_weight": 0,
+    "meal_addon": 0,
+    "parabola_fit_source": 5
+  },
+
+  "activity_monitor": {
+    "activity_detection": true,
+    "activity_scale_factor": 1.1,
+    "inactivity_scale_factor": 0.0,
+    "ignore_inactivity_overnight": true,
+    "inactivity_idle_start": 22,
+    "inactivity_idle_end": 6,
+    "steps_activity": true,
+    "steps_inactivity": false,
+    "activity_ratio": 0.67,
+    "_source_of_state": "Nightscout has no step counts. The activity state per loop is taken from the original consoleError line 'Activity monitor ...' and translated into synthetic step counts that reproduce that state, so the scale factors above stay tunable."
+  },
+
+  "flags": {
+    "exercise_mode": false,
+    "high_temptarget_raises_sensitivity": false,
+    "low_temptarget_lowers_sensitivity": false,
+    "sensitivity_raises_target": false,
+    "resistance_lowers_target": false,
+    "half_basal_exercise_target": 8.9,
+    "skip_neutral_temps": false,
+    "A52_risk_enable": false,
+    "adv_target_adjustments": false,
+    "calibrationIgnore": true
+  },
+
+  "profile_history": {
+    "_about": "Changes made by the user, for confounder tracking in optimization reports (local time Europe/Zurich).",
+    "changes": [
+      {"when": "2026-09-04T21:20:00+02:00", "parameter": "profile ISF (mmol/U)", "from": 4.9, "to": 5.1},
+      {"when": "2026-09-07T20:23:00+02:00", "parameter": "autoISF_max", "from": 1.3, "to": 1.5}
+    ]
+  },
+
+  "temp_target_automations": {
+    "_about": "Automations set TTs whose decimal parity switches SMB (autoISF EvenOn/OddOff).",
+    "mmol": {"5.6": "SMB on, 15 min", "5.5": "SMB off", "6.5": "SMB off", "7.9": "SMB off"}
+  },
+
+  "_assumed": {
+    "smb.enableSMB_always / enableUAM / enableSMB_with_COB / enableSMB_with_temptarget / enableSMB_after_carbs / allowSMB_with_high_temptarget": "not in export summary; set true (FCL user, SMB parity rule decides in consoleError)",
+    "smb.smb_delivery_ratio_bg_range": "user gave 1.0 (mmol) -> 18 mg/dl",
+    "safety.bolus_increment": "Omnipod Dash",
+    "safety.carbsReqThreshold / remainingCarbsCap / maxCOB": "AAPS defaults",
+    "flags.high_temptarget_raises_sensitivity / low_temptarget_lowers_sensitivity": "false: no 'Sensitivity ratio set to ... based on temp target' line in a week of consoleError",
+    "flags.half_basal_exercise_target": "8.9 mmol (160.2 mg/dl); determine_basal.py multiplies by 18 for mmol users of autoISF >= 3.1",
+    "insulin.peak_minutes": "Lyumjev plugin = 45 min; DIA taken from the Nightscout profile (6 h)",
+    "autoisf.autoISF_max": "1.5 since 2026-09-07 20:23 local; the replay uses the value valid at each loop time when profile_history says so (see ns_profile.py)"
+  }
+}

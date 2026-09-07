@@ -34,7 +34,8 @@ def parser_debug_log(msg: str):
         pass
 
 def get_version_core(echo_msg):
-    echo_msg['emulator_core.py'] = '2026-03-10 22:20'       # round parabola fit minutes for aligning interactive table output
+    echo_msg['emulator_core.py'] = '2026-09-07 23:00'       # Nightscout as data source (scanNightscout), noplot option
+    #cho_msg['emulator_core.py'] = '2026-03-10 22:20'       # round parabola fit minutes for aligning interactive table output
     #cho_msg['emulator_core.py'] = '2026-01-02 12:50'       # inherit pause from AAPS in announcing carbs required
     #cho_msg['emulator_core.py'] = '2025-10-07 14:30'       # key words for Glucose Status changed in logfile
     #cho_msg['emulator_core.py'] = '2025-07-21 17:23'       # pilot drift_ISF addon
@@ -733,6 +734,54 @@ def extractResultComponent(st, key, keyStart, keyEnd):
         Curly = Curly[:wo_apo-1]+Curly[wo_apo:]
     return Curly
 
+def scanConsoleError(consoleError, lcount):
+    # collect the SMB related echos of the original loop from its console.error list
+    # (AAPS 3.3+ database record or Nightscout devicestatus)
+    global SMBreason, origAI_ratio, autoISF_version
+    for what in consoleError:
+        what = str(what)
+        SMBreason['script'] += what +'\n'
+        if what.find('---')==0:
+            pass
+        elif what.find('SMB enabled')==0:
+            SMBreason['rowON'] = lcount
+            SMBreason['whyON'] = what
+        elif what.find('start AutoISF') >=0 or what.find('start autoISF') >=0:            # version of autoISF
+            wo = what.find('ISF ')
+            autoISF_version = what[wo+4:].strip()
+        elif what.find('disabling SMB')>0:
+            SMBreason['rowOFF'] = lcount
+            SMBreason['whyOFF'] = what
+        elif what.find('maxBolus: ')>0:
+            try:
+                SMBreason['maxSMB'] = str(float(what.split('maxBolus:')[1].strip().split()[0].rstrip(';,.')))
+            except (ValueError, IndexError):
+                pass
+        elif what.find('gz maximSMB: from ')==0:
+            SMBreason['maxBolus'] = what
+        elif what.find('currenttemp:')==0:                  # unclear source of TempAge, but should be the same in emulation
+            wo_anf = what.find('lastTempAge:')
+            wo_end = what.find(' m tempModulus:')
+            SMBreason['lastTempAge'] = eval(what[wo_anf+13:wo_end])
+        elif what.find('ISF unchanged:')==0:                # first reference
+            SMBreason['origISF'] = float(what[what.find(':')+1:].strip(' ;,\r\n'))
+        elif what.find('ISF from ')==0:                     # here, insert the original autosens modified line handling
+            isf_anf = what.find(' to ')
+            SMBreason['origISF'] = float(what[isf_anf+4:].strip(' ;,\r\n'))
+        elif what.find('profile.sens:')==0:                 # redefine it
+            isf_anf = what.find(' sens:')
+            isf_end = what.find(' CSF:')
+            SMBreason['origISF'] = float(what[isf_anf+6:isf_end].strip(' ,'))
+        elif what.find('final ISF factor is') ==0:          # result of autoISF
+            final_ISF_string = what[20:].strip()
+            wo = final_ISF_string.find(' ')                # origin sens can  be appended
+            if wo<1:       wo = len(final_ISF_string)
+            if final_ISF_string[:wo] == "NaN":
+                origAI_ratio.append(1.0*10)
+            else:
+                origAI_ratio.append(float(final_ISF_string[:wo])*10)
+    pass
+
 def TreatLoop33(st, log, lcount, fn):
     #print('entered TreatLoop33 in line',str(lcount))
     if not newLoop: return
@@ -749,45 +798,7 @@ def TreatLoop33(st, log, lcount, fn):
     global SMBreason, origAI_ratio
     SMBreason = {}                                              # clear for first filtered debug list
     SMBreason['script'] = '---------- Script Debug --------------------\n'
-    for ele in range(len(rt['consoleError'])):
-        what = rt['consoleError'][ele]
-        #print(what)
-        SMBreason['script'] += what +'\n'
-        if str(what).find('---')==0:
-            pass
-        elif what.find('SMB enabled')==0:
-            SMBreason['rowON'] = lcount
-            SMBreason['whyON'] = what[:-1]
-        elif what.find('disabling SMB')>0:
-            SMBreason['rowOFF'] = lcount
-            SMBreason['whyOFF'] = what[:-1]
-        elif what.find('maxBolus: ')>0:
-            SMBreason['maxSMB'] = what[-4:-1]
-        elif what.find('gz maximSMB: from ')==0:
-            SMBreason['maxBolus'] = what[:-1]
-        elif what.find('currenttemp:')==0:                  # unclear source of TempAge, but should be the same in emulation
-            wo_anf = what.find('lastTempAge:')
-            wo_end = what.find(' m tempModulus:')
-            SMBreason['lastTempAge'] = eval(what[wo_anf+13:wo_end])
-            #print('lastTempAge', str(SMBreason['lastTempAge']), 'found in row', str(lcount), 'from', what)
-        elif what.find('ISF unchanged:')==0:                # first reference
-            SMBreason['origISF'] = float(what[what.find(':')+1:].strip(' ;,\r\n'))
-            #print (str(lcount), str(origISF))
-        elif what.find('ISF from ')==0:                     # here, insert the original autosens modified line handling
-            isf_anf = what.find(' to ')
-            SMBreason['origISF'] = eval(what[isf_anf+4:-1])
-            #print (str(lcount), str(origISF))
-        elif what.find('profile.sens:')==0:                 # redefine it
-            isf_anf = what.find(' sens:')
-            isf_end = what.find(' CSF:')
-            SMBreason['origISF'] = eval(what[isf_anf+6:isf_end])
-            #print (str(lcount), str(origISF))
-        elif what.find('final ISF factor is') ==0:          # result of autoISF
-            final_ISF_string = what[20:]
-            wo = final_ISF_string.find(' ')                # origin sens can  be appended
-            if wo<1:       wo = len(final_ISF_string)
-            
-            origAI_ratio.append(eval(final_ISF_string[:wo])*10)
+    scanConsoleError(rt['consoleError'], lcount)
     for ele in range(len(rt['consoleLog'])):
         #print(rt['consoleLog'][what])
         SMBreason['script'] += rt['consoleLog'][ele] +'\n'
@@ -886,6 +897,7 @@ def TreatLoop(Curly, log, lcount, fn):
             maxBol = '0'
         if mySMB == '' :    mySMB = '0'
         if maxBol== '' :    maxBol= '0'
+        if maxBol== '0' and 'maxSMB' in SMBreason:      maxBol = SMBreason['maxSMB']    # AAPS 3.3+ / Nightscout: only in console.error
         origSMB.append(eval(mySMB))
         origMaxBolus.append(eval(maxBol))
         log.write('\n========== loop in row ' + str(lcount) + ' ========== of logfile '+fn+'\n')
@@ -995,6 +1007,8 @@ def TreatLoop(Curly, log, lcount, fn):
         #if profile['new_parameter']['bestParabola']:       dura_p, delta_p, parabs, iMax = getBestParabolaBG(len(bg)-1)
         if isAndroid:
             msgFile = 'Scanning active logfile'
+        elif isNightscout:
+            msgFile = 'Replaying Nightscout loop'
         else:
             msgFile = 'Scanning logfile '+fn       
         log_msg(msgFile + ',  loop time stamp '+stmp,'\r')
@@ -1140,7 +1154,15 @@ def get_glucose_status(lcount, st) :                    # key = 80
         Curly = Curly.replace('bgAcceleration', 'bg_acceleration')
         Curly = '{' + Curly + '}'
         #print('nachher:', Curly)
-    glucose_status = json.loads(Curly)
+    apply_glucose_status(lcount, json.loads(Curly))
+
+def apply_glucose_status(lcount, gs):
+    # bookkeeping shared by the logfile parser and the Nightscout source: register the glucose status of a new loop
+    global glucose_status
+    global bg, bgTime, deltas
+    global newLoop
+    newLoop = True
+    glucose_status = gs
     glucose_status['row'] = lcount
     #print('entered glucose_status for row='+str(lcount)+'  loop_mills='+'loop_mills[-1]' + '  total count='+str(len(bg))+' with\n '+Curly)
     #print('\n\n'+str(glucose_status))
@@ -1745,6 +1767,61 @@ def scanLogfile(fn, entries):
         lf.close()
     except:
         time.sleep(10)                          # wait for zip conversion
+    return cont
+
+def scanNightscout(fn, entries):
+    # Nightscout counterpart of scanLogfile(): one "file" = one Nightscout time window.
+    # Every loop run found in devicestatus is fed through the same bookkeeping functions as a logfile loop.
+    global SMBreason
+    global xyf
+    global log
+    global varlog
+    global newLoop, activityMonitorCurly
+    global dataType_offset, AAPS_Version, utcOffset, MicroBolusAllowed, autoISF_version
+    global lcount
+    import ns_source
+
+    if not newLoop:
+        SMBreason = {}
+        SMBreason['script'] = '---------- Script Debug --------------------\n'
+    if filecount == 0 :                         # initialize
+        dataType_offset = 0
+        AAPS_Version = '3.3'                    # json style input records
+        try:
+            os.remove(fn_first + '.' + varLabel + '.csv')
+        except (FileNotFoundError, PermissionError):
+            pass
+        xyf     = open(fn_first + '.' + varLabel + '.csv', 'w')
+        log     = open(fn_first + '.orig.txt', 'w')
+        varlog  = open(fn_first + '.' + varLabel + '.log', 'w')
+        varlog.write(echo_msg)
+    varlog.write('\n========== Echo of what-if definitions actioned for variant '+varLabel+'\n========== created on '+formatdate(localtime=True) + '\n========== for loop events found in Nightscout '+fn+'\n')
+    log.write('AAPS scan from Nightscout for SMB comparison created on ' + formatdate(localtime=True) + '\n')
+    log.write('SOURCE='+fn + '\n')
+    lcount = 0
+    cont = 'MORE'
+    src = ns_source.NightscoutSource(fn, t_startLabel, t_stoppLabel, log_msg=log_msg)
+    for loop in src.loops():
+        lcount += 1
+        AAPS_Version = '3.3'
+        utcOffset = loop['utcOffset']
+        if loop.get('autoISF_version'):   autoISF_version = loop['autoISF_version']
+        apply_glucose_status(lcount, loop['glucose_status'])
+        activityMonitorCurly = json.dumps(loop['activity_monitor'])
+        get_iob_data(     lcount, json.dumps(loop['iob_array']), log, '')
+        get_currenttemp(  lcount, json.dumps(loop['currenttemp']))
+        get_profile(      lcount, json.dumps(loop['profile']))
+        get_autosens_data(lcount, json.dumps(loop['autosens_data']))
+        get_meal_data(    lcount, json.dumps(loop['meal_data']))
+        MicroBolusAllowed = loop['microBolusAllowed']
+        SMBreason = {}
+        SMBreason['script'] = '---------- Script Debug --------------------\n'
+        scanConsoleError(loop['console_error'], lcount)
+        SMBreason['lastTempAge'] = loop['lastTempAge']
+        if 'variable_sens' in loop['suggested']:
+            SMBreason['origISF'] = loop['suggested']['variable_sens']
+        cont = TreatLoop(json.dumps(loop['record']), log, lcount, fn)
+        if cont=='STOP' or cont=='SYNTAX':     return cont
     return cont
 
 def pauseCarbsReq(Curly, lcount):
@@ -2660,7 +2737,12 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
         return  60, 'Z', 0, '', '', 0, '', oldPauseCarbsReqEnds               # prescan to get parabola fit length
 
     #log_msg('inside all_parameters_known -->\nvarFile='+varFile+'\nvarLabel='+varLabel)#   
-    logListe = glob.glob(myseek+myfile, recursive=False)
+    global isNightscout
+    isNightscout = myseek.startswith('http://') or myseek.startswith('https://') or myseek.startswith('ns:') or myseek == 'ns'
+    if isNightscout:
+        logListe = []
+    else:
+        logListe = glob.glob(myseek+myfile, recursive=False)
     #print ('logListe:', str(logListe))
     if arg2[:7] == 'Android' :
         isAndroid = True
@@ -2676,7 +2758,7 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
         
     # ---   add sorting info    -----------------------------------
     sorted_fn = {}
-    if isAndroid:
+    if isAndroid or isNightscout:
         sorted_fn[myseek] = myseek
     else:
         for fn in logListe:
@@ -2739,14 +2821,17 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
         #print('Try file ['+fn+'] in folder ['+wd+'] of ['+varFile+']')
         ftype = fn[len(fn)-3:]
         useFile = False
-        if isAndroid and ftype=='log':                                                  useFile = True
+        if isNightscout:                                                                useFile = True
+        elif isAndroid and ftype=='log':                                                useFile = True
         elif not isAndroid and (ftype=='zip' or ftype=='log' or ftype.find('.')>0) :    useFile = True      # valid logfiles should end with "_.0" thru "_.99" or "zip"
         #print(ftype, str(useFile))
         if useFile:
-            isZip = ( ftype == 'zip')
+            isZip = ( ftype == 'zip') and not isNightscout
             if filecount == 0 :                     # initalize file loop
                 #wd = os.path.dirname(varFile)
-                if startLabel.find('2000')==0 :
+                if isNightscout and startLabel.find('2000')==0 :
+                    fnLabel = 'nightscout'          # open start: no date to name the results after
+                elif startLabel.find('2000')==0 :
                     fnLabel = os.path.basename(fn)  # only one logfile to scan: use its name
                 else:
                     fnLabel = startLabel            # series of logfiles to scan: use start date/time
@@ -2770,7 +2855,10 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
                 # else:
                 #    print('defaulting Carbs Req pause', str(pauseCarbsReqEnds))
                 pass
-            cont = scanLogfile(fn, entries)
+            if isNightscout:
+                cont = scanNightscout(fn, entries)
+            else:
+                cont = scanLogfile(fn, entries)
             #print('returned to parameters_known:', CarbReqGram, 'when:', CarbReqTime)
             filecount += 1
             if cont == 'SYNTAX':
@@ -2781,6 +2869,7 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
     
     if filecount == 0 :
         log_msg ('no such logfile: "'+myseek+'"')
+        if isNightscout:       log_msg ('  (Nightscout url must start with http:// or https://)')
         return 0, 'Z', 0, '', '', 0, '', oldPauseCarbsReqEnds
     loopCount = len(loop_mills)
     if loopCount == 0 :
@@ -3146,7 +3235,7 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
         maxItems = 14         
     else:
         maxItems = len(loop_label)
-        if loopCount > 0 :          XYplots(loopCount, head1, head2, entries)
+        if loopCount > 0 and not featured('noplot'):          XYplots(loopCount, head1, head2, entries)
     sorted_entries = sorted(entries)
     top10 = min(maxItems, len(entries) )
     tail = ''

@@ -12,10 +12,13 @@ from emulator_core import get_version_core
 from determine_basal    import get_version_determine_basal
 
 def get_version_batch(echo_msg):
-    echo_msg['emulator_batch.py'] = '2025-12-28 16:30'      # pause in announcing carbs required
+    echo_msg['emulator_batch.py'] = '2026-09-07 23:00'      # Nightscout url accepted as first argument
+    #cho_msg['emulator_batch.py'] = '2025-12-28 16:30'      # pause in announcing carbs required
     #cho_msg['emulator_batch.py'] = '2025-05-27 14:00'      # fit table output for Qpython+; adapt VDF home
     #cho_msg['emulator_batch.py'] = '2025-04-09 03:18'      # Logdir geändert
     return echo_msg
+
+os.environ.setdefault('PYTHONUTF8', '1')          # required by emulator_core; harmless if already set
 
 if sys.platform == "linux":
     bashrc = os.path.expanduser("~/.bashrc")
@@ -390,7 +393,10 @@ else:                                                                           
     for ele in echo_msg:
         m += '\n dated: '+echo_msg[ele] + '       module name: '+ele
     m += '\n'+'-'*66+'\nEcho of execution parameters used\n'+'-'*66
-    m += '\nLogfiles to scan      ' + sys.argv[1]
+    if sys.argv[1].startswith('http') or sys.argv[1].startswith('ns'):
+        m += '\nNightscout source     ' + sys.argv[1]
+    else:
+        m += '\nLogfiles to scan      ' + sys.argv[1]
     m += '\nOutput options        ' + sys.argv[2]
     m_default = ''
     if sys.argv[2].find('.') >= 0 :
