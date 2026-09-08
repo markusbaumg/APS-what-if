@@ -7,7 +7,6 @@
     "Glucose values in this file are given in the AAPS/oref internal unit mg/dl unless the key name says otherwise.",
     "Keys marked in '_assumed' were not in the export summary and are set to AAPS/autoISF defaults or inferred from consoleError."
   ],
-
   "nightscout": {
     "url": "https://ns.vivikusi.ch",
     "token": null,
@@ -16,14 +15,12 @@
     "profile_name": null,
     "units": "mmol"
   },
-
   "insulin": {
     "type": "Lyumjev",
     "peak_minutes": 45,
     "dia_hours": null,
     "min_dia_hours": 5.0
   },
-
   "safety": {
     "max_iob": 7.0,
     "max_basal": 3.0,
@@ -40,11 +37,15 @@
     "absorption_cutoff": 6,
     "maxCarbAbsorptionRate": 30,
     "bolus_increment": 0.05,
-    "carbsReqThreshold": 1,
+    "carbsReqThreshold": 5,
     "remainingCarbsCap": 90,
-    "maxCOB": 120
+    "maxCOB": 120,
+    "use_autosens": false,
+    "dynisf_adjust_sensitivity": true,
+    "min_5m_carbimpact": 8.0,
+    "bolussnooze_dia_divisor": 2.0,
+    "basal_step": 0.05
   },
-
   "smb": {
     "enableSMB_always": true,
     "enableSMB_with_COB": true,
@@ -64,7 +65,6 @@
     "smb_max_range_extension": 1.15,
     "iob_threshold_percent": 80
   },
-
   "autoisf": {
     "enable_autoISF": true,
     "autoISF_version": "3.2.0",
@@ -85,7 +85,6 @@
     "meal_addon": 0,
     "parabola_fit_source": 5
   },
-
   "activity_monitor": {
     "activity_detection": true,
     "activity_scale_factor": 1.1,
@@ -98,41 +97,141 @@
     "activity_ratio": 0.67,
     "_source_of_state": "Nightscout has no step counts. The activity state per loop is taken from the original consoleError line 'Activity monitor ...' and translated into synthetic step counts that reproduce that state, so the scale factors above stay tunable."
   },
-
   "flags": {
     "exercise_mode": false,
     "high_temptarget_raises_sensitivity": false,
     "low_temptarget_lowers_sensitivity": false,
     "sensitivity_raises_target": false,
-    "resistance_lowers_target": false,
+    "resistance_lowers_target": true,
     "half_basal_exercise_target": 8.9,
     "skip_neutral_temps": false,
     "A52_risk_enable": false,
     "adv_target_adjustments": false,
-    "calibrationIgnore": true
+    "calibrationIgnore": true,
+    "calibration_end": false,
+    "calibration_stops_SMB": false,
+    "fsl_exp1_factor": 0.9,
+    "half_basal_exercise_target_mgdl": 160.2
   },
-
   "profile_history": {
     "_about": "Changes made by the user, for confounder tracking in optimization reports (local time Europe/Zurich).",
     "changes": [
-      {"when": "2026-09-04T21:20:00+02:00", "parameter": "profile ISF (mmol/U)", "from": 4.9, "to": 5.1},
-      {"when": "2026-09-07T20:23:00+02:00", "parameter": "autoISF_max", "from": 1.3, "to": 1.5}
+      {
+        "when": "2026-09-04T21:20:00+02:00",
+        "parameter": "profile ISF (mmol/U)",
+        "from": 4.9,
+        "to": 5.1
+      },
+      {
+        "when": "2026-09-07T20:23:00+02:00",
+        "parameter": "autoISF_max",
+        "from": 1.3,
+        "to": 1.5
+      }
     ]
   },
-
   "temp_target_automations": {
     "_about": "Automations set TTs whose decimal parity switches SMB (autoISF EvenOn/OddOff).",
-    "mmol": {"5.6": "SMB on, 15 min", "5.5": "SMB off", "6.5": "SMB off", "7.9": "SMB off"}
+    "mmol": {
+      "5.6": "SMB on, 15 min",
+      "5.5": "SMB off",
+      "6.5": "SMB off",
+      "7.9": "SMB off"
+    },
+    "from_export": [
+      {
+        "title": "Export Settings after new Pod",
+        "enabled": true,
+        "trigger": "(PodChange)",
+        "actions": [
+          "SettingsExport {\"text\": \"\"}"
+        ]
+      },
+      {
+        "title": "Wanda: TT 7",
+        "enabled": true,
+        "trigger": "(BTDevice {\"comparator\": \"ON_CONNECT\", \"name\": \"RMD234DBT CALIBER\"})",
+        "actions": [
+          "TT 7.0 mmol for 60 min"
+        ]
+      },
+      {
+        "title": "Low! ",
+        "enabled": true,
+        "trigger": "(bg IS_EQUAL_OR_LESSER 3.4 mmol)",
+        "actions": [
+          "TT 6.5 mmol for 40 min"
+        ]
+      },
+      {
+        "title": "Safety: prevent hypo <5 or falling",
+        "enabled": true,
+        "trigger": "(bg IS_EQUAL_OR_LESSER 4.6 mmol OR (bg IS_LESSER 5.8 mmol AND SHORT_AVERAGE IS_LESSER -0.3 mmol))",
+        "actions": [
+          "TT 7.9 mmol for 30 min"
+        ]
+      },
+      {
+        "title": "Night: BG >6.5, correct with SMB",
+        "enabled": true,
+        "trigger": "(time 23:45-08:00 AND bg IS_GREATER 6.5 mmol)",
+        "actions": [
+          "TT 5.6 mmol for 15 min"
+        ]
+      },
+      {
+        "title": "Night: no SMB",
+        "enabled": true,
+        "trigger": "(time 00:30-06:00)",
+        "actions": [
+          "TT 5.5 mmol for 30 min"
+        ]
+      },
+      {
+        "title": "Boost 30min",
+        "enabled": true,
+        "trigger": "(ProfilePercent {\"percentage\": 100, \"comparator\": \"IS_EQUAL\"})",
+        "actions": [
+          "ProfileSwitchPercent {\"percentage\": 130, \"durationInMinutes\": 30}"
+        ]
+      },
+      {
+        "title": "TT off",
+        "enabled": true,
+        "trigger": "(TempTarget {\"comparator\": \"EXISTS\"})",
+        "actions": [
+          "stop TT"
+        ]
+      },
+      {
+        "title": "TT8.1 - 6h",
+        "enabled": true,
+        "trigger": "(TempTarget {\"comparator\": \"NOT_EXISTS\"})",
+        "actions": [
+          "TT 8.1 mmol for 360 min"
+        ]
+      }
+    ]
   },
-
   "_assumed": {
-    "smb.enableSMB_always / enableUAM / enableSMB_with_COB / enableSMB_with_temptarget / enableSMB_after_carbs / allowSMB_with_high_temptarget": "not in export summary; set true (FCL user, SMB parity rule decides in consoleError)",
     "smb.smb_delivery_ratio_bg_range": "user gave 1.0 (mmol) -> 18 mg/dl",
     "safety.bolus_increment": "Omnipod Dash",
-    "safety.carbsReqThreshold / remainingCarbsCap / maxCOB": "AAPS defaults",
-    "flags.high_temptarget_raises_sensitivity / low_temptarget_lowers_sensitivity": "false: no 'Sensitivity ratio set to ... based on temp target' line in a week of consoleError",
     "flags.half_basal_exercise_target": "8.9 mmol (160.2 mg/dl); determine_basal.py multiplies by 18 for mmol users of autoISF >= 3.1",
     "insulin.peak_minutes": "Lyumjev plugin = 45 min; DIA taken from the Nightscout profile (6 h)",
-    "autoisf.autoISF_max": "1.5 since 2026-09-07 20:23 local; the replay uses the value valid at each loop time when profile_history says so (see ns_profile.py)"
+    "autoisf.autoISF_max": "1.5 since 2026-09-07 20:23 local; the replay uses the value valid at each loop time when profile_history says so (see ns_profile.py)",
+    "flags.low_temptarget_lowers_sensitivity": "export says true, but in the whole cached week (779 loops with TT 5.5 = 99 mg/dl) the phone never printed 'Sensitivity ratio set to ... based on temp target' - it printed 'Sensitivity ratio unchanged: 1.0'. Set false so the replay reproduces the phone; the export value is kept in aaps_preferences.json",
+    "safety.basal_step": "Omnipod Dash basal resolution 0.05 U/h (used to round current_basal like the pump does)",
+    "flags.high_temptarget_raises_sensitivity": "false per export",
+    "safety.remainingCarbsCap / maxCOB": "AAPS defaults (not in export)"
+  },
+  "glucose": {
+    "always_use_shortavg": false
+  },
+  "_import": {
+    "source": "2026-09-07_204925_full.json",
+    "created_at": "2026-09-07T18:49:26.037Z",
+    "aaps_version": "3.4.2.6dev+aisf3.2.1",
+    "device": "samsung SM-S921B (e1s)",
+    "tool": "ns_prefs_import.py"
   }
 }
