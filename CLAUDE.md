@@ -14,7 +14,7 @@ Branches:
 
 ## Environment and commands
 
-No packaging, no test runner, no linter, no CI; the checks are the `ns_*` `--validate` self-tests and the "no change" replay described below. The scripts import each other as plain siblings (no package). The commands below assume cwd = `software/`; the VDF path decides where results go.
+No packaging, no CI. The root `Makefile` wraps the common commands (`make help`: `install`, `install-dev`, `run`, `validate`, `nochange`, `test`, `lint`, `check`, `fetch`, `optimize`, `hc`, `push`, ...; override `START`/`END`/`VDF`/`OPTS`). The checks are the `ns_*` `--validate` self-tests, the "no change" replay described below (`make nochange` = `software/nochange_check.py`, an interim gate until Hindcast's `hc check`) and `pytest software/hindcast/tests` for the Hindcast package (`make test`). The scripts import each other as plain siblings (no package). The commands below assume cwd = `software/`; the VDF path decides where results go.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # nightscout-source only; on A3.4.0.0-ai3.2.0: pip install matplotlib
