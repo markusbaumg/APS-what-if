@@ -172,8 +172,7 @@ MAP = {
     ('activity_monitor', 'ignore_inactivity_overnight'): 'ignore_inactivity_overnight',
     ('activity_monitor', 'inactivity_idle_start'): 'inactivity_idle_start',
     ('activity_monitor', 'inactivity_idle_end'): 'inactivity_idle_end',
-    ('activity_monitor', 'steps_activity'): 'steps_activity_detected',
-    ('activity_monitor', 'steps_inactivity'): 'steps_inactivity_detected',
+    # steps_activity_detected / steps_inactivity_detected are runtime states, not settings: not mapped
     ('flags', 'high_temptarget_raises_sensitivity'): 'high_temptarget_raises_sensitivity',
     ('flags', 'low_temptarget_lowers_sensitivity'): 'low_temptarget_lowers_sensitivity',
     ('flags', 'sensitivity_raises_target'): 'sensitivity_raises_target',

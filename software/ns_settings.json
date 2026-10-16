@@ -61,7 +61,7 @@
     "smb_delivery_ratio": 0.2,
     "smb_delivery_ratio_min": 0.1,
     "smb_delivery_ratio_max": 0.5,
-    "smb_delivery_ratio_bg_range": 36.0,
+    "smb_delivery_ratio_bg_range": 18.0,
     "smb_max_range_extension": 1.8,
     "iob_threshold_percent": 80
   },
@@ -92,10 +92,8 @@
     "ignore_inactivity_overnight": true,
     "inactivity_idle_start": 22,
     "inactivity_idle_end": 6,
-    "steps_activity": true,
-    "steps_inactivity": false,
     "activity_ratio": 0.67,
-    "_source_of_state": "Nightscout has no step counts. The activity state per loop is taken from the original consoleError line 'Activity monitor ...' and translated into synthetic step counts that reproduce that state, so the scale factors above stay tunable."
+    "_source_of_state": "Nightscout has no step counts. The activity state per loop is taken from the original consoleError line 'Activity monitor ...' and translated into synthetic step counts that reproduce that state, so the scale factors above stay tunable. The export keys steps_activity_detected / steps_inactivity_detected are runtime states (they flip with the user's movement) and are not imported."
   },
   "flags": {
     "exercise_mode": false,
@@ -129,10 +127,45 @@
         "to": 1.5
       },
       {
+        "when": "2026-09-07T20:49:00+02:00",
+        "parameter": "smb_delivery_ratio_bg_range",
+        "from": 36.0,
+        "to": 18.0,
+        "note": "2.0 -> 1.0 mmol in the AAPS preferences; mg/dl here"
+      },
+      {
         "when": "2026-09-07T22:03:00+02:00",
         "parameter": "smb_max_range_extension",
         "from": 1.15,
         "to": 1.8
+      },
+      {
+        "when": "2026-09-23T09:18:00+02:00",
+        "parameter": "profile ISF (mmol/U)",
+        "from": 5.1,
+        "to": 4.4,
+        "note": "profile store document 2026-09-23T07:18Z (Lyumjev FCL); the replay reads the store, this entry is a confounder marker"
+      },
+      {
+        "when": "2026-09-23T19:25:00+02:00",
+        "parameter": "profile ISF (mmol/U)",
+        "from": 4.4,
+        "to": 4.0,
+        "note": "profile store document 2026-09-23T17:25Z"
+      },
+      {
+        "when": "2026-10-14T05:02:00+02:00",
+        "parameter": "profile ISF (mmol/U)",
+        "from": 4.0,
+        "to": 3.7,
+        "note": "profile store document 2026-10-14T03:02Z"
+      },
+      {
+        "when": "2026-10-16T20:42:00+02:00",
+        "parameter": "steps_graph_from_smartphone",
+        "from": true,
+        "to": false,
+        "note": "between the exports of 09:23 and 20:42 local; the activity state per loop still comes from the consoleError echo"
       }
     ]
   },
@@ -221,12 +254,10 @@
   },
   "_overrides": {
     "_about": "Keys ns_prefs_import.py must NOT overwrite from an export because the value was fitted to the phone's echoes (see _assumed for the evidence). Remove a key here once a fresh export explains the value.",
-    "smb.smb_delivery_ratio_bg_range": 36.0,
-    "smb.smb_max_range_extension": 1.8,
     "flags.low_temptarget_lowers_sensitivity": false
   },
   "_assumed": {
-    "smb.smb_delivery_ratio_bg_range": "fitted from the printed 'SMB delivery ratio set to interpolated value' lines 2026-09-01..07 (3025/3025 lines reproduced with 36 mg/dl = 2.0 mmol, 0/3025 with 18); the export summary says 1.0 mmol - unexplained. Listed in _overrides so ns_prefs_import keeps it.",
+    "smb.smb_delivery_ratio_bg_range": "1.0 mmol = 18 mg/dl since the export of 2026-09-07 20:49 local (the previous export, 20:02, still had 2.0 mmol). Checked against the printed 'SMB delivery ratio set to interpolated value' lines: 36 reproduces 236/236 (06.Sep) and 112/112 (07.Sep), 18 reproduces 229/229 (15.Sep) and 21/21 (10.Oct). profile_history rewinds loops before the change to 36.",
     "safety.bolus_increment": "Omnipod Dash",
     "flags.half_basal_exercise_target": "8.9 mmol (160.2 mg/dl); determine_basal.py multiplies by 18 for mmol users of autoISF >= 3.1",
     "insulin.peak_minutes": "Lyumjev plugin = 45 min; DIA taken from the Nightscout profile (6 h)",
@@ -235,14 +266,14 @@
     "safety.basal_step": "Omnipod Dash basal resolution 0.05 U/h (used to round current_basal like the pump does)",
     "flags.high_temptarget_raises_sensitivity": "false per export",
     "safety.remainingCarbsCap / maxCOB": "AAPS defaults (not in export)",
-    "smb.smb_max_range_extension": "1.8 fits the phone's 'maxBolus: 1.1' (= round(x * 0.15 U/h * 240 min / 60, 1), x in [1.75, 1.92)) printed from 2026-09-07 20:03Z on; the export of 18:49Z still had 1.15 (maxBolus 0.7). Replace by the value of a fresh export; the change is in profile_history. Listed in _overrides so ns_prefs_import keeps it until then."
+    "smb.smb_max_range_extension": "1.8 per the export of 2026-10-16 (changed from 1.15 on 2026-09-07 22:03 local, see profile_history); no longer pinned"
   },
   "glucose": {
     "always_use_shortavg": false
   },
   "_import": {
-    "source": "2026-09-07_204925_full.json",
-    "created_at": "2026-09-07T18:49:26.037Z",
+    "source": "2026-10-16_204221_full.json",
+    "created_at": "2026-10-16T18:42:21.429Z",
     "aaps_version": "3.4.2.6dev+aisf3.2.1",
     "device": "samsung SM-S921B (e1s)",
     "tool": "ns_prefs_import.py"
