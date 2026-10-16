@@ -10,7 +10,8 @@ import copy
 #import setTempBasal as tempBasalFunctions
 
 def get_version_determine_basal(echo_msg):
-    echo_msg['determine_basal.py'] = '2026-10-16 13:00'         ### UAMduration rounded half up like the JS round(x,1), was Python round (half to even)
+    echo_msg['determine_basal.py'] = '2026-10-17 00:30'         ### phone fidelity on 3.3+: 6 s SMB tolerance, kround() half-up at 65 sites, unrounded threshold, naive_eventualBG with autoISF sens, floor for bolus steps, fractionCarbsLeft guard, round_basal identity, zero-temp caps, normalTarget 99
+    #cho_msg['determine_basal.py'] = '2026-10-16 13:00'         ### UAMduration rounded half up like the JS round(x,1), was Python round (half to even)
     #cho_msg['determine_basal.py'] = '2026-09-08 04:00'         ### AAPS 3.3+: determine_varSMBratio gets the truncated bg like the Kotlin Int parameter
     #cho_msg['determine_basal.py'] = '2026-01-05 10:50'         ### half-basal_exercise_target allowed in mmol/L
     #cho_msg['determine_basal.py'] = '2025-07-18 15:36'         ### drift_ISF prototype
@@ -19,7 +20,7 @@ def get_version_determine_basal(echo_msg):
     #cho_msg['determine_basal.py'] = '2025-04-20 01:04'         ### extension for state automation
     return echo_msg
 
-def round_basal(value, dummy) :
+def round_basal(value, profile) :
     # copied to setTempBasal, too !!!
     # initially fixed
     #return round(value, 2)
@@ -28,7 +29,25 @@ def round_basal(value, dummy) :
     #function round(value, digits):
     #    if (! digits) { digits = 0; }
     #    var scale = Math.pow(10, digits);
+    #// Kotlin DetermineBasalAutoISF.kt:40: fun round_basal(value: Double): Double = value   (identity; RT.rate is serialised raw)
+    if isinstance(profile, dict) and profile.get('new_parameter', {}).get('AAPS_Version') == '3.3' :
+        return value            # AAPS 3.3+ / Nightscout: no rounding, like the Kotlin
     return round(value, 3)      # make it compatible with logfile format; was 4, as of 3.2.0.2 using 3
+
+#// Kotlin DetermineBasalAutoISF.kt:44-51: fun round(value, digits) = Math.round(value * scale) / scale ; fun round(value) = value.roundToInt()
+#// both round ties towards +inf (2.5 -> 3, -2.5 -> -2, 0.125 -> 0.13); Python's builtin round() rounds ties to even (2.5 -> 2, 0.125 -> 0.12)
+def kround(value, digits=None) :
+    # digits None mirrors the Int overload (as Python round(x) returns int); digits given mirrors the Double overload
+    if not math.isfinite(value) :                            # NaN / inf pass through like Python's round(x, n) and Kotlin's Math.round(x * scale) / scale
+        return value
+    if digits is None :
+        r = math.floor(value)                               # Java Math.round(x) == floor(x + 0.5), exact also for 0.49999999999999994
+        return int(r + 1) if value - r >= 0.5 else int(r)
+    scale = 10.0 ** digits
+    v = value * scale
+    r = math.floor(v)
+    if v - r >= 0.5 : r += 1
+    return r / scale
 
 #// we expect BG to rise or fall at the rate of BGI,
 #// adjusted by the rate at which BG would need to rise /
@@ -37,7 +56,7 @@ def calculate_expected_delta(target_bg, eventual_bg, bgi):
     #// (hours * mins_per_hour) / 5 = how many 5 minute periods in 2h = 24
     five_min_blocks = (2 * 60) / 5
     target_delta = target_bg - eventual_bg
-    expectedDelta = round(bgi + (target_delta / five_min_blocks), 1)
+    expectedDelta = kround(bgi + (target_delta / five_min_blocks), 1)
     return expectedDelta
 
 def convert_bg(value, profile):
@@ -491,8 +510,8 @@ def autoISF(sens, origin_sens, target_bg, profile, glucose_status, meal_data, cu
         bg_acce = glucose_status['bg_acceleration']
         if (glucose_status['parabola_fit_a2']!=0 and fit_corr>=corr_Min): 
             minmax_delta = - glucose_status['parabola_fit_a1']/2/glucose_status['parabola_fit_a2'] * 5       #// back from 5min block  1 min
-            minmax_value = round(glucose_status['parabola_fit_a0'] - minmax_delta*minmax_delta/25*glucose_status['parabola_fit_a2'], 1)
-            minmax_delta = round(minmax_delta, 1)
+            minmax_value = kround(glucose_status['parabola_fit_a0'] - minmax_delta*minmax_delta/25*glucose_status['parabola_fit_a2'], 1)
+            minmax_delta = kround(minmax_delta, 1)
             if (minmax_delta>0 and bg_acce<0) :
                 console_error("Parabolic fit extrapolates a maximum of", short(convert_bg(minmax_value,profile)), "in about", short(minmax_delta), "minutes")
             elif (minmax_delta>0 and bg_acce>0) :
@@ -551,7 +570,7 @@ def autoISF(sens, origin_sens, target_bg, profile, glucose_status, meal_data, cu
         final_ISF = withinISFlimits(liftISF, profile['autoISF_min'], maxISFReduction, sensitivityRatio, origin_sens, exerciseModeActive, resistanceModeActive, stepActivityDetected, stepInactivityDetected) 
         emulAI_ratio[-1] = final_ISF * 10
         Fcasts['emulISF'] = min(720, profile['sens'] / final_ISF)
-        return min(720, round(profile['sens'] / final_ISF, 1))                                              #// mod V14j: observe ISF maximum of 720(?)
+        return min(720, kround(profile['sens'] / final_ISF, 1))                                              #// mod V14j: observe ISF maximum of 720(?)
     elif ( bg_ISF > 1 ) :
         sens_modified = True
 
@@ -640,7 +659,7 @@ def autoISF(sens, origin_sens, target_bg, profile, glucose_status, meal_data, cu
         final_ISF = withinISFlimits(liftISF, profile['autoISF_min'], maxISFReduction, sensitivityRatio, origin_sens, exerciseModeActive, resistanceModeActive, stepActivityDetected, stepInactivityDetected) 
         emulAI_ratio[-1] = final_ISF * 10
         Fcasts['emulISF'] = profile['sens'] / final_ISF
-        return round(profile['sens'] / final_ISF, 1)
+        return kround(profile['sens'] / final_ISF, 1)
     #else:
     console_error("----------------------------------")
     console_error("end AutoISF")
@@ -789,7 +808,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
 
     systemTime = thisTime       # int(round(time.time() * 1000)) was real time, not the historical time
     bgTime = glucose_status['date']
-    minAgo = round( (systemTime - bgTime) / 60 / 1000 ,1)
+    minAgo = kround( (systemTime - bgTime) / 60 / 1000 ,1)
 
     bg = glucose_status['glucose']
     if 'noise' in glucose_status:
@@ -900,7 +919,10 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     if  gz_proto :  #and profile['exercise_mode']:
         fullBasalTarget = profile['full_basal_exercise_target']
     else :
-        fullBasalTarget = 100       #// when temptarget is 100 mg/dL, run 100% basal
+        if AAPS_Version == '3.3' :
+            fullBasalTarget = profile.get('normal_target', 99)   #// Kotlin: val normalTarget = Constants.NORMAL_TARGET_MGDL (99, AAPS >= 3.4.2.1)
+        else :
+            fullBasalTarget = 100       #// when temptarget is 100 mg/dL, run 100% basal
         #// 80 mg/dL with low_temptarget_lowers_sensitivity would give 1.5x basal, but is limited to autosens_max (1.2x by default)
        
     normalTarget = fullBasalTarget  #// was 100;    // evaluate high/low temptarget against 100, not scheduled basal/target (which might change)
@@ -932,7 +954,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             else:
                 sensitivityRatio = c/(c+target_bg-normalTarget)
             sensitivityRatio = min(sensitivityRatio, resistanceMax)
-            sensitivityRatio = round(sensitivityRatio,2)
+            sensitivityRatio = kround(sensitivityRatio,2)
             exercise_ratio = sensitivityRatio
             origin_sens = " from TT modifier"
             if gz_proto:
@@ -985,9 +1007,9 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         if ( profile['sensitivity_raises_target'] and autosens_data['ratio'] < 1 or profile['resistance_lowers_target'] and autosens_data['ratio'] > 1 ):
             Flows.append(dict(title='True', indent='+1', adr='155'))
             #// with a target of 100, default 0.7-1.2 autosens min/max range would allow a 93-117 target range
-            min_bg = round((min_bg - 60) / autosens_data['ratio']) + 60
-            max_bg = round((max_bg - 60) / autosens_data['ratio']) + 60
-            new_target_bg = round((target_bg - 60) / autosens_data['ratio']) + 60
+            min_bg = kround((min_bg - 60) / autosens_data['ratio']) + 60
+            max_bg = kround((max_bg - 60) / autosens_data['ratio']) + 60
+            new_target_bg = kround((target_bg - 60) / autosens_data['ratio']) + 60
             #// don't allow target_bg below 80
             new_target_bg = max(80, new_target_bg)
             Flows.append(dict(title="Checking:\ndon't allow\ntarget_bg < 80", indent='+0', adr='161'))
@@ -1026,12 +1048,12 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     minAvgDelta = min(glucose_status['short_avgdelta'], glucose_status['long_avgdelta'])
     maxDelta = max(glucose_status['delta'], glucose_status['short_avgdelta'], glucose_status['long_avgdelta'])
 
-    profile_sens = round(profile['sens'],1)
+    profile_sens = kround(profile['sens'],1)
     sens = profile['sens']
     #Fcasts['origISF'] = sens
     if (typeof (autosens_data) != 'undefined' and autosens_data):
         sens = profile['sens'] / sensitivityRatio
-        sens = round(sens, 1)
+        sens = kround(sens, 1)
         Flows.append(dict(title="checking impact of\nautosens ratio("+str(sensitivityRatio)+")", indent='0', adr='203'))
         if (sens != profile_sens):
             Flows.append(dict(title="ISF from "+str(profile_sens)+"\nto "+str(sens), indent='+1', adr='204'))
@@ -1194,26 +1216,27 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         #//}
 
     #//calculate BG impact: the amount BG "should" be rising or falling based on insulin activity alone
-    bgi = round(( -iob_data['activity'] * sens * 5 ), 2)
+    bgi = kround(( -iob_data['activity'] * sens * 5 ), 2)
     #// project deviations for 30 minutes
-    deviation = round( 30 / 5 * ( minDelta - bgi ) )
+    deviation = kround( 30 / 5 * ( minDelta - bgi ) )
     #// don't overreact to a big negative delta: use minAvgDelta if deviation is negative
     Flows.append(dict(title='checking\ndeviation<0', indent='0', adr='255'))
     if (deviation < 0):
         Flows.append(dict(title="True; checking\nminAvgDelta("+str(round(minAvgDelta,1))+") based\ndeviation<0", indent='+1', adr='256'))
-        deviation = round( (30 / 5) * ( minAvgDelta - bgi ) )
+        deviation = kround( (30 / 5) * ( minAvgDelta - bgi ) )
         #// and if deviation is still negative, use long_avgdelta
         if (deviation < 0):
             Flows.append(dict(title="True; use\nlong_avgdelta("+str(round(glucose_status['long_avgdelta'],1))+")\nbased deviation", indent='+1', adr='259'))
-            deviation = round( (30 / 5) * ( glucose_status['long_avgdelta'] - bgi ) )
+            deviation = kround( (30 / 5) * ( glucose_status['long_avgdelta'] - bgi ) )
 
     #// calculate the naive (bolus calculator math) eventual BG based on net IOB and sensitivity
-    Flows.append(dict(title='checking\niob > 0', indent='0', adr='264'))
-    if (iob_data['iob'] > 0):
-        naive_eventualBG = round( bg - (iob_data['iob'] * sens) )
+    #// Kotlin DetermineBasalAutoISF.kt:359-366: if (autoIsfMode) round(bg - iob*sens, 0) for any IOB sign; autoIsfMode is hard-wired true in the autoISF plugin (3.3+); plain OpenAPSSMB logs keep the oref0 branch
+    Flows.append(dict(title='checking\niob > 0\nor autoIsfMode', indent='0', adr='264'))
+    if ((AAPS_Version == '3.3' and profile['enable_autoISF']) or iob_data['iob'] > 0):
+        naive_eventualBG = kround( bg - (iob_data['iob'] * sens) )
         Flows.append(dict(title="True\nnaive eventual BG("+str(naive_eventualBG)+")\nbased on sensitivity", indent='+1', adr='265'))
     else: #// if IOB is negative, be more conservative and use the lower of sens, profile.sens
-        naive_eventualBG = round( bg - (iob_data['iob'] * min(sens, profile['sens']) ) )
+        naive_eventualBG = kround( bg - (iob_data['iob'] * min(sens, profile['sens']) ) )
         Flows.append(dict(title="False\nnaive eventual BG("+str(naive_eventualBG)+")\nbased on min(sens,profile['sens']", indent='+1', adr='267'))
     #// and adjust it for the deviation above
     eventualBG = naive_eventualBG + deviation
@@ -1243,9 +1266,9 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     elif ( bg > max_bg and profile['adv_target_adjustments'] and not profile['temptargetSet'] ):
         Flows.append(dict(title='True; calculate\nreduced targets', indent='+1', adr='280'))
         #// with target=100, as BG rises from 100 to 160, adjustedTarget drops from 100 to 80
-        adjustedMinBG   = round(max(80, min_bg    - (bg - min_bg)   /3 ),0)
-        adjustedTargetBG= round(max(80, target_bg - (bg - target_bg)/3 ),0)
-        adjustedMaxBG   = round(max(80, max_bg    - (bg - max_bg)   /3 ),0)
+        adjustedMinBG   = kround(max(80, min_bg    - (bg - min_bg)   /3 ),0)
+        adjustedTargetBG= kround(max(80, target_bg - (bg - target_bg)/3 ),0)
+        adjustedMaxBG   = kround(max(80, max_bg    - (bg - max_bg)   /3 ),0)
         #// if eventualBG, naive_eventualBG, and target_bg aren't all above adjustedMinBG, don’t use it
         #//console_error("naive_eventualBG:",naive_eventualBG+", eventualBG:",eventualBG);
         Flows.append(dict(title='checking\nreduced MinBG\ntoo low', indent='+1',  adr='286'))
@@ -1284,9 +1307,13 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     #// min_bg of 90 -> threshold of 65, 100 -> 70 110 -> 75, and 130 -> 85
     #### GZ mod 5: threshold is too low at low targets; see "...PID/Übergänge der AAPS Parameter.ods"
     threshold_ratio = new_parameter['thresholdRatio']                                       #### gz Mod 5 status 26.Jun.2020
-    threshold = threshold_ratio * min_bg + 20                                               #### factor was 0.5
-    if min_bg<=98 and threshold_ratio>0.5:  threshold = threshold + pow(98-min_bg, 2) / 98  #### reduce less and stay >=70
-    threshold = round(threshold, 0)                                                         ####
+    if AAPS_Version == '3.3' and threshold_ratio == 0.5:                                    # AAPS default: Kotlin DetermineBasalAutoISF.kt:403 keeps the fraction, no rounding
+        #//val threshold = min_bg - 0.5 * (min_bg - 40)
+        threshold = min_bg - 0.5 * (min_bg - 40)
+    else:                                                                                   # gz what-ifs (thresholdRatio != 0.5) and older AAPS paths: unchanged
+        threshold = threshold_ratio * min_bg + 20                                           #### factor was 0.5
+        if min_bg<=98 and threshold_ratio>0.5:  threshold = threshold + pow(98-min_bg, 2) / 98  #### reduce less and stay >=70
+        threshold = round(threshold, 0)                                                     ####
     #//console_error(reservoir_data);
 
     rT = {
@@ -1328,8 +1355,8 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     cid = 0
     #// calculate current carb absorption rate, and how long to absorb all carbs
     #// CI = current carb impact on BG in mg/dL/5m
-    ci = round((minDelta - bgi),1)
-    uci = round((minDelta - bgi),1)
+    ci = kround((minDelta - bgi),1)
+    uci = kround((minDelta - bgi),1)
     #// ISF (mg/dL/U) / CR (g/U) = CSF (mg/dL/g)
     Flows.append(dict(title='checking\ntemptargetSet', indent='0', adr='422'))
     if (profile['temptargetSet'] and AAPS_Version=='<2.7') :
@@ -1344,7 +1371,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     console_error("profile.sens:",short(round(profile['sens'],1)),"sens:",short(round(sens,1)),"CSF:",round(csf,2));
     maxCarbAbsorptionRate = 30      #// g/h; maximum rate to assume carbs will absorb if no CI observed
     #// limit Carb Impact to maxCarbAbsorptionRate * csf in mg/dL per 5m
-    maxCI = round(maxCarbAbsorptionRate*csf*5/60,1)
+    maxCI = kround(maxCarbAbsorptionRate*csf*5/60,1)
     if (ci > maxCI) :
         Flows.append(dict(title="Limiting carb impact\nfrom "+str(ci)+" to\n"+str(maxCI)+" mg/dL/5m ("+str(maxCarbAbsorptionRate)+"g/h)", indent='0', adr='434'))
         console_error("Limiting carb impact from "+str(short(ci))+" to "+str(maxCI)+" mg/dL/5m (", str(maxCarbAbsorptionRate), "g/h )")
@@ -1368,12 +1395,12 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         #// so <= 90g is assumed to take 3h, and 120g=4h
         Flows.append(dict(title="raise remainingCATimeMin\nso <= 90g take 3h\nand 120g=4h", indent='+1', adr='452'))
         remainingCATimeMin = max(remainingCATimeMin, meal_data['mealCOB']/assumedCarbAbsorptionRate)
-        lastCarbAge = round(( thisTime - meal_data['lastCarbTime'] ) / 60000)
+        lastCarbAge = kround(( thisTime - meal_data['lastCarbTime'] ) / 60000)
         #//console_error(meal_data.lastCarbTime, lastCarbAge);
 
         fractionCOBAbsorbed = ( meal_data['carbs'] - meal_data['mealCOB'] ) / meal_data['carbs']
         remainingCATime = remainingCATimeMin + 1.5 * lastCarbAge/60
-        remainingCATime = round(remainingCATime,1)
+        remainingCATime = kround(remainingCATime,1)
         #//console_error(fractionCOBAbsorbed, remainingCATimeAdjustment, remainingCATime)
         console_error("Last carbs "+str(lastCarbAge)+" minutes ago; remainingCATime:", short(remainingCATime), "hours;", str(round(fractionCOBAbsorbed*100))+"% carbs absorbed")
 
@@ -1398,9 +1425,9 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     #//if (meal_data.mealCOB * 3 > meal_data.carbs) { }
 
     #// calculate peak deviation in last hour, and slope from that to current deviation
-    slopeFromMaxDeviation = round(meal_data['slopeFromMaxDeviation'],2)
+    slopeFromMaxDeviation = kround(meal_data['slopeFromMaxDeviation'],2)
     #// calculate lowest deviation in last hour, and slope from that to current deviation
-    slopeFromMinDeviation = round(meal_data['slopeFromMinDeviation'],2)
+    slopeFromMinDeviation = kround(meal_data['slopeFromMinDeviation'],2)
     #// assume deviations will drop back down at least at 1/3 the rate they ramped up
     slopeFromDeviations = min(slopeFromMaxDeviation,-slopeFromMinDeviation/3)
     #//console_error(slopeFromMaxDeviation);
@@ -1452,11 +1479,11 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             icount += 1             #### position in iobArry; to flag where minima were found
             #//console_error(iobTick);
             if 'activity' in iobTick:
-                predBGI = round(( -iobTick['activity'] * sens * 5 ), 2)
+                predBGI = kround(( -iobTick['activity'] * sens * 5 ), 2)
             else:
                 predBGI = 0         # disappeared from json in 3.3-dev
             if 'activity' in iobTick['iobWithZeroTemp']:
-                predZTBGI = round(( -iobTick['iobWithZeroTemp']['activity'] * sens * 5 ), 2)
+                predZTBGI = kround(( -iobTick['iobWithZeroTemp']['activity'] * sens * 5 ), 2)
             else:
                 predZTBGI = 0       # disappeared from json in 3.3-dev
             #// for IOBpredBGs, predicted deviation impact drops linearly from current deviation down to zero
@@ -1503,16 +1530,16 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             if ( len(ZTpredBGs)   < 48) : ZTpredBGs.append(ZTpredBG)
             #// calculate minGuardBGs without a wait from COB, UAM, IOB predBGs
             if ( COBpredBG < minCOBGuardBG ) : 
-                minCOBGuardBG = round(COBpredBG)
+                minCOBGuardBG = kround(COBpredBG)
                 minCOBGuardPos = icount
             if ( UAMpredBG < minUAMGuardBG ) : 
-                minUAMGuardBG = round(UAMpredBG)
+                minUAMGuardBG = kround(UAMpredBG)
                 minUAMGuardPos = icount
             if ( IOBpredBG < minIOBGuardBG ) : 
                 minIOBGuardBG  = round(IOBpredBG)
                 minIOBGuardPos = icount
             if ( ZTpredBG < minZTGuardBG ) : 
-                minZTGuardBG = round(ZTpredBG)
+                minZTGuardBG = kround(ZTpredBG)
                 minZTGuardPos = icount
             #console_error('diag: row 552 --> round(ZTpredBG)=', round(ZTpredBG), 'minZTGuardBG:', minZTGuardBG)
 
@@ -1525,12 +1552,12 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             #//console_error(insulinPeakTime, insulinPeak5m, profile.insulinPeakTime, profile.curve);
 
             #// wait 90m before setting minIOBPredBG
-            if ( len(IOBpredBGs) > insulinPeak5m and (IOBpredBG < minIOBPredBG) ) : minIOBPredBG = round(IOBpredBG)
+            if ( len(IOBpredBGs) > insulinPeak5m and (IOBpredBG < minIOBPredBG) ) : minIOBPredBG = kround(IOBpredBG)
             if                                      ( IOBpredBG > maxIOBPredBG )  : maxIOBPredBG = IOBpredBG
             #// wait 85-105m before setting COB and 60m for UAM minPredBGs
-            if ( (cid or remainingCIpeak > 0) and len(COBpredBGs) > insulinPeak5m and (COBpredBG < minCOBPredBG) ) : minCOBPredBG = round(COBpredBG)
+            if ( (cid or remainingCIpeak > 0) and len(COBpredBGs) > insulinPeak5m and (COBpredBG < minCOBPredBG) ) : minCOBPredBG = kround(COBpredBG)
             if ( (cid or remainingCIpeak > 0) and COBpredBG > maxIOBPredBG ) : maxCOBPredBG = COBpredBG
-            if ( enableUAM and len(UAMpredBGs) > 12 and (UAMpredBG < minUAMPredBG) ) : minUAMPredBG = round(UAMpredBG)
+            if ( enableUAM and len(UAMpredBGs) > 12 and (UAMpredBG < minUAMPredBG) ) : minUAMPredBG = kround(UAMpredBG)
             if ( enableUAM and UAMpredBG > maxIOBPredBG ) : maxUAMPredBG = UAMpredBG
             
             #console_error('diag: interims predBGI=', predBGI, 'predZTBGI=', predZTBGI, 'predDev=', predDev, 'predCI=', predCI, 'remainingCI=', remainingCI)
@@ -1563,15 +1590,15 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     rT['predBGs'] = {}
     Flows.append(dict(title="limit initial pred\nto range 39-401\ntruncate constant tails", indent='+1', adr='610-671'))
     for i in range(len(IOBpredBGs)) :
-        IOBpredBGs[i] = round(min(401,max(39,IOBpredBGs[i])))
+        IOBpredBGs[i] = kround(min(401,max(39,IOBpredBGs[i])))
     for i in reversed(range(13, len(IOBpredBGs))) :
         if (IOBpredBGs[i-1] != IOBpredBGs[i]) : break
         else : IOBpredBGs.pop()
     
     rT['predBGs']['IOB'] = IOBpredBGs
-    lastIOBpredBG=round(IOBpredBGs[len(IOBpredBGs)-1])
+    lastIOBpredBG=kround(IOBpredBGs[len(IOBpredBGs)-1])
     for  i,p in enumerate(ZTpredBGs) :
-        ZTpredBGs[i] = round(min(401,max(39,p)))
+        ZTpredBGs[i] = kround(min(401,max(39,p)))
     for i in reversed(range(7, len(ZTpredBGs))) :
         #//if (ZTpredBGs[i-1] != ZTpredBGs[i]) { break; }
         #// stop displaying ZTpredBGs once they're rising and above target
@@ -1581,7 +1608,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     lastZTpredBG=round(ZTpredBGs[len(ZTpredBGs)-1])
     if (meal_data['mealCOB'] > 0) :
         for  i,p in enumerate(aCOBpredBGs) :
-            aCOBpredBGs[i] = round(min(401,max(39,p)))
+            aCOBpredBGs[i] = kround(min(401,max(39,p)))
         for i in reversed(range(13, len(aCOBpredBGs))) :
             if (aCOBpredBGs[i-1] != aCOBpredBGs[i]) : break
             else : aCOBpredBGs.pop()
@@ -1589,25 +1616,25 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         #//rT.predBGs.aCOB = aCOBpredBGs;
     if (meal_data['mealCOB'] > 0 and ( ci > 0 or remainingCIpeak > 0 )) :
         for  i,p in enumerate(COBpredBGs) :
-            COBpredBGs[i] = round(min(401,max(39,p)));
+            COBpredBGs[i] = kround(min(401,max(39,p)));
         for i in reversed(range(13, len(COBpredBGs))) :
             if (COBpredBGs[i-1] != COBpredBGs[i]) : break
             else : COBpredBGs.pop()
         rT['predBGs']['COB'] = COBpredBGs
         lastCOBpredBG=round(COBpredBGs[len(COBpredBGs)-1])
-        eventualBG = max(eventualBG, round(COBpredBGs[len(COBpredBGs)-1]) )
+        eventualBG = max(eventualBG, kround(COBpredBGs[len(COBpredBGs)-1]) )
 
     if (ci > 0 or remainingCIpeak > 0) :
         if (enableUAM) :
             for  i,p in enumerate(UAMpredBGs) :
-                UAMpredBGs[i] = round(min(401,max(39,p)))
+                UAMpredBGs[i] = kround(min(401,max(39,p)))
             for i in reversed(range(13, len(UAMpredBGs))) :
                 if (UAMpredBGs[i-1] != UAMpredBGs[i]) : break
                 else : UAMpredBGs.pop()
             rT['predBGs']['UAM'] = UAMpredBGs
             lastUAMpredBG=round(UAMpredBGs[len(UAMpredBGs)-1])
             if (UAMpredBGs[len(UAMpredBGs)-1]) :
-                eventualBG = max(eventualBG, round(UAMpredBGs[len(UAMpredBGs)-1]) )
+                eventualBG = max(eventualBG, kround(UAMpredBGs[len(UAMpredBGs)-1]) )
 
         #// set eventualBG and snoozeBG based on COB or UAM predBGs
         rT['eventualBG'] = eventualBG
@@ -1617,27 +1644,27 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     minIOBPredBG = max(39,minIOBPredBG)
     minCOBPredBG = max(39,minCOBPredBG)
     minUAMPredBG = max(39,minUAMPredBG)
-    minPredBG = round(minIOBPredBG)
+    minPredBG = kround(minIOBPredBG)
     #console_error("diag: row 636 --> minPredBG:", minPredBG)
 
-    if meal_data['carbs'] :         # extra line to avoid div!0 error
-        fractionCarbsLeft = meal_data['mealCOB']/meal_data['carbs']
+    #// val fractionCarbsLeft = if (meal_data.carbs > 0) meal_data.mealCOB / meal_data.carbs else 0.0   (Kt:691, phone guard: carbs 0 with mealCOB > 0 after the 6 h cutoff)
+    fractionCarbsLeft = meal_data['mealCOB']/meal_data['carbs'] if meal_data['carbs'] > 0 else 0.0
     #// if we have COB and UAM is enabled, average both
     Flows.append(dict(title="how to find\navgPredBG", indent='0', adr='683'))
     if ( minUAMPredBG < 999 and minCOBPredBG < 999 ) :
         #// weight COBpredBG vs. UAMpredBG based on how many carbs remain as COB
-        avgPredBG = round( (1-fractionCarbsLeft)*UAMpredBG + fractionCarbsLeft*COBpredBG )
+        avgPredBG = kround( (1-fractionCarbsLeft)*UAMpredBG + fractionCarbsLeft*COBpredBG )
         Flows.append(dict(title=str(avgPredBG)+"; blend of\nUAMpredBG("+str(round(UAMpredBG))+")\nCOBpredBG("+str(round(COBpredBG))+")", indent='+1', adr='685'))
     #// if UAM is disabled, average IOB and COB
     elif ( minCOBPredBG < 999 ) :
-        avgPredBG = round( (IOBpredBG + COBpredBG)/2 )
+        avgPredBG = kround( (IOBpredBG + COBpredBG)/2 )
         Flows.append(dict(title=str(avgPredBG)+"; avg of\nIOBpredBG("+str(round(IOBpredBG))+")\nCOBpredBG("+str(round(COBpredBG))+")\nUAM disabled", indent='+1', adr='688'))
     #// if we have UAM but no COB, average IOB and UAM
     elif ( minUAMPredBG < 999 ) :
-        avgPredBG = round( (IOBpredBG + UAMpredBG)/2 )
+        avgPredBG = kround( (IOBpredBG + UAMpredBG)/2 )
         Flows.append(dict(title=str(avgPredBG)+"; weighted avg of\nUAMpredBG("+str(round(UAMpredBG))+")\nIOBpredBG("+str(round(IOBpredBG))+")\nno COB", indent='+1', adr='691'))
     else :
-        avgPredBG = round( IOBpredBG )
+        avgPredBG = kround( IOBpredBG )
         Flows.append(dict(title=str(avgPredBG)+"; just from\nIOBpredBG", indent='+1', adr='693'))
     #// if avgPredBG is below minZTGuardBG, bring it up to that level
     if ( minZTGuardBG > avgPredBG ) :
@@ -1686,7 +1713,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         minGuardSource = 'COB'
         minGuardSource = 'IOB'
         minGuardPos = minIOBGuardPos
-    minGuardBG = round(minGuardBG)
+    minGuardBG = kround(minGuardBG)
     #//console_error(minCOBGuardBG, minUAMGuardBG, minIOBGuardBG, minGuardBG);
 
     minZTUAMPredBG = minUAMPredBG
@@ -1709,7 +1736,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     elif ( minZTGuardBG > minUAMPredBG ) :
         minZTUAMPredBG = (minUAMPredBG + minZTGuardBG) / 2
         Flows.append(dict(title=str(minZTUAMPredBG)+"; avg of\nminZTGuardBG("+str(minZTGuardBG)+")\nminUAMPredBG("+str(minUAMPredBG)+")", indent='+1', adr='730'))
-    minZTUAMPredBG = round(minZTUAMPredBG)
+    minZTUAMPredBG = kround(minZTUAMPredBG)    #// Kotlin Kt:742 round(minZTUAMPredBG, 0) half-up; the .5 average flips minPredBG by 1 mg/dl on ~5 % of the loops
     #//console_error("minUAMPredBG:",minUAMPredBG,"minZTGuardBG:",minZTGuardBG,"minZTUAMPredBG:",minZTUAMPredBG);
     #// if any carbs have been entered recently
     if (meal_data['carbs']) :
@@ -1725,7 +1752,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         Flows.append(dict(title="how to find\nminPredBG ?", indent='0', adr='746'))
         #// if UAM is disabled, use max of minIOBPredBG, minCOBPredBG
         if ( not enableUAM and minCOBPredBG < 999 ) :
-            minPredBG = round(max(minIOBPredBG, minCOBPredBG))
+            minPredBG = kround(max(minIOBPredBG, minCOBPredBG))
             Flows.append(dict(title=str(minPredBG)+"; max of\nminIOBPredBG\nminCOBPredBG", indent='+1', adr='747'))
             #console_error("diag: row 700 --> minPredBG:", minPredBG)
         #// if we have COB, use minCOBPredBG, or blendedMinPredBG if it's higher
@@ -1734,7 +1761,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             #//blendedMinPredBG = fractionCarbsLeft*minCOBPredBG + (1-fractionCarbsLeft)*minUAMPredBG;
             blendedMinPredBG = fractionCarbsLeft*minCOBPredBG + (1-fractionCarbsLeft)*minZTUAMPredBG
             #// if blendedMinPredBG > minCOBPredBG, use that instead
-            minPredBG = round(max(minIOBPredBG, minCOBPredBG, blendedMinPredBG))
+            minPredBG = kround(max(minIOBPredBG, minCOBPredBG, blendedMinPredBG))
             Flows.append(dict(title=str(minPredBG)+"; blend of\nminIOBPredBG("+str(minIOBPredBG)+")\nminCOBPredBG("+str(minCOBPredBG)+")\nminZTUAMPredBG("+str(minZTUAMPredBG)+")", indent='+1', adr='754'))
             #console_error("diag: row 709 --> minPredBG:", minPredBG)
         #// if carbs have been entered, but have expired, use minUAMPredBG
@@ -1749,7 +1776,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     #// in pure UAM mode, use the higher of minIOBPredBG,minUAMPredBG
     elif ( enableUAM ) :
         #//minPredBG = round(Math.max(minIOBPredBG,minUAMPredBG));
-        minPredBG = round(max(minIOBPredBG,minZTUAMPredBG))
+        minPredBG = kround(max(minIOBPredBG,minZTUAMPredBG))
         Flows.append(dict(title=str(minPredBG)+"; pure UAM; max of\nminZTUAMPredBG\nminIOBPredBG", indent='+1', adr='763'))
         #console_error("diag: row 718 --> minPredBG:", minPredBG)
 
@@ -1887,8 +1914,8 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     #// don't count the last 25% of COB against carbsReq
     COBforCarbsReq = max(0, meal_data['mealCOB'] - 0.25*meal_data['carbs'])
     carbsReq = (bgUndershoot - zeroTempEffect) / csf - COBforCarbsReq
-    zeroTempEffect = round(zeroTempEffect)
-    carbsReq = round(carbsReq)
+    zeroTempEffect = kround(zeroTempEffect)
+    carbsReq = kround(carbsReq)
     console_error("naive_eventualBG:", naive_eventualBG, "bgUndershoot:", short(round(bgUndershoot,1)), "zeroTempDuration:", zeroTempDuration, "zeroTempEffect:", zeroTempEffect, "carbsReq:", carbsReq)
     Fcasts['Levels']['naive_eventualBG'] = naive_eventualBG
     if ( carbsReq >= profile['carbsReqThreshold'] and minutesAboveThreshold <= 45 ) :
@@ -1905,8 +1932,8 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         rT['reason'] += "minGuardBG " + str(convert_bg(minGuardBG, profile)) + "<" + str(short(convert_bg(threshold, profile)))
         bgUndershoot = target_bg - minGuardBG
         worstCaseInsulinReq = bgUndershoot / sens
-        durationReq = round(60*worstCaseInsulinReq / profile['current_basal'])
-        durationReq = round(durationReq/30)*30
+        durationReq = kround(60*worstCaseInsulinReq / profile['current_basal'])
+        durationReq = kround(durationReq/30)*30
         #// always set a 30-120m zero temp (oref0-pump-loop will let any longer SMB zero temp run)
         durationReq = min(120,max(30,durationReq))
         #eturn tempBasalFunctions.setTempBasal(0, durationReq, profile, rT, currenttemp)
@@ -1964,15 +1991,15 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         #// multiply by 2 to low-temp faster for increased hypo safety
         #//insulinReq = 2 * Math.min(0, (snoozeBG - target_bg) / sens);
         insulinReq = 2 * min(0, (eventualBG - target_bg - insReqOffset) / sens)
-        insulinReq = round( insulinReq , 2)
+        insulinReq = kround( insulinReq , 2)
         Flows.append(dict(title="insulinReq="+str(insulinReq)+"\nfrom pred>target", indent='+0', adr='911+1'))
         #// calculate naiveInsulinReq based on naive_eventualBG
         naiveInsulinReq = min(0, (naive_eventualBG - target_bg) / sens)
-        naiveInsulinReq = round( naiveInsulinReq , 2)
+        naiveInsulinReq = kround( naiveInsulinReq , 2)
         if (minDelta < 0 and minDelta > expectedDelta) :
             #// if we're barely falling, newinsulinReq should be barely negative
             #//rT.reason += ", Snooze BG " + convert_bg(snoozeBG, profile);
-            newinsulinReq = round(( insulinReq * (minDelta / expectedDelta) ), 2)
+            newinsulinReq = kround(( insulinReq * (minDelta / expectedDelta) ), 2)
             #//console_error("Increasing insulinReq from " + insulinReq + " to " + newinsulinReq);
             Flows.append(dict(title="minDelta("+str(minDelta)+") negative\nbut above expectedDelta("+str(expectedDelta)+")\nraise insulinReq "+str(insulinReq)+" to "+str(newinsulinReq), indent='+1', adr='918+1'))
             insulinReq = newinsulinReq
@@ -2002,13 +2029,13 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
                 Flows.append(dict(title="long enough zero temp to\neventually get back up to target", indent='+1', adr='940+1'))
                 bgUndershoot = target_bg - naive_eventualBG
                 worstCaseInsulinReq = bgUndershoot / sens
-                durationReq = round(60*worstCaseInsulinReq / profile['current_basal'])
+                durationReq = kround(60*worstCaseInsulinReq / profile['current_basal'])
                 if (durationReq < 0) :
                     durationReq = 0
-                #// don't set an SMB zero temp longer than 60 minutess
+                #// don't set a temp longer than 120 minutes            (Kotlin DetermineBasalAutoISF.kt:958-961 and the AAPS 2.7+ JS: Math.min(120, ...); upstream's '<2.7' path keeps 60)
                 else :
-                    durationReq = round(durationReq/30)*30
-                    durationReq = min(60,max(0,durationReq))
+                    durationReq = kround(durationReq/30)*30
+                    durationReq = min(60 if AAPS_Version == '<2.7' else 120, max(0,durationReq))
                 #//console_error(durationReq);
                 #//rT.reason += "insulinReq " + insulinReq + "; "
                 if (durationReq > 0) :
@@ -2084,7 +2111,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         #// insulinReq is the additional insulin required to get minPredBG down to target_bg
         #//console_error(minPredBG,eventualBG);
         #//insulinReq = round( (Math.min(minPredBG,eventualBG) - target_bg) / sens, 2);
-        insulinReq = round( (min(minPredBG,eventualBG) - target_bg - insReqOffset) / sens, 2)
+        insulinReq = kround( (min(minPredBG,eventualBG) - target_bg - insReqOffset) / sens, 2)
         Flows.append(dict(title="IOB(" + str(round(iob_data['iob'],2)) + ") <= max_iob(" + str(max_iob)+")\ninsulinReq="+str(insulinReq), indent='0', adr='1016+1'))
         #// when dropping, but not as fast as expected, reduce insulinReq proportionally
         #// to the what fraction of expectedDelta we're dropping at
@@ -2111,7 +2138,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             rate = basal + (2 * insulinReq)
             rate = round_basal(rate, profile)
             insulinReq = capInsulin(insulinReq, target_bg, bg, new_parameter['insulinCapBelowTarget'], Flows)          #### GZ mod4b: reduce overnight insulin; leave it here to ba compatible with wrong position in 2.7 actual
-        insulinReq = round(insulinReq,3)
+        insulinReq = kround(insulinReq,3)
         rT['insulinReq'] = insulinReq
         #// console_error('lastBolusTime:', str(iob_data['lastBolusTime']))
         lastBolusAge = ( thisTime - iob_data['lastBolusTime'] ) / 1000
@@ -2120,10 +2147,10 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         if (microBolusAllowed and enableSMB and bg > threshold) :
             Flows.append(dict(title="in SMB mode and\nbg(" + str(bg) + ") > threshold(" + str(threshold)+")", indent='+0', adr='1043+1'))
             #// never bolus more than maxSMBBasalMinutes worth of basal
-            mealInsulinReq = round( meal_data['mealCOB'] / profile['carb_ratio'] ,3)
+            mealInsulinReq = kround( meal_data['mealCOB'] / profile['carb_ratio'] ,3)
             if AAPS_Version == '<2.7' :                                                                           #### the logic w/o UAM
                 if (typeof (profile, 'maxSMBBasalMinutes') == 'undefined' ) :
-                    maxBolus = round( profile['current_basal'] * 30 / 60 ,1)
+                    maxBolus = kround( profile['current_basal'] * 30 / 60 ,1)
                     Flows.append(dict(title="maxSMBBasalMinutes\nundefined\nsetting maxBolus=" + str(maxBolus), indent='+1', adr='1045+1'))
                     console_error("profile.maxSMBBasalMinutes undefined: defaulting to 30m")
                     console_error("gz maximSMB: from undefined maximBasalMinutes")                                  #### incl. GZ mod1
@@ -2133,17 +2160,17 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
                     #uplift = new_parameter['maxBolusIOBRatio']                                                     #### incl. GZ mod1
                     if new_parameter['maxBolusIOBUsual'] :
                         uplift = new_parameter['maxBolusIOBRatio']                                                  #### incl. GZ mod1
-                        maxBolus = round( uplift * profile['current_basal'] * 30 / 60 ,1)                           #### incl. GZ mod1
+                        maxBolus = kround( uplift * profile['current_basal'] * 30 / 60 ,1)                           #### incl. GZ mod1
                         Flows.append(dict(title="IOB data found\nsetting maxBolus=" + str(maxBolus), indent='+1', adr='1050+6'))
                     else :
                         uplift = new_parameter['maxBolusTargetRatio']                                               #### incl. GZ mod1
-                        maxBolus = round(uplift * profile['current_basal'] * profile['maxSMBBasalMinutes'] /60 ,1)  #### incl. GZ mod1: same as below
+                        maxBolus = kround(uplift * profile['current_basal'] * profile['maxSMBBasalMinutes'] /60 ,1)  #### incl. GZ mod1: same as below
                         Flows.append(dict(title="IOB data found\ngz special found\nsetting maxBolus=" + str(maxBolus), indent='+1', adr='1050+6'))
                     console_error("gz maximSMB: from IOB > MealInsulinReq")                                         #### incl. GZ mod1
                 else :
                     console_error("profile.maxSMBBasalMinutes:",profile['maxSMBBasalMinutes'],"profile.current_basal:",profile['current_basal'])
                     uplift = new_parameter['maxBolusTargetRatio']                                                   #### incl. GZ mod1
-                    maxBolus = round(uplift * profile['current_basal'] * profile['maxSMBBasalMinutes'] / 60 ,1)     #### incl. GZ mod1
+                    maxBolus = kround(uplift * profile['current_basal'] * profile['maxSMBBasalMinutes'] / 60 ,1)     #### incl. GZ mod1
                     Flows.append(dict(title="from\nmaxSMBBasalMinutes("+str(profile['maxSMBBasalMinutes'])+")\nsetting maxBolus=" + str(maxBolus), indent='+1', adr='1053+10'))
                     console_error("gz maximSMB: from currentBasal & maximBasalMinutes")                             #### incl. GZ mod1
                 bolus_increment = 0.1                                                                               #### was fix before 2.7
@@ -2160,7 +2187,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
                 else :
                     uplift = new_parameter['maxBolusTargetRatio']                                                   #### incl. GZ mod1
                 if (typeof (profile, 'maxSMBBasalMinutes') == 'undefined' ) :
-                    maxBolus = round(uplift * profile['current_basal'] * 30 / 60 ,1)
+                    maxBolus = kround(uplift * profile['current_basal'] * 30 / 60 ,1)
                     Flows.append(dict(title="maxSMBBasalMinutes\nundefined\nsetting maxBolus=" + str(maxBolus), indent='+1', adr='1045+1'))
                     console_error("profile.maxSMBBasalMinutes undefined: defaulting to 30m")
                     console_error("gz maximSMB: from undefined maxSMBBasalMinutes")                                 #### incl. GZ mod1
@@ -2171,19 +2198,19 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
                     if 'maxUAMSMBBasalMinutes' in profile and profile['maxUAMSMBBasalMinutes'] :
                         console_error("profile.maxUAMSMBBasalMinutes:",profile['maxUAMSMBBasalMinutes'],"profile.current_basal:",profile['current_basal'])
                         #// was: maxBolus = round( profile.current_basal  *  profile.maxUAMSMBBasalMinutes   / 60 ,1);
-                        maxBolus = round(uplift * profile['current_basal'] * profile['maxUAMSMBBasalMinutes'] /60 ,1)  #### incl. GZ mod1: same as below
+                        maxBolus = kround(uplift * profile['current_basal'] * profile['maxUAMSMBBasalMinutes'] /60 ,1)  #### incl. GZ mod1: same as below
                         Flows.append(dict(title="maxUAMSMBBasalMinutes("+str(profile['maxUAMSMBBasalMinutes'])+")\nand current_basal("+str(profile['current_basal'])+")\ndefine maxBolus=" + str(maxBolus), indent='+1', adr='1050+6'))
                     else:   
                         console_error("profile.maxUAMSMBBasalMinutes undefined: defaulting to 30m");
                         #// minor mod on 18.Nov2019 by ga-zelle
                         #// test triple the maxSMB to offset the low basal rates
                         #// was: maxBolus = round( profile.current_basal    * 30 / 60 ,1);
-                        maxBolus = round( uplift * profile['current_basal'] * 30 / 60 ,1)
+                        maxBolus = kround( uplift * profile['current_basal'] * 30 / 60 ,1)
                         Flows.append(dict(title="maxUAMSMBBasalMinutes\not given, use 30mins\nand current_basal\nto define maxBolus=" + str(maxBolus), indent='+1', adr='1052+6'))
                 else :
                     console_error("profile.maxSMBBasalMinutes:",profile['maxSMBBasalMinutes'],"profile.current_basal:",profile['current_basal'])
                     #uplift = new_parameter['maxBolusTargetRatio']                                                   #### incl. GZ mod1
-                    maxBolus = round(uplift * profile['current_basal'] * profile['maxSMBBasalMinutes'] / 60 ,1)     #### incl. GZ mod1
+                    maxBolus = kround(uplift * profile['current_basal'] * profile['maxSMBBasalMinutes'] / 60 ,1)     #### incl. GZ mod1
                     Flows.append(dict(title="from\nmaxSMBBasalMinutes("+str(profile['maxSMBBasalMinutes'])+")\nsetting maxBolus=" + str(maxBolus), indent='+1', adr='1053+10'))
                     #console_error("gz maximSMB: from currentBasal & maxSMBmBasalMinutes")                          #### incl. GZ mod1
                 #// bolus 1/2 the insulinReq, up to maxBolus, rounding down to nearest 0.1U
@@ -2192,7 +2219,8 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
                     bolus_increment = profile['bolus_increment']
                 else:
                     bolus_increment = 0.1
-            roundSMBTo = 1 / bolus_increment
+            #// val roundSMBTo = if (profile.bolus_increment > 0) 1 / profile.bolus_increment else 10.0
+            roundSMBTo = 1 / bolus_increment if bolus_increment > 0 else 10.0                        # Kotlin DetermineBasalAutoISF.kt:1060 division guard
             #was: microBolus = int(min(insulinReq * new_parameter['SMBRatio'], maxBolus)*10)/10                   #### incl. GZ mod2: master was 0.5
             #// gz md 10: make the share of InsulinReq a user input
             if AAPS_Version == '3.3':                                                                          # AAPS 3.3+ / Nightscout
@@ -2221,11 +2249,15 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
                 microBolus = microBolus * (1-LessSMBratio)
                 console_error("gz SMB reduced by " + str(short(100*LessSMBratio)) + "% because bg("+str(bg)+") is below upper target("+str(max_bg)+")+10")
                 Flows.append(dict(title="modX: microBolus reduced\nby " + str(100*LessSMBratio) + "% to "+str(round(microBolus,2))+"\nbecause bg("+str(convert_bg(bg, profile))+") is below "+str(round(new_parameter['LessSMBbelow'],0)), indent='0', adr='1053+x'))
-            microBolus = int(microBolus*roundSMBTo+0.0001)/roundSMBTo                       ### round it up, e.g. from 0.29999 to 0.3
+            #// microBolus = Math.floor(microBolus * roundSMBTo) / roundSMBTo
+            if AAPS_Version == '3.3':                                                                          # AAPS 3.3+ / Nightscout
+                microBolus = math.floor(microBolus*roundSMBTo)/roundSMBTo                   # Kotlin DetermineBasalAutoISF.kt:1069 floors, no +0.0001 nudge
+            else:
+                microBolus = int(microBolus*roundSMBTo+0.0001)/roundSMBTo                   ### round it up, e.g. from 0.29999 to 0.3
             #// calculate a long enough zero temp to eventually correct back up to target
             smbTarget = target_bg
             worstCaseInsulinReq = (smbTarget - (naive_eventualBG + minIOBPredBG)/2 ) / sens
-            durationReq = round(60*worstCaseInsulinReq / profile['current_basal'])
+            durationReq = kround(60*worstCaseInsulinReq / profile['current_basal'])
 
             #// if insulinReq > 0 but not enough for a microBolus, don't set an SMB zero temp
             if (insulinReq > 0 and microBolus < bolus_increment) :
@@ -2235,18 +2267,18 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             smbLowTempReq = 0
             if (durationReq <= 0) :
                 durationReq = 0
-            #// don't set a temp longer than 120 minutes; or longer than 60 in AAPS V2.7
+            #// don't set an SMB zero temp longer than 60 minutes      (Kotlin DetermineBasalAutoISF.kt:1086-1088, AAPS 2.7 JS: 60; oref0 '<2.7' JS: 120)
             elif  (durationReq >= 30) :
-                durationReq = round(durationReq/30)*30
-                if AAPS_Version == '2.7':
-                    temp120 =  60
-                else:
+                durationReq = kround(durationReq/30)*30
+                if AAPS_Version == '<2.7':
                     temp120 = 120
+                else:
+                    temp120 =  60
                 durationReq = min(temp120,max(0,durationReq))
                 Flows.append(dict(title="Don't set temp rate\nlonger than "+str(temp120)+" minutes", indent='0', adr='1073+12'))
             else :
                 #// if SMB durationReq is less than 30m, set a nonzero low temp
-                smbLowTempReq = round( basal * durationReq/30 ,2)
+                smbLowTempReq = kround( basal * durationReq/30 ,2)
                 durationReq = 30
                 Flows.append(dict(title="SMB durationReq("+str()+")\nis less than 30m\nset a nonzero low temp", indent='0', adr='1077+12'))
             rT['reason'] += " insulinReq " + str(insulinReq)
@@ -2266,7 +2298,8 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             SMBInterval = SMBInterval * 60
             #//console_error(naive_eventualBG, insulinReq, worstCaseInsulinReq, durationReq);
             console_error("naive_eventualBG "+str(naive_eventualBG)+", "+str(durationReq)+"m "+str(smbLowTempReq)+"U/h temp needed; last bolus "+str(short(round(lastBolusAge/60,1)))+"m ago; maxBolus:", maxBolus)
-            if (lastBolusAge > SMBInterval - 12) :     #// to be 6s tolerance but released as 12s
+            SMBtolerance = 6 if AAPS_Version == '3.3' else 12                      # Kotlin: 6s tolerance (DetermineBasalAutoISF.kt 1110); JS 2.7/<2.7 shipped 12s
+            if (lastBolusAge > SMBInterval - SMBtolerance) :     #// if (lastBolusAge > SMBInterval - 6.0) {   // 6s tolerance
                 if (microBolus > 0) :
                     rT['units'] = microBolus
                     rT['reason'] += "Microbolusing " + str(short(microBolus)) + "U. "

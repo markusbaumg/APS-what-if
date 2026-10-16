@@ -1,3 +1,14 @@
+17.Oct.2026
+-----------
+determine_basal.py mirrors the phone's Kotlin (autoISF 3.2, AAPS 3.4.2.6) on the 3.3+/Nightscout path, each step gated
+by the no-change replay on three windows (docs/hindcast/PORT_VS_PHONE.md): SMB interval tolerance 6 s (was the JS's
+12 s), new kround() = Kotlin half-up rounding at 65 decision sites, threshold no longer rounded to a whole mg/dl,
+naive_eventualBG always with the autoISF sens, bolus steps floored like Math.floor, fractionCarbsLeft assigned when
+carbs == 0 (was a NameError), round_basal identity, zero-temp caps 60 min (SMB) / 120 min (low BG) as on the phone,
+normalTarget 99 (Constants.NORMAL_TARGET_MGDL, profile['normal_target'], default in setVariant). Agreement with the
+phone on 2026-09-06 06-09Z: insReq 152 -> 167 of 180, SMB 175 -> 179, TBR 171 -> 177. ns_settings.json:
+low_temptarget_lowers_sensitivity back to the export's true, normal_target 99 added; the _overrides section is empty.
+
 16.Oct.2026
 -----------
 Review fixes on the Nightscout branch:

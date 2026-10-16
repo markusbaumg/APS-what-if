@@ -97,7 +97,8 @@
   "flags": {
     "exercise_mode": false,
     "high_temptarget_raises_sensitivity": false,
-    "low_temptarget_lowers_sensitivity": false,
+    "low_temptarget_lowers_sensitivity": true,
+    "normal_target": 99,
     "sensitivity_raises_target": false,
     "resistance_lowers_target": true,
     "half_basal_exercise_target": 8.9,
@@ -252,8 +253,7 @@
     ]
   },
   "_overrides": {
-    "_about": "Keys ns_prefs_import.py must NOT overwrite from an export because the value was fitted to the phone's echoes (see _assumed for the evidence). Remove a key here once a fresh export explains the value.",
-    "flags.low_temptarget_lowers_sensitivity": false
+    "_about": "Keys ns_prefs_import.py must NOT overwrite from an export because the value was fitted to the phone's echoes (see _assumed for the evidence). Remove a key here once a fresh export explains the value. Empty since 2026-10-17: the last pin (low_temptarget_lowers_sensitivity) was explained by normalTarget 99."
   },
   "_assumed": {
     "smb.smb_delivery_ratio_bg_range": "1.0 mmol = 18 mg/dl since the export of 2026-09-07 20:49 local (the previous export, 20:02, still had 2.0 mmol). Checked against the printed 'SMB delivery ratio set to interpolated value' lines: 36 reproduces 236/236 (06.Sep) and 112/112 (07.Sep), 18 reproduces 229/229 (15.Sep) and 21/21 (10.Oct). profile_history rewinds loops before the change to 36.",
@@ -261,7 +261,8 @@
     "flags.half_basal_exercise_target": "8.9 mmol (160.2 mg/dl); determine_basal.py multiplies by 18 for mmol users of autoISF >= 3.1",
     "insulin.peak_minutes": "Lyumjev plugin = 45 min; DIA taken from the Nightscout profile (6 h)",
     "autoisf.autoISF_max": "1.5 since 2026-09-07 20:23 local; the replay uses the value valid at each loop time when profile_history says so (see ns_profile.py)",
-    "flags.low_temptarget_lowers_sensitivity": "export says true, but in the whole cached week (779 loops with TT 5.5 = 99 mg/dl) the phone never printed 'Sensitivity ratio set to ... based on temp target' - it printed 'Sensitivity ratio unchanged: 1.0'. Set false so the replay reproduces the phone; the export value is kept in aaps_preferences.json",
+    "flags.low_temptarget_lowers_sensitivity": "true per export. Until 2026-10-17 it was pinned false because the phone never printed 'Sensitivity ratio set to ... based on temp target' at TT 5.5 = 99 mg/dl; the reason is Constants.NORMAL_TARGET_MGDL = 99 (AAPS >= 3.4.2.1), so 99 < 99 is false - the port now uses normal_target 99 on the 3.3 path and the flag is back to the export value.",
+    "flags.normal_target": "99 = Constants.NORMAL_TARGET_MGDL of AAPS >= 3.4.2.1 (not in the export); the phone compares temp targets against it for exercise / resistance mode",
     "safety.basal_step": "Omnipod Dash basal resolution 0.05 U/h (used to round current_basal like the pump does)",
     "flags.high_temptarget_raises_sensitivity": "false per export",
     "safety.remainingCarbsCap / maxCOB": "AAPS defaults (not in export)",

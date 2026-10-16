@@ -35,7 +35,8 @@ def parser_debug_log(msg: str):
         pass
 
 def get_version_core(echo_msg):
-    echo_msg['emulator_core.py'] = '2026-10-16 12:00'       # emulated maxBolus from console.error; Nightscout: narrow fetch try, UTC window labels; parser_debug off
+    echo_msg['emulator_core.py'] = '2026-10-17 00:30'       # profile['normal_target'] default 99 for determine_basal's normalTarget
+    #cho_msg['emulator_core.py'] = '2026-10-16 12:00'       # emulated maxBolus from console.error; Nightscout: narrow fetch try, UTC window labels; parser_debug off
     #cho_msg['emulator_core.py'] = '2026-09-08 04:00'       # Nightscout: results named <start>_<end>, noplot not part of All, settings echo, source wording
     #cho_msg['emulator_core.py'] = '2026-09-08 03:30'       # Nightscout: duplicated autoISF echo counted once in scanConsoleError
     #cho_msg['emulator_core.py'] = '2026-09-07 23:00'       # Nightscout as data source (scanNightscout), noplot option
@@ -395,6 +396,8 @@ def setVariant(stmp):
             profile['autoISF_version'] = '(older version)'
         if 'enable_autoISF' not in profile:
             profile['enable_autoISF'] = False               ### not known before ai2.2.x
+        if 'normal_target' not in profile:
+            profile['normal_target'] = 99                   ### Constants.NORMAL_TARGET_MGDL since AAPS 3.4.2.1 (100 before: set 'profile normal_target 100' in the VDF for such logs)
         if 'smb_delivery_ratio' not in profile:
             profile['smb_delivery_ratio'] = 0.5             ### not known before ai2.2.6
         if 'smb_delivery_ratio_min' not in profile:

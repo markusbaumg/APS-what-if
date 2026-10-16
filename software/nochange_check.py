@@ -5,7 +5,7 @@ directory and prints how often the emulated ISF, insulinReq, maxBolus, SMB and T
 (the `orig`/`emul` column pairs of the result CSV, see CLAUDE.md). Exit status 1 when a column falls below
 its threshold or fewer than two loops were replayed. Interim gate until Hindcast's `hc check` (H-902) with
 golden metrics replaces it; the thresholds below are deliberately loose (the 2026-09-06 06-09Z window gives
-ISF 99 %, insReq 84 %, maxBolus 99 %, SMB 97 %, TBR 95 %). Stdlib only, meant for `make nochange`.
+ISF 99 %, insReq 93 %, maxBolus 99 %, SMB 99 %, TBR 98 %; 09-15Z: 98 / 84 / 99 / 99 / 97 %; 2026-10-10 06-12Z: 99 / 93 / 99 / 99 / 97 %). Stdlib only, meant for `make nochange`.
 """
 import glob
 import os
