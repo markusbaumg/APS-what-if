@@ -17,13 +17,14 @@ import  copy
 import  re
 import os
 import json
+import http.client
 
 import determine_basal as detSMB
 from determine_basal import my_ce_file
 #from emulator_batch import eleList
 
 # Parser debug logging (set to True to enable)
-parser_debug = True
+parser_debug = False
 parser_debug_file = '/tmp/emulator_parser_debug.log'
 
 def parser_debug_log(msg: str):
@@ -34,7 +35,10 @@ def parser_debug_log(msg: str):
         pass
 
 def get_version_core(echo_msg):
-    echo_msg['emulator_core.py'] = '2026-09-07 23:00'       # Nightscout as data source (scanNightscout), noplot option
+    echo_msg['emulator_core.py'] = '2026-10-16 12:00'       # emulated maxBolus from console.error; Nightscout: narrow fetch try, UTC window labels; parser_debug off
+    #cho_msg['emulator_core.py'] = '2026-09-08 04:00'       # Nightscout: results named <start>_<end>, noplot not part of All, settings echo, source wording
+    #cho_msg['emulator_core.py'] = '2026-09-08 03:30'       # Nightscout: duplicated autoISF echo counted once in scanConsoleError
+    #cho_msg['emulator_core.py'] = '2026-09-07 23:00'       # Nightscout as data source (scanNightscout), noplot option
     #cho_msg['emulator_core.py'] = '2026-03-10 22:20'       # round parabola fit minutes for aligning interactive table output
     #cho_msg['emulator_core.py'] = '2026-01-02 12:50'       # inherit pause from AAPS in announcing carbs required
     #cho_msg['emulator_core.py'] = '2025-10-07 14:30'       # key words for Glucose Status changed in logfile
@@ -738,7 +742,8 @@ def scanConsoleError(consoleError, lcount):
     # collect the SMB related echos of the original loop from its console.error list
     # (AAPS 3.3+ database record or Nightscout devicestatus)
     global SMBreason, origAI_ratio, autoISF_version
-    for what in consoleError:
+    final_seen = False                                      # AAPS 3.4 autoISF echoes the whole autoISF block twice in ~1.5% of the
+    for what in consoleError:                               # Nightscout records (identical values); register the factor only once
         what = str(what)
         SMBreason['script'] += what +'\n'
         if what.find('---')==0:
@@ -773,6 +778,8 @@ def scanConsoleError(consoleError, lcount):
             isf_end = what.find(' CSF:')
             SMBreason['origISF'] = float(what[isf_anf+6:isf_end].strip(' ,'))
         elif what.find('final ISF factor is') ==0:          # result of autoISF
+            if final_seen:      continue
+            final_seen = True
             final_ISF_string = what[20:].strip()
             wo = final_ISF_string.find(' ')                # origin sens can  be appended
             if wo<1:       wo = len(final_ISF_string)
@@ -900,7 +907,7 @@ def TreatLoop(Curly, log, lcount, fn):
         if maxBol== '0' and 'maxSMB' in SMBreason:      maxBol = SMBreason['maxSMB']    # AAPS 3.3+ / Nightscout: only in console.error
         origSMB.append(eval(mySMB))
         origMaxBolus.append(eval(maxBol))
-        log.write('\n========== loop in row ' + str(lcount) + ' ========== of logfile '+fn+'\n')
+        log.write('\n========== loop in row ' + str(lcount) + ' ========== of '+sourceName(fn)+'\n')
         log.write('  created at= ' + stmp + '\n')
         log.write(SMBreason['script'])                              # the script debug section
         #printVal(suggest, 'bg', log)
@@ -944,7 +951,7 @@ def TreatLoop(Curly, log, lcount, fn):
         
         log = open(ce_file, 'a')
         #og.write('\n========== '+varLabel+' loop in row ' + str(lcount) +' ========== of logfile '+fn+'\n')
-        log.write('\n========== loop in row ' + str(lcount) +' ========== of logfile '+fn+'\n')
+        log.write('\n========== loop in row ' + str(lcount) +' ========== of '+sourceName(fn)+'\n')
         log.write('  created at= ' + stmp +'\n')
         log.write('---------- Script Debug --------------------\n')
         log.close()
@@ -953,7 +960,7 @@ def TreatLoop(Curly, log, lcount, fn):
         tempBasalFunctionsDummy = ''                    # is handled inside determine_basal as import
         origInsReq.append(ins_Req)
         origISF.append(SMBreason['origISF'])
-        varlog.write('\nloop execution in row='+str(lcount)+' of logfile '+fn+' at= ' + stmp + '\n')
+        varlog.write('\nloop execution in row='+str(lcount)+' of '+sourceName(fn)+' at= ' + stmp + '\n')
         #longDelta.append(round(glucose_status['long_avgdelta'],2))
         if 'dura_ISF_minutes' not in glucose_status:        # calculate it in emulator
             delta05, avg05 = getHistBG(len(bg)-1, 0.05)
@@ -1012,6 +1019,7 @@ def TreatLoop(Curly, log, lcount, fn):
         else:
             msgFile = 'Scanning logfile '+fn       
         log_msg(msgFile + ',  loop time stamp '+stmp,'\r')
+        ce_pos = os.path.getsize(ce_file)               # emulated console.error lines of this loop start here
         reT = detSMB.determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_data, meal_data, tempBasalFunctionsDummy, MicroBolusAllowed, reservoir, thisTime, Fcasts, Flows, emulAI_ratio)
         #newLoop = False
         if len(origAI_ratio)<len(emulAI_ratio):
@@ -1021,6 +1029,7 @@ def TreatLoop(Curly, log, lcount, fn):
         if len(maxBolStr) > 5 :
             maxBolStr = getReason(reason, 'maxBolus',  '; ', 1)
         if maxBolStr == '' :     maxBolStr = '0'
+        if maxBolStr == '0' :    maxBolStr = maxBolusFromConsole(ce_pos)   # AAPS 3.3+ / Nightscout: only in console.error, like the original
         emulMaxBolus.append(eval(maxBolStr))
         mySMBstr = getReason(reason, 'Microbolusing', 'U',  1)
         if mySMBstr == '' :     mySMBstr = '0'
@@ -1046,6 +1055,23 @@ def TreatLoop(Curly, log, lcount, fn):
         SMBreason = {}                                  # clear for next debug list
         SMBreason['script'] = '---------- Script Debug --------------------\n'
         return 'MORE'
+
+def maxBolusFromConsole(ce_pos):
+    # the emulated maxBolus as determine_basal.py echoed it into the console.error file of this loop
+    # ('... maxBolus:' + value, same line as the original one scanned by scanConsoleError/PrepareSMB); '0' when absent
+    maxBol = '0'
+    try:
+        with open(ce_file, 'r') as ce:
+            ce.seek(ce_pos)
+            for what in ce:
+                if what.find('maxBolus: ')>0:
+                    try:
+                        maxBol = str(float(what.split('maxBolus:')[1].strip().split()[0].rstrip(';,.')))
+                    except (ValueError, IndexError):
+                        pass
+    except OSError:
+        pass
+    return maxBol
 
 def code_error(lcount, mess):
     # RhinoException encountered
@@ -1107,11 +1133,41 @@ def PrepareSMB(zeile, log, lcount):
             origAI_ratio.append(eval(final_ISF_string[:wo])*10)
     pass
 
+def sourceName(fn):
+    # how the input is called in the transcripts: 'logfile <name>' or 'Nightscout <url>'
+    try:
+        if isNightscout:        return 'Nightscout ' + fn
+    except NameError:
+        pass
+    return 'logfile ' + fn
+
+def settingsEcho():
+    # provenance of ns_settings.json for the .log header: import stamp, file time and a hash of the sections that
+    # become part of the profile (two runs that differ only in the settings are distinguishable by it)
+    import hashlib
+    import ns_source
+    try:
+        st = ns_source.load_settings()
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(ns_source.SETTINGS_FILE), tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    except (OSError, ValueError) as e:
+        return 'ns_settings.json: not readable (' + str(e) + ')\n'
+    sections = {k: st.get(k) for k in ('insulin', 'safety', 'smb', 'autoisf', 'activity_monitor', 'flags', 'glucose', 'profile_history')}
+    digest = hashlib.sha1(json.dumps(sections, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]
+    imp = st.get('_import', {}) or {}
+    txt  = 'ns_settings.json: modified ' + mtime + ', settings hash ' + digest
+    txt += ', import ' + str(imp.get('source')) + ' of ' + str(imp.get('created_at')) + ' (' + str(imp.get('aaps_version')) + ')\n'
+    for ch in (st.get('profile_history', {}) or {}).get('changes', []) or []:
+        txt += '  profile_history: ' + str(ch.get('when')) + '  ' + str(ch.get('parameter')) + '  ' + str(ch.get('from')) + ' -> ' + str(ch.get('to')) + '\n'
+    ov = {k: v for k, v in (st.get('_overrides', {}) or {}).items() if not k.startswith('_')}
+    if ov:
+        txt += '  overrides (fitted, kept on import): ' + json.dumps(ov) + '\n'
+    return txt
+
 def featured(Option):
     # check whethter this feature was in the option list passed from OO.odb
     # or if ALL option were enabled
     # otherwise FALSE
-    OK = 'All' in doit  or Option in doit
+    OK = Option in doit  or ('All' in doit and Option != 'noplot')     # noplot (no PDF, no LIST table) is opt-in only
     if '-'+Option in doit:        OK = False            # explicitly excluded
     return OK
 
@@ -1796,11 +1852,34 @@ def scanNightscout(fn, entries):
         varlog  = open(fn_first + '.' + varLabel + '.log', 'w')
         varlog.write(echo_msg)
     varlog.write('\n========== Echo of what-if definitions actioned for variant '+varLabel+'\n========== created on '+formatdate(localtime=True) + '\n========== for loop events found in Nightscout '+fn+'\n')
+    settings_echo = settingsEcho()
+    varlog.write('========== ' + settings_echo.replace('\n', '\n========== ').rstrip('= ') + '\n')
     log.write('AAPS scan from Nightscout for SMB comparison created on ' + formatdate(localtime=True) + '\n')
     log.write('SOURCE='+fn + '\n')
+    log.write(settings_echo)
     lcount = 0
     cont = 'MORE'
     src = ns_source.NightscoutSource(fn, t_startLabel, t_stoppLabel, log_msg=log_msg)
+    try:
+        src.load()                              # fetch everything before the first loop (loops() reuses it)
+    except (OSError, RuntimeError, ValueError, http.client.HTTPException) as e:
+        # network / data failure while fetching from Nightscout (ns_client raises RuntimeError after its retries):
+        # finish with no loops, like an unreadable logfile, instead of dying with open result files.
+        # Only the fetch is guarded: an exception inside TreatLoop/determine_basal must surface, not be reported
+        # as a source failure with the per-loop lists half appended
+        import traceback
+        log_msg('\nNightscout source failed after ' + str(lcount) + ' loops: ' + repr(e) + '\n' + traceback.format_exc())
+        varlog.write('\nNightscout source failed after ' + str(lcount) + ' loops: ' + repr(e) + '\n')
+        return 'STOP'
+    cont = scanNightscoutLoops(src, fn)
+    return cont
+
+def scanNightscoutLoops(src, fn):
+    global SMBreason
+    global newLoop, activityMonitorCurly
+    global AAPS_Version, utcOffset, MicroBolusAllowed, autoISF_version
+    global lcount
+    cont = 'MORE'
     for loop in src.loops():
         lcount += 1
         AAPS_Version = '3.3'
@@ -2741,6 +2820,10 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
     isNightscout = myseek.startswith('http://') or myseek.startswith('https://') or myseek.startswith('ns:') or myseek == 'ns'
     if isNightscout:
         logListe = []
+        import ns_source                            # window bounds may carry an offset ('...T08:00:00+02:00'), the open
+        ns_start, ns_stopp = ns_source.resolve_window(startLabel, stoppLabel)   # bounds (2000/2099) resolve to now-24h/now:
+        t_startLabel = ns_source.to_iso(ns_start)   # fix them once in the UTC form of deliverAt ('YYYY-MM-DDTHH:MM:SS.mmmZ')
+        t_stoppLabel = ns_source.to_iso(ns_stopp)   # so that TreatLoop's lexical window test, the source and the file label agree
     else:
         logListe = glob.glob(myseek+myfile, recursive=False)
     #print ('logListe:', str(logListe))
@@ -2829,8 +2912,9 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
             isZip = ( ftype == 'zip') and not isNightscout
             if filecount == 0 :                     # initalize file loop
                 #wd = os.path.dirname(varFile)
-                if isNightscout and startLabel.find('2000')==0 :
-                    fnLabel = 'nightscout'          # open start: no date to name the results after
+                if isNightscout :
+                    import ns_source                # <start>_<end> from the bounds already resolved above
+                    fnLabel = ns_source.window_label(t_startLabel, t_stoppLabel)
                 elif startLabel.find('2000')==0 :
                     fnLabel = os.path.basename(fn)  # only one logfile to scan: use its name
                 else:
@@ -2868,12 +2952,14 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
                 break                                   # end of time window reached
     
     if filecount == 0 :
-        log_msg ('no such logfile: "'+myseek+'"')
-        if isNightscout:       log_msg ('  (Nightscout url must start with http:// or https://)')
+        if isNightscout:
+            log_msg ('no Nightscout source: "'+myseek+'"  (url must start with http:// or https://, or be "ns:")')
+        else:
+            log_msg ('no such logfile: "'+myseek+'"')
         return 0, 'Z', 0, '', '', 0, '', oldPauseCarbsReqEnds
     loopCount = len(loop_mills)
     if loopCount == 0 :
-        log_msg ('\nno entries found in logfile: "'+myseek+'"')
+        log_msg ('\nno entries found in '+sourceName(myseek))
         #return     #sys.exit()
     log.write('END\n')
     log.close()
@@ -3148,7 +3234,7 @@ def parameters_known(myseek, arg2, variantFile, startLabel, stoppLabel, entries,
     xyf.close()
     
     if len(entries) == 0:
-        sub_issue('\nNo loop data yet in fresh logfile')
+        sub_issue('\nNo loop data yet in fresh logfile' if not isNightscout else '\nNo loop data in the Nightscout window')
         return 60, 'Z',0, '', '', 0, '', oldPauseCarbsReqEnds
     else:
         if featured ('seconds'):

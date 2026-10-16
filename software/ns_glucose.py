@@ -42,6 +42,21 @@ Which series / bucketing and why (result of --validate, see the bottom of this d
 Validation: `python ns_glucose.py --validate 2026-09-06T00:00:00Z 2026-09-07T00:00:00Z`
 compares against devicestatus consoleError lines (tick, dura_ISF minutes, acce_ISF factor, parabolic extremum).
 Residual mismatch rates are printed by the CLI and quoted in NIGHTSCOUT_SOURCE.md.
+    dura_ISF average: the phone never prints it; it is checked through the printed dura_ISF factor
+    (OpenAPSAutoISFPlugin.autoISF: 1 + dura/60 * dura_ISF_weight/target_bg * (avg - target_bg), target_bg = the
+    active temp target or the profile target = suggested.targetBG).  The factor is rounded to 2 decimals, so the
+    average is only determined to +/- 0.005 * 60 * target / (dura * weight) mg/dl (4.3 mg/dl at 10 min, 2.2 at
+    20 min); the validation therefore recomputes the factor from the rebuilt average and checks that the rebuilt
+    average lies in the quantisation band.  The dura loop itself (running average of the smoothed 5-min buckets
+    inside the +/-5 % band of the running average, non-filled buckets only, 13-min gap stop) is identical in
+    master and in the fork (GlucoseStatusCalculatorAutoIsf.kt) and identical to emulator_core.getHistBG.
+    Duplicate devicestatus uploads (same deliverAt, different _id; ~15 % of the records) are counted once.
+Data needed before the first loop: ns_source loads CGM entries with an 8 h lookback; the bucketed/smoothed
+series is rebuilt per loop from at most KALMAN_WINDOW_MS (34 h) of readings, but 8 h reproduce the 34 h result
+to < 0.05 mg/dl/5min on delta from the first loop of a window (the Kalman state and the learned R only depend
+on the last ~4 h), so no loop before the window start is needed.  After a CGM gap the first loops get
+dura_ISF_minutes 0 and a 0-correlation parabola like the phone; status_at returns None while the newest
+reading is older than 12 min or fewer than 3 readings exist.
 
 Standard library only (runs on the phone under QPython).
 """
@@ -727,12 +742,12 @@ def validate(start_iso, end_iso, url='ns:', grid='moving', smoothing='kalman', v
         def __init__(self, name, tol):
             self.name, self.tol, self.n, self.exact, self.within, self.worst = name, tol, 0, 0, 0, []
 
-        def add(self, stamp, want, got, extra=''):
+        def add(self, stamp, want, got, extra='', tol=None):
             self.n += 1
             d = abs(want - got)
             if d < 1e-9:
                 self.exact += 1
-            if d <= self.tol + 1e-9:
+            if d <= (self.tol if tol is None else tol) + 1e-9:
                 self.within += 1
             else:
                 self.worst.append((d, stamp, want, got, extra))
@@ -751,7 +766,8 @@ def validate(start_iso, end_iso, url='ns:', grid='moving', smoothing='kalman', v
     st_bg = Stat('glucose (smoothed bg)', 1.0)
     st_dura = Stat('dura_ISF minutes', 5)
     st_dura_bp = Stat('dura_ISF by-passed minutes', 5)
-    st_dura_avg = Stat('dura_ISF average (mg/dl)', 2.0)
+    st_dura_f = Stat('dura_ISF factor (rebuilt avg)', 0.01)
+    st_dura_avg = Stat('dura_ISF avg in factor band', 0.0)
     st_acce = Stat('acce_ISF factor', 0.02)
     st_corr = Stat('by-passed correlation', 0.02)
     st_para_v = Stat('parabola extremum value', 0.2 if mmol else 2)
@@ -759,11 +775,17 @@ def validate(start_iso, end_iso, url='ns:', grid='moving', smoothing='kalman', v
     acce_state_ok = acce_state_n = 0
     acce_state_bad = []
     skipped = 0
+    duplicates = 0
+    seen = set()
     for rec in devicestatus:
         sug = rec['openaps']['suggested']
         stamp = sug.get('deliverAt')
         if not stamp or 'bg' not in sug:
             continue
+        if stamp in seen:                    # AAPS uploads some devicestatus records twice (same deliverAt, new _id)
+            duplicates += 1
+            continue
+        seen.add(stamp)
         now_ms = parse_iso(stamp)
         gs = gh.status_at(now_ms, rec)
         if gs is None:
@@ -783,11 +805,22 @@ def validate(start_iso, end_iso, url='ns:', grid='moving', smoothing='kalman', v
             m = re_dura.match(line)
             if m:
                 st_dura.add(stamp, float(m.group(3)), gs['dura_ISF_minutes'])
-                # invert dura_ISF = 1 + dura/60 * weight/target * (avg - target)
+                # dura_ISF = 1 + dura/60 * weight/target * (avg - target)   (OpenAPSAutoISFPlugin.autoISF)
+                # The phone prints the factor rounded to 2 decimals, so the average can only be recovered
+                # to +/- 0.005/k mg/dl (k = dura/60 * weight/target: 4.3 mg/dl at 10 min, 2.2 at 20 min,
+                # 1.4 at 30 min with target 100 and weight 0.7).  Two checks: the factor recomputed from the
+                # rebuilt average (using the original minutes) must match the printed one within one rounding
+                # step, and the rebuilt average must lie inside the quantisation band of the printed factor.
                 w = aisf.get('dura_ISF_weight', 0.7)
-                if target and gs['dura_ISF_minutes'] > 0 and w:
-                    avg_want = target + (float(m.group(1)) - 1) / (float(m.group(3)) / 60 * w / target)
-                    st_dura_avg.add(stamp, avg_want, gs['dura_ISF_average'], 'orig factor %s' % m.group(1))
+                dura_orig = float(m.group(3))
+                if target and dura_orig > 0 and w:
+                    k = dura_orig / 60 * w / target
+                    f_orig = float(m.group(1))
+                    f_rebuilt = round(1 + k * (gs['dura_ISF_average'] - target), 2)
+                    st_dura_f.add(stamp, f_orig, f_rebuilt, 'avg %.1f target %g dura %gm' % (gs['dura_ISF_average'], target, dura_orig))
+                    avg_mid = target + (f_orig - 1) / k
+                    st_dura_avg.add(stamp, avg_mid, gs['dura_ISF_average'], 'orig factor %s band +/-%.1f' % (m.group(1), 0.005 / k),
+                                    tol=0.005 / k)
                 continue
             m = re_dura_bp.match(line)
             if m:
@@ -825,9 +858,9 @@ def validate(start_iso, end_iso, url='ns:', grid='moving', smoothing='kalman', v
                 else:
                     acce_state_ok += 1
                     st_acce.add(stamp, acce_want, round(exp_f, 2), 'accel %.3f corr %.3f' % (gs['bg_acceleration'], gs['parabola_fit_correlation']))
-    lines = ['ns_glucose validation %s .. %s  grid=%s smoothing=%s  loops=%d skipped=%d' % (
-        start_iso, end_iso, grid, smoothing, len(devicestatus), skipped)]
-    for st in (st_bg, st_tick, st_dura, st_dura_bp, st_dura_avg, st_acce, st_corr, st_para_v, st_para_m):
+    lines = ['ns_glucose validation %s .. %s  grid=%s smoothing=%s  loops=%d (duplicate uploads %d) skipped=%d' % (
+        start_iso, end_iso, grid, smoothing, len(devicestatus) - duplicates, duplicates, skipped)]
+    for st in (st_bg, st_tick, st_dura, st_dura_bp, st_dura_f, st_dura_avg, st_acce, st_corr, st_para_v, st_para_m):
         lines.append(st.report())
     if acce_state_n:
         lines.append('%-28s n=%5d  agree %5.1f%%  mismatch %4d' % ('acce_ISF active/by-passed', acce_state_n,
@@ -837,7 +870,8 @@ def validate(start_iso, end_iso, url='ns:', grid='moving', smoothing='kalman', v
     text = '\n'.join(lines)
     if verbose:
         print(text)
-    return {'tick': st_tick, 'bg': st_bg, 'dura': st_dura, 'acce': st_acce, 'para_v': st_para_v, 'text': text}
+    return {'tick': st_tick, 'bg': st_bg, 'dura': st_dura, 'dura_f': st_dura_f, 'dura_avg': st_dura_avg,
+            'acce': st_acce, 'para_v': st_para_v, 'text': text}
 
 
 if __name__ == '__main__':

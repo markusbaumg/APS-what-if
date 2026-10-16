@@ -61,8 +61,8 @@
     "smb_delivery_ratio": 0.2,
     "smb_delivery_ratio_min": 0.1,
     "smb_delivery_ratio_max": 0.5,
-    "smb_delivery_ratio_bg_range": 18.0,
-    "smb_max_range_extension": 1.15,
+    "smb_delivery_ratio_bg_range": 36.0,
+    "smb_max_range_extension": 1.8,
     "iob_threshold_percent": 80
   },
   "autoisf": {
@@ -127,6 +127,12 @@
         "parameter": "autoISF_max",
         "from": 1.3,
         "to": 1.5
+      },
+      {
+        "when": "2026-09-07T22:03:00+02:00",
+        "parameter": "smb_max_range_extension",
+        "from": 1.15,
+        "to": 1.8
       }
     ]
   },
@@ -213,8 +219,14 @@
       }
     ]
   },
+  "_overrides": {
+    "_about": "Keys ns_prefs_import.py must NOT overwrite from an export because the value was fitted to the phone's echoes (see _assumed for the evidence). Remove a key here once a fresh export explains the value.",
+    "smb.smb_delivery_ratio_bg_range": 36.0,
+    "smb.smb_max_range_extension": 1.8,
+    "flags.low_temptarget_lowers_sensitivity": false
+  },
   "_assumed": {
-    "smb.smb_delivery_ratio_bg_range": "user gave 1.0 (mmol) -> 18 mg/dl",
+    "smb.smb_delivery_ratio_bg_range": "fitted from the printed 'SMB delivery ratio set to interpolated value' lines 2026-09-01..07 (3025/3025 lines reproduced with 36 mg/dl = 2.0 mmol, 0/3025 with 18); the export summary says 1.0 mmol - unexplained. Listed in _overrides so ns_prefs_import keeps it.",
     "safety.bolus_increment": "Omnipod Dash",
     "flags.half_basal_exercise_target": "8.9 mmol (160.2 mg/dl); determine_basal.py multiplies by 18 for mmol users of autoISF >= 3.1",
     "insulin.peak_minutes": "Lyumjev plugin = 45 min; DIA taken from the Nightscout profile (6 h)",
@@ -222,7 +234,8 @@
     "flags.low_temptarget_lowers_sensitivity": "export says true, but in the whole cached week (779 loops with TT 5.5 = 99 mg/dl) the phone never printed 'Sensitivity ratio set to ... based on temp target' - it printed 'Sensitivity ratio unchanged: 1.0'. Set false so the replay reproduces the phone; the export value is kept in aaps_preferences.json",
     "safety.basal_step": "Omnipod Dash basal resolution 0.05 U/h (used to round current_basal like the pump does)",
     "flags.high_temptarget_raises_sensitivity": "false per export",
-    "safety.remainingCarbsCap / maxCOB": "AAPS defaults (not in export)"
+    "safety.remainingCarbsCap / maxCOB": "AAPS defaults (not in export)",
+    "smb.smb_max_range_extension": "1.8 fits the phone's 'maxBolus: 1.1' (= round(x * 0.15 U/h * 240 min / 60, 1), x in [1.75, 1.92)) printed from 2026-09-07 20:03Z on; the export of 18:49Z still had 1.15 (maxBolus 0.7). Replace by the value of a fresh export; the change is in profile_history. Listed in _overrides so ns_prefs_import keeps it until then."
   },
   "glucose": {
     "always_use_shortavg": false

@@ -1,3 +1,69 @@
+16.Oct.2026
+-----------
+Review fixes on the Nightscout branch:
+- emulator_core.py: the Nightscout error handler guards only the initial fetch (a failure there ends the run with 0
+  loops); an exception inside a loop surfaces as a traceback instead of a misleading 'source failed' message with
+  half-appended per-loop lists; the emulated maxBolus is read from the console echo on the AAPS 3.3+ / Nightscout path
+- determine_basal.py: UAMduration rounded half up like the JS round(x,1), was Python round (half to even)
+- ns_client.py: the pre-window Profile Switch / Temporary Target lookup skips records with isValid false and is
+  cleared by --refresh together with the treatments day files
+- ns_source.py: window bounds given with a UTC offset (+02:00 instead of Z) are normalised to UTC before the cache
+  and the loop selection are addressed; the window is resolved once; profile switches and temp targets older than
+  the 8 h treatments look-back are fetched separately so a switch running since the previous day is seen
+- ns_profile.py: originalProfileName preferred over the display name of a Profile Switch; a running switch keeps its
+  own profileJson over profile store uploads made later
+- ns_meal.py: UAM duration rounded half up like Kotlin Math.round (was Python round, half to even)
+- ns_client.py: the token is redacted from the error text of a failed request
+- emulator_optimize.py: generated VDF rows use the VDF separator, a 'Z' sentinel from parameters_known() counts as a
+  failed variant, grid and VDF paths are resolved before the chdir into software/
+- emulator_core.py: parser_debug off by default
+- git: 'upstream' remote (ga-zelle/APS-what-if, fetch only) added as the baseline for whole-file diffs
+
+
+08.Sep.2026
+-----------
+Review fixes on the Nightscout branch (no-change replay of 2026-09-06: SMB exact 91.8 -> 96.1 %, TBR 93.8 -> 96.0 %,
+emulated SMB total 28.05 -> 24.30 U against 20.25 U on the phone):
+- ns_settings.json: smb_delivery_ratio_bg_range 36 mg/dl (fitted to the phone's printed delivery ratios, the export's
+  1.0 mmol never fits), smb_max_range_extension 1.8 since 2026-09-07 22:03 (profile_history entry, maxBolus 1.1);
+  new '_overrides' section that ns_prefs_import.py never overwrites from an export
+- determine_basal.py: determine_varSMBratio gets int(bg) on the AAPS 3.3+/Nightscout path (Kotlin Int parameter)
+- ns_source.py: loops selected by their run time deliverAt (window boundaries exact, .delta rows aligned),
+  microBolusAllowed False on the 'SMB disabled (!microBolusAllowed)' echo (tempBasalFallback re-runs)
+- ns_iob.py: planned temp ends rebuilt on the minute grid of the temp start (currenttemp.duration one minute short),
+  basal cache keyed by minute (was ~1.4 million entries and 90 ms per loop per day)
+- ns_profile.py: the running profile comes from the newest Profile Switch, a newer profile store upload only supplies
+  the edited schedules; bisect instead of rebuilding the candidate list per call; --validate checks maxBolus
+- ns_client.py: a day file is final only when written after the day ended (+1 h); truncated/garbled responses are
+  retried; CLI accepts 'ns:' and --refresh
+- emulator_core.py: 'noplot' no longer part of 'All' (PDF and LIST table were skipped for the GUI presets), Nightscout
+  results named <start>_<end>.<variant>.*, transcripts say 'Nightscout <url>' instead of 'logfile', the .log header
+  echoes the ns_settings.json stamp/hash/profile_history, a Nightscout fetch failure ends the replay like a
+  truncated logfile instead of a traceback (since 16.Oct only the initial fetch is guarded)
+- emulator_optimize.py: results/<grid>_<start>_<end>/, refuses to reuse a directory with a summary.csv without
+  --overwrite, summary.txt in grid order with base first and a 'vs base' column (no longer 'least insulin first'),
+  TBR metric documented as rate in force x interval
+
+
+07.Sep.2026
+-----------
+Nightscout as data source (branch nightscout-source): the loop inputs are rebuilt from the Nightscout collections
+instead of the AAPS logfiles; emulator_batch.py takes the Nightscout url as first argument.
+- ns_client.py: API v1 reader with a per-UTC-day cache (offline replays), profile store served from the cache
+- ns_glucose.py, ns_iob.py, ns_profile.py, ns_meal.py: rebuild glucose_status, iob_data/currenttemp, profile
+  (incl. ns_settings.json preferences, temp targets, profile switches, activity monitor state) and the deviation
+  slopes; each module has a --validate self-test against the phone's own console echoes
+- ns_source.py: the replay driver (skips duplicate uploads, 2 h devicestatus lookback for planned temp durations)
+- emulator_core.py: scanNightscout(), 'noplot' output option, autoISF echo counted once per loop
+- emulator_optimize.py + variants/grid_autoISF.json: grid / one-at-a-time runner writing results/<label>/summary.csv,
+  summary.txt (ranking by insulin delta) and summary.json with proxy metrics (SMB/TBR totals, SMB more/less loops,
+  autoISF factor statistics, loops at autoISF_max, iobTH hits, insulin in rising vs other phases)
+- documentation: software/NIGHTSCOUT_SOURCE.md (data contracts, how to run, measured no-change agreement,
+  optimization example and how to read it), README section
+Known differences to the phone (see NIGHTSCOUT_SOURCE.md): Python round() vs Kotlin Math.round, SMB interval
+tolerance 12 s vs 6 s, zero-temp cap 120 vs 60 min.
+
+
 28.Jan.2026
 -----------
 Added compatibility for Debian 13 as proposed by Dries

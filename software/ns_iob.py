@@ -18,7 +18,9 @@ Contract (see NIGHTSCOUT_SOURCE.md):
 Each IOB dict: {'time', 'iob', 'activity', 'basaliob', 'bolussnooze', 'netbasalinsulin', 'hightempinsulin',
                 'iobWithZeroTemp': {'iob', 'activity', 'basaliob'}}
 
-Ported from the AAPS master sources (fetched 2026-09-07 from github.com/nightscout/AndroidAPS):
+Ported from the AAPS master sources (fetched 2026-09-07 from github.com/nightscout/AndroidAPS, re-checked line by
+line against the raw files on 2026-09-08: TemporaryBasalExtension.kt, IobCobCalculatorPlugin.kt, TB.kt,
+InsulinOrefBasePlugin.kt, IobTotalExtension.kt, OpenAPSAutoISFPlugin.kt):
     InsulinOrefBasePlugin.iobCalcForTreatment   exponential curve  tau = tp*(1-tp/td)/(1-2tp/td), a = 2tau/td,
                                                 s = 1/(1-a+(1+a)e^(-td/tau)); IOB forced to 0 for t >= DIA;
                                                 DIA = max(profile DIA, HardLimits.MIN_DIA = 5 h); Lyumjev peak = 45 min
@@ -63,23 +65,44 @@ Nightscout record mapping
     planned temp basal end
                  NS stores only the *final* length of a temp (cut when the next one started). AAPS at loop time saw
                  the planned end (e.g. 120 min) -> currenttemp.duration. It is recovered from `devicestatus`:
-                 openaps.enacted.duration (exact) matched to the temp that started within 5 min after the enacting
-                 loop with the same rate, else pump.extended.TempBasalRemaining at pump.clock (+-30 s). Without
-                 devicestatus the recorded end is used (current_temp.duration then underestimates the minutes left of
-                 a temp that was later replaced; IOB is not affected - AAPS cuts the running temp at now anyway).
+                 openaps.enacted.duration (exact): every temp is matched to the *latest* enacting loop (same rate,
+                 deliverAt within 5 min before the temp start) that has not already started another temp;
+                 else pump.extended.TempBasalRemaining at pump.clock (+-30 s). Without devicestatus the recorded end
+                 is used (current_temp.duration then underestimates the minutes left of a temp that was later
+                 replaced; IOB is not affected - AAPS cuts the running temp at now anyway).
 
-Validation (2026-09-06 UTC, 1546 loops, autosens ratio from consoleError, now = suggested.deliverAt which is the
-`currentTime` of the AAPS run; devicestatus.openaps.iob.time = lastAPSRun is 0.1 .. 4 s later):
-    iob       median 0.000 U   p95 0.001 U   max 0.002 U     (against openaps.iob.iob = suggested.IOB)
-    basaliob  median 0.000 U   p95 0.001 U   max 0.001 U
-    activity  median 0.0000    p95 0.0001    max 0.0001 U/min
-    lastBolusTime: 'last bolus X.Xm ago' reproduced in 100 % of the loops that print it
-    current_temp.duration vs pump.extended.TempBasalRemaining at pump.clock: 100 % within 1 min
-    2026-09-02: same picture (see --validate output).
-Residual differences and why: the remaining +-0.001 U / 0.0001 U/min are the last-digit rounding of AAPS
+Nightscout data gaps seen in the cached week (2026-08-31 .. 09-07) and how they are handled
+    * devicestatus is uploaded twice for most loops (same deliverAt, one copy with pump.clock before and one after
+      the pump command of that loop). Enacted records are therefore de-duplicated by deliverAt - otherwise the
+      second copy claimed the next temp of the same rate (was: 100 wrong planned durations in 3 days).
+    * The pump status copy taken 0.03 .. 0.6 s after a temp was cancelled/replaced still shows the old temp
+      (pump.extended is AAPS's expected pump state, not yet updated) while the DB row - and NS - is already cut.
+      No loop runs at such an instant (deliverAt always precedes its own pump command), so --validate counts these
+      snapshots separately (136 of 10414 in the week) instead of as mismatches.
+    * A few loops that enacted a temp uploaded no devicestatus record at all (e.g. 2026-09-03 08:12, the temp
+      after a meal bolus); their planned duration then comes from TempBasalRemaining of the following records.
+    * Omnipod Dash replaces a temp by cancel + set: the recorded end of the old temp is 0.1 .. 1 s before the start
+      of the new one. AAPS's own DB has the same gap, so it is kept as is.
+
+Validation (autosens ratio from consoleError, now = suggested.deliverAt which is the `currentTime` of the AAPS
+run; devicestatus.openaps.iob.time = lastAPSRun is 0.1 .. 4 s later). Whole cached week 2026-08-31 .. 09-07 UTC,
+11136 loops, 1128 boluses, 1525 temp basals, 0.8 s:
+    iob       median 0.000 U   p95 0.000 U   max 0.002 U   0 loops > 0.05 U   (against openaps.iob.iob = suggested.IOB)
+    basaliob  median 0.000 U   p95 0.000 U   max 0.002 U
+    activity  median 0.0000    p95 0.0000    max 0.0001 U/min
+    lastBolusTime: 'last bolus X.Xm ago' reproduced in 5365/5365 loops that print it
+    current_temp.duration vs pump.extended.TempBasalRemaining at pump.clock: 10278/10414 within 1 min,
+    136 post-cut snapshots (see above), 0 real mismatches
+    per day 2026-09-02 / 09-04 / 09-06: max |iob err| 0.002 / 0.001 / 0.001 U, lastBolusTime 671/671, 527/527,
+    882/882, current_temp 1325+12 / 1304+17 / 1448+14 of 1337 / 1321 / 1462 (ok + snapshots), 0 real mismatches.
+Residual differences and why: the remaining +-0.001 .. 0.002 U / 0.0001 U/min are the last-digit rounding of AAPS
 (Round.roundTo on values that sit at a rounding tie, plus the few seconds between deliverAt and the exact
 millisecond AAPS used for `now`, which shifts a 5-min-chunk boundary of the running temp basal now and then).
-Nothing structural is left in the validation windows: every bolus and temp basal of those days is on Nightscout.
+Nothing structural is left in the cached week: every bolus and temp basal of those days is on Nightscout.
+Known simplification: AAPS evaluates profile.getBasal(chunk centre) on the profile that was active at the temp's
+*start* (profileFunction.getProfile(t.timestamp)); this module asks basal_at(centre), i.e. the profile active at
+the chunk centre. They differ only for chunks of a temp that spans a profile switch (e.g. the 130 % boost
+automation) - one such switch in the cached week, no visible effect at the 0.001 U level.
 
 Run:  python ns_iob.py --validate 2026-09-06T00:00:00Z 2026-09-07T00:00:00Z [url] [--now iobtime]
 """
@@ -185,10 +208,17 @@ class IobCalculator:
             c = self._curves[td] = _Curve(td, self.peak)
         return c
 
+    _BASAL_CACHE_MAX = 200000                     # ~1 700 minute keys per replayed day; guard against unbounded growth
+
     def _basal(self, ms):
-        b = self._basal_cache.get(ms)
+        # keyed by minute: the profile basal only changes on schedule boundaries / profile switches, and the chunk
+        # centres of the zero-temp variants differ per array point (per-millisecond keys grew by ~1 100 per loop)
+        key = int(ms) // _MIN
+        b = self._basal_cache.get(key)
         if b is None:
-            b = self._basal_cache[ms] = float(self.basal_at(ms))
+            if len(self._basal_cache) >= self._BASAL_CACHE_MAX:
+                self._basal_cache.clear()
+            b = self._basal_cache[key] = float(self.basal_at(int(ms)))
         return b
 
     def _parse_treatments(self, treatments):
@@ -249,22 +279,38 @@ class IobCalculator:
         from ns_client import parse_iso
         if not self.temps:
             return
-        # 1. exact: the enacting loop's requested duration
+        # 1. exact: the requested duration of the loop that enacted the temp. A temp is caused by the *latest*
+        #    enacting loop before its start (the pump command follows deliverAt by a few seconds). AAPS uploads
+        #    most devicestatus records twice (same deliverAt, different pump.clock) -> de-duplicate by loop time,
+        #    otherwise the second copy would claim the next temp of the same rate.
+        enacted = {}
         for rec in devicestatus:
             en = (rec.get('openaps') or {}).get('enacted') or {}
-            if not en or en.get('rate') is None or not en.get('duration'):
+            if not en or en.get('rate') is None or en.get('duration') is None:
+                continue
+            try:
+                rate, dur = float(en['rate']), float(en['duration'])
+            except (TypeError, ValueError):
+                continue
+            if dur <= 0 or rate < 0:                    # rate -1 / duration -1 = cancel
                 continue
             stamp = en.get('deliverAt') or en.get('timestamp') or rec.get('created_at')
             if not stamp:
                 continue
-            t0 = parse_iso(stamp)
-            i = bisect.bisect_left(self.temp_ts, t0 - _MIN)
-            while i < len(self.temps) and self.temps[i]['start'] <= t0 + 5 * _MIN:
-                t = self.temps[i]
-                if t['abs'] and abs(t['rate'] - float(en['rate'])) < 0.001 and t['planned_end'] is None:
-                    t['planned_end'] = t['start'] + int(float(en['duration']) * _MIN)
+            enacted[parse_iso(stamp)] = (rate, dur)
+        en_ts = sorted(enacted)
+        used = set()                                     # one enacting loop starts at most one temp
+        for t in self.temps:
+            if not t['abs']:
+                continue
+            i = bisect.bisect_right(en_ts, t['start'] + 2000)
+            while i > 0 and en_ts[i - 1] >= t['start'] - 5 * _MIN:
+                i -= 1
+                rate, dur = enacted[en_ts[i]]
+                if i not in used and abs(rate - t['rate']) < 0.001:
+                    used.add(i)
+                    t['planned_end'] = t['start'] + int(dur * _MIN)
                     break
-                i += 1
         # 2. approximate: minutes remaining reported by the pump status of every devicestatus record
         for rec in devicestatus:
             pump = rec.get('pump') or {}
@@ -274,9 +320,11 @@ class IobCalculator:
             if rem is None or not clock:
                 continue
             cms = parse_iso(clock)
-            t = self._temp_active_at(cms, use_planned=False)
+            t = self._temp_active_at(cms)
             if t is not None and t['planned_end'] is None:
-                t['planned_end'] = cms + int(rem) * _MIN
+                # TempBasalRemaining is floor((end - clock) / min) of a temp planned as whole minutes from its start:
+                # rebuild the end on the minute grid of the start (cms + rem may be up to 1 min short)
+                t['planned_end'] = t['start'] + int(round((cms + int(rem) * _MIN + 30000 - t['start']) / _MIN)) * _MIN
 
     # ------------------------------------------------------------------ temp basal chunks (TB.iobCalc)
     def _make_chunks(self, start, end):
@@ -419,15 +467,13 @@ class IobCalculator:
         ts = self.bolus_ts[hi - 1]
         return ts if ts >= now_ms - dia_ms else 0
 
-    def _temp_active_at(self, ms, use_planned=True):
+    def _temp_active_at(self, ms):
+        """the temp basal whose recorded run (start <= ms < end) covers ms, else None - like the AAPS DB row"""
         i = bisect.bisect_right(self.temp_ts, ms)
         if i == 0:
             return None
         t = self.temps[i - 1]
-        end = t['end']
-        if use_planned and t['planned_end'] is not None:
-            end = min(t['planned_end'], t['end']) if end < ms else end
-        return t if t['start'] <= ms < end else None
+        return t if t['start'] <= ms < t['end'] else None
 
     def temp_rate(self, temp, ms):
         return temp['rate'] if temp['abs'] else self._basal(ms) * temp['rate'] / 100.0
@@ -498,7 +544,7 @@ def validate(start_iso, end_iso, url=None, now_source='deliverAt', settings_path
     autosens = 1.0
     lb_ok = lb_n = 0
     lb_bad = []
-    ct_ok = ct_n = 0
+    ct_ok = ct_n = ct_snap = 0
     ct_bad = []
     for rec in devicestatus:
         o = rec['openaps']
@@ -542,11 +588,20 @@ def validate(start_iso, end_iso, url=None, now_source='deliverAt', settings_path
         ext = pump.get('extended') or {}
         if ext.get('TempBasalRemaining') is not None and pump.get('clock'):
             ct_n += 1
-            ct = calc.current_temp(parse_iso(pump['clock']))
+            clock_ms = parse_iso(pump['clock'])
+            ct = calc.current_temp(clock_ms)
             if abs(ct['duration'] - int(ext['TempBasalRemaining'])) <= 1:
                 ct_ok += 1
-            elif len(ct_bad) < 5:
-                ct_bad.append((pump['clock'], ct, ext.get('TempBasalStart'), ext['TempBasalRemaining']))
+            else:
+                # pump status snapshot taken < 2 s after the recorded cut of a temp (cancel / replace by the
+                # loop in progress): AAPS's expected pump state was not updated yet, the DB row already was.
+                # No loop ever runs at such an instant, so this is not comparable.
+                k = bisect.bisect_right(calc.temp_ts, clock_ms)
+                prev_end = calc.temps[k - 1]['end'] if k else 0
+                if ct['duration'] == 0 and 0 <= clock_ms - prev_end < 2000:
+                    ct_snap += 1
+                elif len(ct_bad) < 5:
+                    ct_bad.append((pump['clock'], ct, ext.get('TempBasalStart'), ext['TempBasalRemaining']))
     dt = _time.time() - t0
     log(f'\n{len(devicestatus)} loops evaluated in {dt:.1f} s  ({to_iso(start_ms)} .. {to_iso(end_ms)})')
     log(f'{"quantity":<12}{"median":>10}{"p95":>10}{"max":>10}{"n>0.05":>9}')
@@ -554,7 +609,9 @@ def validate(start_iso, end_iso, url=None, now_source='deliverAt', settings_path
         if v:
             log(f'{k:<12}{_pct(v, 50):>10.4f}{_pct(v, 95):>10.4f}{max(v):>10.4f}{sum(1 for x in v if x > 0.05):>9}')
     log(f'lastBolusTime: {lb_ok}/{lb_n} loops reproduce the "last bolus Xm ago" line' + (f'  e.g. {lb_bad}' if lb_bad else ''))
-    log(f'current_temp : {ct_ok}/{ct_n} pump status records reproduce TempBasalRemaining within 1 min' + (f'  e.g. {ct_bad}' if ct_bad else ''))
+    log(f'current_temp : {ct_ok}/{ct_n} pump status records reproduce TempBasalRemaining within 1 min; '
+        f'{ct_snap} snapshots < 2 s after a temp cut (not comparable), {ct_n - ct_ok - ct_snap} real mismatches'
+        + (f'  e.g. {ct_bad}' if ct_bad else ''))
     worst.sort(key=lambda w: -w[0])
     log('\n10 worst loops (score = max(|iob err|, |basaliob err|, 10*|activity err|)):')
     for score, stamp, ratio, mine, ref in worst[:10]:

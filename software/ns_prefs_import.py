@@ -3,7 +3,9 @@ ns_prefs_import.py  -  read an AAPS preferences export (encrypted "aaps_encrypte
 already decrypted key/value JSON), strip everything secret or noisy, and
 
   1. write software/aaps_preferences.json   (scrubbed full export, for reference / diffing)
-  2. update the matching values in software/ns_settings.json
+  2. update the matching values in software/ns_settings.json - except the keys listed in its
+     '_overrides' section (values fitted to the phone's echoes, e.g. smb_delivery_ratio_bg_range);
+     for those the export value is only reported
 
 usage:  ../.venv/bin/python ns_prefs_import.py <export.json> [--password <pw>] [--no-settings]
         password: --password, else environment variable AAPS_EXPORT_PASSWORD, else interactive prompt.
@@ -208,27 +210,32 @@ def update_settings(prefs, meta, source_name):
         settings = json.load(f)
     changed = []
     units_mmol = str(prefs.get('units', 'mg/dl')).lower().startswith('mmol')
+    # keys fitted to the phone's echoes (ns_settings.json '_overrides') are kept; the export value is only reported
+    overrides = {k: v for k, v in (settings.get('_overrides') or {}).items() if not k.startswith('_')}
+
+    def put(section, key, val):
+        sec = settings.setdefault(section, {})
+        dotted = section + '.' + key
+        if dotted in overrides:
+            if sec.get(key) != val:
+                print(f'  keeping {dotted} = {sec.get(key)} (in _overrides; the export says {val})')
+            return
+        if sec.get(key) != val:
+            changed.append(f'{dotted}: {sec.get(key)} -> {val}')
+            sec[key] = val
+
     for (section, key), pref_key in MAP.items():
         if pref_key not in prefs:
             continue
-        val = coerce(prefs[pref_key])
-        sec = settings.setdefault(section, {})
-        if sec.get(key) != val:
-            changed.append(f'{section}.{key}: {sec.get(key)} -> {val}')
-            sec[key] = val
+        put(section, key, coerce(prefs[pref_key]))
     # values that need a unit conversion
     if 'openapsama_smb_delivery_ratio_bg_range' in prefs:
         v = round(float(coerce(prefs['openapsama_smb_delivery_ratio_bg_range'])) * (18.0 if units_mmol else 1.0), 2)
-        if settings['smb'].get('smb_delivery_ratio_bg_range') != v:
-            changed.append(f'smb.smb_delivery_ratio_bg_range: {settings["smb"].get("smb_delivery_ratio_bg_range")} -> {v}')
-        settings['smb']['smb_delivery_ratio_bg_range'] = v
+        put('smb', 'smb_delivery_ratio_bg_range', v)
     if 'half_basal_exercise_target' in prefs:                       # stored in mg/dl by AAPS
         mgdl = float(coerce(prefs['half_basal_exercise_target']))
-        settings['flags']['half_basal_exercise_target_mgdl'] = round(mgdl, 1)
-        v = round(mgdl / 18.0, 1) if units_mmol else round(mgdl, 1)
-        if settings['flags'].get('half_basal_exercise_target') != v:
-            changed.append(f'flags.half_basal_exercise_target: {settings["flags"].get("half_basal_exercise_target")} -> {v}')
-        settings['flags']['half_basal_exercise_target'] = v
+        put('flags', 'half_basal_exercise_target_mgdl', round(mgdl, 1))
+        put('flags', 'half_basal_exercise_target', round(mgdl / 18.0, 1) if units_mmol else round(mgdl, 1))
     for plugin, (name, peak) in INSULIN.items():
         if coerce(prefs.get('ConfigBuilder_Enabled_INSULIN_' + plugin)) is True:
             if peak is None:

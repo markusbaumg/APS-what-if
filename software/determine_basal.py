@@ -10,7 +10,9 @@ import copy
 #import setTempBasal as tempBasalFunctions
 
 def get_version_determine_basal(echo_msg):
-    echo_msg['determine_basal.py'] = '2026-01-05 10:50'         ### half-basal_exercise_target allowed in mmol/L
+    echo_msg['determine_basal.py'] = '2026-10-16 13:00'         ### UAMduration rounded half up like the JS round(x,1), was Python round (half to even)
+    #cho_msg['determine_basal.py'] = '2026-09-08 04:00'         ### AAPS 3.3+: determine_varSMBratio gets the truncated bg like the Kotlin Int parameter
+    #cho_msg['determine_basal.py'] = '2026-01-05 10:50'         ### half-basal_exercise_target allowed in mmol/L
     #cho_msg['determine_basal.py'] = '2025-07-18 15:36'         ### drift_ISF prototype
     #cho_msg['determine_basal.py'] = '2025-05-05 04:01'         ### de-activate steps debug statement
     #cho_msg['determine_basal.py'] = '2025-05-03 17:36'         ### extension for calibration transition
@@ -1490,7 +1492,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             predUCI = min(predUCIslope, predUCImax)
             if(predUCI>0) :
                 #//console_error(UAMpredBGs.length,slopeFromDeviations, predUCI);
-                UAMduration=round((len(UAMpredBGs)+1)*5/60,1)
+                UAMduration=math.floor((len(UAMpredBGs)+1)*5/60*10+0.5)/10    # JS round(x,1) rounds half up, Python round() half to even
             UAMpredBG = UAMpredBGs[-1] + predBGI + min(0, predDev) + predUCI
             #//console_error(predBGI, predCI, predUCI);
             #// truncate all BG predictions at 4 hours
@@ -2193,7 +2195,10 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             roundSMBTo = 1 / bolus_increment
             #was: microBolus = int(min(insulinReq * new_parameter['SMBRatio'], maxBolus)*10)/10                   #### incl. GZ mod2: master was 0.5
             #// gz md 10: make the share of InsulinReq a user input
-            smb_ratio = determine_varSMBratio(profile, bg, target_bg, loop_wanted_smb, Flows)    # gz mod 12: linear function ...
+            if AAPS_Version == '3.3':                                                                          # AAPS 3.3+ / Nightscout
+                smb_ratio = determine_varSMBratio(profile, int(bg), target_bg, loop_wanted_smb, Flows)   # Kotlin: determine_varSMBratio(glucose.toInt(), ...)
+            else:
+                smb_ratio = determine_varSMBratio(profile, bg, target_bg, loop_wanted_smb, Flows)    # gz mod 12: linear function ...
             if "key_use_AIMI_CAP" in profile:   
                 if (profile["key_use_AIMI_CAP"] < maxBolus) :
                     console_error("capping maxBolus from", maxBolus, "to",profile["key_use_AIMI_CAP"],"for Lyumjev max. dose")

@@ -29,14 +29,26 @@ Keys determine_basal.py reads from profile (grep "profile\\[" determine_basal.py
     Emulator-only keys that are deliberately NOT produced: new_parameter, state (setVariant), full_basal_exercise_target
     (gz_proto prototype switch), key_activity_detection (old name).
 
-Rules (ported from nightscout/AndroidAPS master, see the notes at the functions)
+Rules (ported from nightscout/AndroidAPS master: OpenAPSAutoISFPlugin.invoke/applyBasalConstraints, OapsProfileAutoIsf,
+ProfileSealed, BlockExtension.blockValueBySeconds/shiftBlock, MidnightUtils, HardLimits, ProfileUtilImpl.convertToMgdlDetect,
+TemporaryTargetDao.getTemporaryTargetActiveAt, ProfileSwitchDao; see the notes at the functions)
     * glucose values inside the profile are mg/dl (NS mmol * 18); out_units = 'mmol/L' when NS units are mmol
     * active NS profile at time t: newest profile document with startDate <= t, its defaultProfile (or settings.nightscout.profile_name);
       a 'Profile Switch' treatment (profile, profileJson, percentage, timeshift, duration) that is newer overrides while active
-      (ProfileSealed.PS: basal * pct/100, ISF and CR * 100/pct, targets unscaled, schedule shifted by timeshift hours)
+      (ProfileSealed.PS: basal * pct/100, ISF and CR * 100/pct, targets unscaled, schedule shifted by timeshift hours;
+      the loop runs on the EffectiveProfileSwitch built by shiftBlock(), i.e. the schedule is sampled per full hour).
+      The switch's profileJson IS the EffectiveProfileSwitch: it stays in force until the next switch, a store document
+      uploaded later (every save in the profile editor re-uploads the store) does not touch it. Only a switch without
+      profileJson is looked up in the store: by originalProfileName (AAPS writes 'profile' as the customized name,
+      e.g. 'X (130%)', when percentage != 100 or timeshift != 0), then 'profile', then the document's defaultProfile (warning)
+    * local time of day = MidnightUtils.secondsFromMidnight in the profile time zone (zoneinfo; fallback: document utcOffset)
     * temp target: newest 'Temporary Target' treatment with created_at <= t < created_at + duration (TemporaryTargetDao
-      .getTemporaryTargetActiveAt) -> min_bg = targetBottom, max_bg = targetTop, target_bg = (low+high)/2, temptargetSet = True;
-      duration 0 = cancel
+      .getTemporaryTargetActiveAt) -> min_bg = targetBottom, max_bg = targetTop, target_bg = (low+high)/2 (TT.target()),
+      each verified against HardLimits.LIMIT_TEMP_*; temptargetSet = True; duration 0 = cancel. Without a TT: min_bg/max_bg =
+      roundTo(profile low/high target, 0.1) clamped to LIMIT_MIN_BG/LIMIT_MAX_BG, target_bg = (low+high)/2 clamped to LIMIT_TARGET_BG
+    * half_basal_exercise_target: AAPS master carries the mg/dl Int preference; ns_settings.json gives the mmol value (8.9) because
+      determine_basal.py (autoISF >= 3.1.0, mmol user) multiplies by 18 itself - the value is copied 1:1, not converted here
+    * lgsThreshold: convertToMgdlDetect (value < 36 -> mmol * 18), int; smb_delivery_ratio_bg_range is always mg/dl
     * settings.profile_history.changes: a change {when, parameter, from, to} means the profile key `parameter` had value `from`
       before `when` (only for keys that exist in the settings sections, e.g. autoISF_max)
     * activity monitor: reproduce the state printed in consoleError with synthetic step counts (thresholds in determine_basal.activityMonitor)
@@ -49,8 +61,11 @@ compares against consoleError: 'profile.sens: X, sens: Y', 'ISF unchanged: X' / 
 'adjusting basal from X to Y', 'CR: X', suggested.targetBG, 'SMB enabled; current target X has even decimal',
 'Activity monitor disabled: tempTarget' vs the Temporary Target treatments, 'User setting iobTH=..', 'limited by autoISF_max X',
 and re-runs determine_basal.activityMonitor on the synthetic step counts.
+Smoke test: `python ns_profile.py --smoke 2026-09-06T12:00:00Z` builds the profile of the nearest loop and asserts that every
+key of REQUIRED_KEYS (all keys determine_basal.py reads) is present without relying on emulator_core.setVariant defaults.
 Standard library only (runs under QPython); matplotlib is never imported here.
 """
+import bisect
 import json
 import math
 import os
@@ -95,6 +110,33 @@ AM_STEPS = {
 _re_version = re.compile(r'start AutoISF\s+([0-9][0-9.]*)')
 _re_initialising = re.compile(r'Activity monitor initialising for\s+(-?\d+)\s+more minutes')
 
+# every profile key determine_basal.py reads (grep "profile\[" / "profile.get(" / "in profile"), without the emulator-only
+# piggyback keys new_parameter/state (set by emulator_core.setVariant), the gz_proto switch full_basal_exercise_target,
+# the historical key_activity_detection and the optional key_use_AIMI_CAP.  `python ns_profile.py --smoke <ISO>` checks them.
+REQUIRED_KEYS = (
+    'sens', 'current_basal', 'max_iob', 'temptargetSet', 'maxSMBBasalMinutes', 'iob_threshold_percent', 'out_units',
+    'maxUAMSMBBasalMinutes', 'carb_ratio', 'autoISF_version', 'A52_risk_enable', 'target_bg', 'skip_neutral_temps',
+    'min_bg', 'meal_addon', 'max_bg', 'bgBrake_ISF_weight', 'activity_detection', 'SMBInterval', 'smb_max_range_extension',
+    'smb_delivery_ratio_min', 'smb_delivery_ratio_max', 'remainingCarbsFraction', 'remainingCarbsCap', 'meal_type_weight',
+    'max_daily_safety_multiplier', 'half_basal_exercise_target', 'exercise_mode', 'enableSMB_with_temptarget',
+    'enableSMB_with_COB', 'enableSMB_always', 'enableSMB_after_carbs', 'current_basal_safety_multiplier',
+    'calibrationStart', 'calibrationIgnore', 'calibrationDuration', 'bolus_increment', 'bgAccel_ISF_weight', 'autoISF_min',
+    'allowSMB_with_high_temptarget', 'time_since_start', 'smb_delivery_ratio_bg_range', 'smb_delivery_ratio',
+    'sensitivity_raises_target', 'resistance_lowers_target', 'recentSteps5Minutes', 'recentSteps10Minutes',
+    'recentSteps15Minutes', 'recentSteps30Minutes', 'recentSteps60Minutes', 'profile_percentage', 'pp_ISF_weight',
+    'pp_ISF_hours', 'phone_moved', 'parabola_fit_source', 'max_daily_basal', 'max_basal', 'lower_ISFrange_weight',
+    'low_temptarget_lowers_sensitivity', 'inactivity_scale_factor', 'inactivity_idle_start', 'inactivity_idle_end',
+    'ignore_inactivity_overnight', 'higher_ISFrange_weight', 'high_temptarget_raises_sensitivity', 'enableUAM',
+    'enableSMB_EvenOn_OddOff_always', 'enable_pp_ISF_always', 'enable_dura_ISF_with_COB', 'enable_autoISF',
+    'dura_ISF_weight', 'drift_ISF_weight', 'delta_ISFrange_weight', 'carbsReqThreshold', 'autosens_max', 'autoISF_max',
+    'adv_target_adjustments', 'activity_scale_factor', 'dia', 'lgsThreshold', 'maxCOB',
+)
+
+
+def missing_keys(profile):
+    """REQUIRED_KEYS that are absent or None in `profile` (empty list = complete, no setVariant default needed)"""
+    return [k for k in REQUIRED_KEYS if profile.get(k) is None]
+
 
 # ----------------------------------------------------------------------------- helpers
 def _clamp(value, limits):
@@ -119,8 +161,8 @@ def _to_mgdl(value, units):
 
 
 def _to_mgdl_detect(value):
-    """profileUtil.convertToMgdlDetect: values below 40 are treated as mmol/l"""
-    return value * MMOL_TO_MGDL if value < 40 else value
+    """ProfileUtilImpl.convertToMgdlDetect: isMgdl(x) = x >= 36, everything below is mmol/l"""
+    return value * MMOL_TO_MGDL if value < 36 else value
 
 
 def _time_as_seconds(entry):
@@ -146,8 +188,13 @@ def _schedule(entries):
     return out
 
 
-def _value_by_seconds(schedule, seconds_from_midnight, multiplier=1.0, timeshift_hours=0):
-    """List<Block>.blockValueBySeconds (BlockExtension.kt): value of the block containing the shifted second"""
+def _value_by_seconds(schedule, seconds_from_midnight, multiplier=1.0, timeshift_hours=0, hourly=True):
+    """List<Block>.blockValueBySeconds (BlockExtension.kt): value of the block containing the shifted second.
+    hourly=True reproduces the EffectiveProfileSwitch the loop actually runs on: ProfileSealed.convertToNonCustomizedProfile
+    builds it with shiftBlock(), which samples the schedule once per full hour (blockValueBySeconds(hour*3600, ...)),
+    so a schedule entry at a half hour only takes effect at the next full hour."""
+    if hourly:
+        seconds_from_midnight = (int(seconds_from_midnight) // 3600) * 3600
     shifted = (seconds_from_midnight - int(timeshift_hours) * 3600 + DAY_SECONDS) % DAY_SECONDS
     value = schedule[-1][1]
     for start, v in schedule:
@@ -181,6 +228,12 @@ def _doc_ms(doc):
     if isinstance(doc.get('mills'), (int, float)):
         return int(doc['mills'])
     return 0
+
+
+def _switch_name(t):
+    """store name of a Profile Switch: originalProfileName first - AAPS uploads 'profile' as the customized name
+    ('Lyumjev FCL (130%)') when percentage != 100 or timeshift != 0, which never exists in the store"""
+    return t.get('originalProfileName') or t.get('profile') or ''
 
 
 def _timeshift_hours(value):
@@ -294,6 +347,12 @@ class ProfileBuilder:
                 self.temp_targets.append((_treatment_ms(t), t))
         self.switches.sort(key=lambda x: x[0])
         self.temp_targets.sort(key=lambda x: x[0])
+        # store documents and switches merged once, ascending, for a bisect in active_profile()
+        self._switch_ts = [start for start, _ in self.switches]
+        self._events = sorted([(start, 'doc', doc) for start, doc in self.docs] +
+                              [(start, 'ps', t) for start, t in self.switches], key=lambda e: e[0])
+        self._event_ts = [e[0] for e in self._events]
+        self._active_cache = {}                           # (event index, ms of the last temporary switch check) -> _Active
         self._pure_cache = {}
         self._history = self._parse_history(self.settings.get('profile_history', {}))
         self._warned = set()
@@ -314,7 +373,7 @@ class ProfileBuilder:
     def _pure_from_switch(self, t, start_ms):
         key = ('ps', t.get('identifier') or t.get('_id') or start_ms)
         if key not in self._pure_cache:
-            name = t.get('profile') or t.get('originalProfileName') or ''
+            name = _switch_name(t)
             pure = None
             pj = t.get('profileJson')
             if pj:
@@ -344,29 +403,69 @@ class ProfileBuilder:
             chosen = self.docs[0][1]
         return chosen
 
+    def _switch_at(self, ms):
+        """(start, treatment) of the newest Profile Switch started at or before ms that is not an expired temporary
+        switch, or None. In AAPS only the (Effective) Profile Switch defines the running profile."""
+        i = bisect.bisect_right(self._switch_ts, ms)
+        while i > 0:
+            i -= 1
+            start, t = self.switches[i]
+            dur = float(t.get('duration') or 0)
+            if dur > 0 and start + dur * 60000 <= ms:
+                continue                                    # temporary switch already over
+            return start, t
+        return None
+
     def active_profile(self, ms):
-        """effective profile at ms: newest of (profile store document, Profile Switch) that is not an expired temporary switch"""
-        candidates = [(start, 'doc', doc) for start, doc in self.docs if start <= ms]
-        for start, t in self.switches:
-            if start <= ms:
-                dur = float(t.get('duration') or 0)
-                if dur > 0 and start + dur * 60000 <= ms:
-                    continue                                    # temporary switch already over
-                candidates.append((start, 'ps', t))
-        if not candidates:
+        """effective profile at ms.
+        The running profile (name, percentage, timeshift) comes from the newest Profile Switch at or before ms. Its
+        profileJson is the EffectiveProfileSwitch the loop runs on and stays in force until the next switch: a store
+        document uploaded after the switch (any edit in the profile editor re-uploads the store) changes neither the
+        schedules nor which profile runs (its defaultProfile is the editor selection, not the switched profile).
+        Only a switch without profileJson takes its schedules from the newest store document ('store+switch')."""
+        i = bisect.bisect_right(self._event_ts, ms) - 1
+        if i < 0:
             if self.docs:
                 doc = self.docs[0][1]
                 return _Active(self._pure_from_doc(doc, self.profile_name or doc.get('defaultProfile')))
             raise ValueError('ns_profile: no profile document and no profile switch available')
-        candidates.sort(key=lambda c: c[0])
-        start, kind, obj = candidates[-1]
+        sw = self._switch_at(ms)
+        key = (i, sw[0] if sw else None)
+        act = self._active_cache.get(key)
+        if act is not None:
+            return act
+        start, kind, obj = self._events[i]
         if kind == 'doc':
-            return _Active(self._pure_from_doc(obj, self.profile_name or obj.get('defaultProfile')), 100, 0, 'store')
-        pure = self._pure_from_switch(obj, start)
-        if pure is None:
-            doc = self._doc_at(ms)
-            pure = self._pure_from_doc(doc, self.profile_name or doc.get('defaultProfile'))
-        return _Active(pure, obj.get('percentage') or 100, _timeshift_hours(obj.get('timeshift')), 'switch')
+            if sw is None:
+                act = _Active(self._pure_from_doc(obj, self.profile_name or obj.get('defaultProfile')), 100, 0, 'store')
+            else:
+                sw_start, t = sw
+                # the switch's own profileJson outlives later store uploads (EffectiveProfileSwitch); the store is
+                # only consulted for a switch that carries none
+                pure = self._pure_from_switch(t, sw_start) if t.get('profileJson') else None
+                source = 'switch'
+                if pure is None:
+                    pure = self._pure_from_doc(obj, _switch_name(t) or self.profile_name or obj.get('defaultProfile'))
+                    source = 'store+switch'
+                act = _Active(pure, t.get('percentage') or 100, _timeshift_hours(t.get('timeshift')), source)
+        else:
+            if sw is None or sw[0] != start:
+                # the newest event is a switch that expired (temporary); fall back to the running one / the store
+                if sw is None:
+                    doc = self._doc_at(ms)
+                    act = _Active(self._pure_from_doc(doc, self.profile_name or doc.get('defaultProfile')), 100, 0, 'store')
+                else:
+                    start, obj = sw
+            if act is None:
+                pure = self._pure_from_switch(obj, start)
+                if pure is None:
+                    doc = self._doc_at(ms)
+                    pure = self._pure_from_doc(doc, self.profile_name or doc.get('defaultProfile'))
+                act = _Active(pure, obj.get('percentage') or 100, _timeshift_hours(obj.get('timeshift')), 'switch')
+        if len(self._active_cache) > 10000:
+            self._active_cache.clear()
+        self._active_cache[key] = act
+        return act
 
     # ------------------------------------------------------------------ temp targets
     def temp_target_at(self, ms):
@@ -566,14 +665,18 @@ def _validate(start_iso, end_iso, url=None):
         settings = json.load(f)
     ns_cfg = settings.get('nightscout', {})
     url = url or ns_cfg.get('url')
+    # refresh_minutes large: the self-test runs from the cache only (past days are final anyway; this keeps the profile
+    # store and the current day from being re-fetched on every run)
     ns = ns_client.NightscoutClient(url, cache_dir=ns_cfg.get('cache_dir'), token=ns_cfg.get('token'),
-                                    api_secret_sha1=ns_cfg.get('api_secret_sha1'))
+                                    api_secret_sha1=ns_cfg.get('api_secret_sha1'), refresh_minutes=10 ** 7)
     start_ms, end_ms = parse_iso(start_iso), parse_iso(end_iso)
     lookback = 8 * 60 * 60 * 1000
     devicestatus = ns.devicestatus(start_ms, end_ms)
     treatments = ns.treatments(start_ms - lookback, end_ms)
     docs = ns.profiles()
-    pb = ProfileBuilder(docs, treatments, settings)
+    # like ns_source.load(): the Profile Switch / Temporary Target running since before the look-back
+    older = [t for t in (ns.latest_treatment(et, start_ms - lookback) for et in ('Profile Switch', 'Temporary Target')) if t]
+    pb = ProfileBuilder(docs, older + treatments, settings)
 
     import determine_basal
     import tempfile
@@ -589,6 +692,7 @@ def _validate(start_iso, end_iso, url=None):
     re_parity = re.compile(r'^SMB (enabled|disabled); current target\s*([0-9.]+)')
     re_iobth = re.compile(r'^User setting iobTH=([0-9.]+)%')
     re_aimax = re.compile(r'limited by autoISF_max\s*([0-9.]+)')
+    re_maxbolus = re.compile(r'maxBolus:\s*([0-9.]+)')
     re_am_first = re.compile(r'^(Activity monitor[^:,]*)')
 
     stats = {}        # metric -> dict(n, ok, worst list)
@@ -626,7 +730,12 @@ def _validate(start_iso, end_iso, url=None):
         tol_bg = 0.05 * f + 1e-6
 
         am_line = None
+        smb_minutes_key = 'maxUAMSMBBasalMinutes'
         for line in ce:
+            if line.startswith('profile.maxSMBBasalMinutes'):
+                smb_minutes_key = 'maxSMBBasalMinutes'
+            elif line.startswith('profile.maxUAMSMBBasalMinutes'):
+                smb_minutes_key = 'maxUAMSMBBasalMinutes'
             m = re_psens.match(line)
             if m:
                 x = float(m.group(1)) * f
@@ -665,6 +774,16 @@ def _validate(start_iso, end_iso, url=None):
                 x = float(m.group(1))
                 note('autoISF_max vs limited-by line', abs(prof['autoISF_max'] - x) < 0.001, prof['autoISF_max'] - x, stamp,
                      f'autoISF_max {prof["autoISF_max"]} vs {x}')
+                continue
+            m = re_maxbolus.search(line)
+            if m:
+                # DetermineBasalAutoISF: maxBolus = round(smb_max_range_extension * current_basal * maxUAMSMBBasalMinutes / 60, 1)
+                # (the IOB > COB branch, i.e. the UAM minutes; the COB branch uses maxSMBBasalMinutes - both are 240 here)
+                x = float(m.group(1))
+                minutes = prof[smb_minutes_key]
+                mine = round(prof['smb_max_range_extension'] * prof['current_basal'] * minutes / 60.0 + 1e-9, 1)
+                note('maxBolus vs smb_max_range_extension', abs(mine - x) < 0.001, mine - x, stamp,
+                     f'maxBolus {mine} vs {x} (smb_max_range_extension {prof["smb_max_range_extension"]}, basal {prof["current_basal"]})')
                 continue
             if line.startswith('Activity monitor') and am_line is None:
                 am_line = line
@@ -722,9 +841,42 @@ def _validate(start_iso, end_iso, url=None):
     return stats
 
 
+def _smoke(stamp_iso, url=None):
+    """build the profile of the loop closest to stamp_iso and check every key determine_basal.py reads"""
+    import ns_client
+    settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ns_settings.json')
+    with open(settings_file, 'r', encoding='utf-8') as f:
+        settings = json.load(f)
+    ns_cfg = settings.get('nightscout', {})
+    ns = ns_client.NightscoutClient(url or ns_cfg.get('url'), cache_dir=ns_cfg.get('cache_dir'), token=ns_cfg.get('token'),
+                                    api_secret_sha1=ns_cfg.get('api_secret_sha1'), refresh_minutes=10 ** 7)
+    t = parse_iso(stamp_iso)
+    window = 30 * 60 * 1000
+    recs = [r for r in ns.devicestatus(t - window, t + window) if (r.get('openaps') or {}).get('suggested')]
+    if not recs:
+        print(f'no devicestatus around {stamp_iso}')
+        return 1
+    rec = min(recs, key=lambda r: abs(parse_iso(r['openaps']['suggested'].get('deliverAt') or r['created_at']) - t))
+    sug = rec['openaps']['suggested']
+    now_ms = parse_iso(sug.get('deliverAt') or rec['created_at'])
+    pb = ProfileBuilder(ns.profiles(), ns.treatments(t - 8 * 3600 * 1000, t + window), settings)
+    prof = pb.profile_at(now_ms, sug.get('consoleError') or [])
+    missing = missing_keys(prof)
+    print(f'profile at {sug.get("deliverAt")}: {len(prof)} keys, required {len(REQUIRED_KEYS)}, missing {missing or "none"}')
+    for k in ('sens', 'current_basal', 'carb_ratio', 'min_bg', 'max_bg', 'target_bg', 'temptargetSet', 'dia', 'max_daily_basal',
+              'max_basal', 'out_units', 'profile_percentage', 'autoISF_version', 'autoISF_max', 'lgsThreshold',
+              'half_basal_exercise_target', 'recentSteps60Minutes', 'phone_moved', 'time_since_start'):
+        print(f'  {k:<28s} {prof.get(k)!r}')
+    print(f'  basal_at = {pb.basal_at(now_ms)}, dia_hours = {pb.dia_hours(now_ms)}, temp target = {pb.temp_target_at(now_ms)}')
+    assert not missing, f'missing profile keys: {missing}'
+    return 0
+
+
 if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == '--validate':
         _validate(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)
+    elif len(sys.argv) >= 3 and sys.argv[1] == '--smoke':
+        sys.exit(_smoke(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None))
     else:
         print(__doc__)
         sys.exit(1)
