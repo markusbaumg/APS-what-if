@@ -19,3 +19,7 @@ software/variants/*.txt
 software/variants/*.log
 software/variants/*.delta
 software/variants/*.pdf
+
+# Hindcast studies and frozen loop inputs (software/hindcast)
+software/studies/
+software/frozen/
