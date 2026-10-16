@@ -1,0 +1,168 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://github.com/markusbaumg/APS-what-if/software/hindcast/schemas/status.schema.json",
+ "title": "Status",
+ "x-contract-version": 1,
+ "type": "object",
+ "properties": {
+  "study": {
+   "type": "string"
+  },
+  "question": {
+   "type": "string"
+  },
+  "phase": {
+   "type": "string"
+  },
+  "trials_done": {
+   "type": "integer"
+  },
+  "trials_planned": {
+   "type": "integer"
+  },
+  "running": {
+   "type": "boolean"
+  },
+  "heartbeat": {
+   "type": "string"
+  },
+  "trials_failed": {
+   "type": "integer",
+   "default": 0
+  },
+  "trials_blocked": {
+   "type": "integer",
+   "default": 0
+  },
+  "pid": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "round": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "stale_context": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "floor": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "number"
+   }
+  },
+  "days": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "string"
+   }
+  },
+  "dead_parameters": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "top": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/TopItem"
+   }
+  },
+  "exit_code": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "stop_reason": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "report": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "artifact_url": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "proposals": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "string"
+   }
+  }
+ },
+ "additionalProperties": false,
+ "description": "studies/<study>/status.json: <= 2 KB, the skill's whole view of a run.",
+ "required": [
+  "study",
+  "question",
+  "phase",
+  "trials_done",
+  "trials_planned",
+  "running",
+  "heartbeat"
+ ],
+ "$defs": {
+  "TopItem": {
+   "type": "object",
+   "properties": {
+    "vhash": {
+     "type": "string"
+    },
+    "variant": {
+     "type": "string"
+    },
+    "verdict": {
+     "enum": [
+      "pending",
+      "base",
+      "dead",
+      "candidate",
+      "tie",
+      "infeasible",
+      "recommended"
+     ]
+    },
+    "why": {
+     "type": "string"
+    },
+    "rank": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "effect": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "number"
+     }
+    }
+   },
+   "additionalProperties": false,
+   "description": "A candidate as status.json carries it (slim: no params, the variant label names them; <= 4 effect numbers; `vhash` may be the 12-character short form, round.json and trials.jsonl hold the full hash).",
+   "required": [
+    "vhash",
+    "variant",
+    "verdict",
+    "why"
+   ]
+  }
+ }
+}

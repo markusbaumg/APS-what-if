@@ -1,0 +1,9 @@
+# Development extras for software/hindcast (the emulator itself needs only requirements.txt).
+#   .venv/bin/pip install -r requirements-dev.txt
+#   .venv/bin/python -m pytest software/hindcast/tests -q
+-r requirements.txt
+pytest>=8.0
+
+# Optional: the Optuna search phase (software/hindcast/search.py, backlog H-307). Tests marked
+# needs_optuna skip when it is absent; coordinate descent on the stdlib is the fallback.
+#   .venv/bin/pip install "optuna>=4.0"

@@ -1,0 +1,31 @@
+{
+ "generated": "2026-10-16T20:16:59Z",
+ "source_csv": "replay of the empty VDF over the window (current core)",
+ "day": "2026-09-06",
+ "loops": 180,
+ "window": [
+  "2026-09-06T06:00:00Z",
+  "2026-09-06T09:00:00Z"
+ ],
+ "code_sha": "d26b3e43a6dd71c00ef297368e82312b0bcaae68",
+ "settings_sha": "b4faad23ee0b8e577e6b45576f4e3400d17979ad",
+ "base_vhash": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+ "files": {
+  "pred/2026-09-06/da39a3ee5e6b4b0d3255bfef95601890afd80709.json": 164847,
+  "pred/2026-09-06/da39a3ee5e6b4b0d3255bfef95601890afd80709.text.json": 234850,
+  "pred/2026-09-06/orig.json": 112269,
+  "pred/2026-09-06/orig.text.json": 92976,
+  "series/2026-09-06/da39a3ee5e6b4b0d3255bfef95601890afd80709.json": 15212,
+  "series/2026-09-06/orig.json": 14724
+ },
+ "replay": {
+  "seconds": 1.9,
+  "loops": 180,
+  "reference_csv": "variants/2026-09-06T06-00-00Z_2026-09-06T09-00-00Z.no_change.csv",
+  "reference_loops": 180,
+  "columns_differing_from_reference": [
+   "Ins. Req. emul",
+   "max bolus emul"
+  ]
+ }
+}

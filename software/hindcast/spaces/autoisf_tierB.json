@@ -1,0 +1,130 @@
+{
+ "_about": [
+  "Hindcast default parameter space, tier B (ShadowLoop proposal section 4, DESIGN.md section 5.4).",
+  "One entry per VDF key \"<array> <item>\": type float/int (low, high, step: the searched step grid), bool, or",
+  "choice (explicit values). \"phone\" is the current value in ns_settings.json (the centre of the one-at-a-time",
+  "screen and the sentinel); regenerate with `python -m hindcast.space --write-defaults` after a preferences import.",
+  "Constraints are ordering chains the sampler keeps by construction. Locked keys (DESIGN.md section 3: safety",
+  "section, profile sens/carb_ratio/current_basal/dia, every new_parameter key) are refused and never listed here.",
+  "This file says what a replay may vary; it recommends nothing. Nothing in Hindcast changes the phone.",
+  "Tier B: the second pass (pp/range/drift weights, SMB timing caps, activity factors, fit source)."
+ ],
+ "tier": "B",
+ "phone_source": "ns_settings.json",
+ "space": {
+  "profile pp_ISF_weight": {
+   "type": "float",
+   "low": 0.0,
+   "high": 0.05,
+   "step": 0.002,
+   "phone": 0.018
+  },
+  "profile pp_ISF_hours": {
+   "type": "choice",
+   "choices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    6
+   ],
+   "phone": 0
+  },
+  "profile enable_pp_ISF_always": {
+   "type": "bool",
+   "phone": true
+  },
+  "profile higher_ISFrange_weight": {
+   "type": "float",
+   "low": 0.0,
+   "high": 1.0,
+   "step": 0.05,
+   "phone": 0.4
+  },
+  "profile lower_ISFrange_weight": {
+   "type": "float",
+   "low": 0.0,
+   "high": 1.0,
+   "step": 0.05,
+   "phone": 0.0
+  },
+  "profile delta_ISFrange_weight": {
+   "type": "float",
+   "low": 0.0,
+   "high": 1.0,
+   "step": 0.05,
+   "phone": 0.0
+  },
+  "profile smb_max_range_extension": {
+   "type": "float",
+   "low": 1.0,
+   "high": 3.0,
+   "step": 0.1,
+   "phone": 1.8,
+   "_note": "the phone value 1.8 is fitted to the printed maxBolus (ns_settings.json _assumed)"
+  },
+  "profile SMBInterval": {
+   "type": "choice",
+   "choices": [
+    1,
+    2,
+    3,
+    5
+   ],
+   "phone": 1
+  },
+  "profile maxSMBBasalMinutes": {
+   "type": "choice",
+   "choices": [
+    30,
+    60,
+    90,
+    120,
+    180,
+    240
+   ],
+   "phone": 240
+  },
+  "profile maxUAMSMBBasalMinutes": {
+   "type": "choice",
+   "choices": [
+    30,
+    60,
+    90,
+    120,
+    180,
+    240
+   ],
+   "phone": 240
+  },
+  "profile activity_scale_factor": {
+   "type": "float",
+   "low": 1.0,
+   "high": 1.5,
+   "step": 0.05,
+   "phone": 1.1
+  },
+  "profile inactivity_scale_factor": {
+   "type": "float",
+   "low": 0.0,
+   "high": 1.0,
+   "step": 0.1,
+   "phone": 0.0,
+   "_note": "only observable on days with the activity-monitor echo"
+  },
+  "profile enable_dura_ISF_with_COB": {
+   "type": "bool",
+   "phone": true
+  },
+  "profile parabola_fit_source": {
+   "type": "choice",
+   "choices": [
+    3,
+    5
+   ],
+   "phone": 5
+  }
+ },
+ "constraints": []
+}

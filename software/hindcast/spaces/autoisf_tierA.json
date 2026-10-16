@@ -1,0 +1,110 @@
+{
+ "_about": [
+  "Hindcast default parameter space, tier A (ShadowLoop proposal section 4, DESIGN.md section 5.4).",
+  "One entry per VDF key \"<array> <item>\": type float/int (low, high, step: the searched step grid), bool, or",
+  "choice (explicit values). \"phone\" is the current value in ns_settings.json (the centre of the one-at-a-time",
+  "screen and the sentinel); regenerate with `python -m hindcast.space --write-defaults` after a preferences import.",
+  "Constraints are ordering chains the sampler keeps by construction. Locked keys (DESIGN.md section 3: safety",
+  "section, profile sens/carb_ratio/current_basal/dia, every new_parameter key) are refused and never listed here.",
+  "This file says what a replay may vary; it recommends nothing. Nothing in Hindcast changes the phone.",
+  "Tier A: the autoISF caps and weights with the most leverage, plus the SMB delivery-ratio family."
+ ],
+ "tier": "A",
+ "phone_source": "ns_settings.json",
+ "space": {
+  "profile autoISF_max": {
+   "type": "float",
+   "low": 1.0,
+   "high": 2.0,
+   "step": 0.05,
+   "phone": 1.5,
+   "_note": "caps every weight; when the factor sits on the cap in > 25 % of loops the weights are unobservable (vary the cap first)"
+  },
+  "profile autoISF_min": {
+   "type": "float",
+   "low": 0.3,
+   "high": 1.0,
+   "step": 0.05,
+   "phone": 0.3,
+   "_note": "floor of the ISF factor (hypo side)"
+  },
+  "profile dura_ISF_weight": {
+   "type": "float",
+   "low": 0.0,
+   "high": 1.5,
+   "step": 0.1,
+   "phone": 0.7,
+   "_note": "plateau strength; interacts with enable_dura_ISF_with_COB"
+  },
+  "profile bgAccel_ISF_weight": {
+   "type": "float",
+   "low": 0.0,
+   "high": 0.3,
+   "step": 0.01,
+   "phone": 0.09,
+   "_note": "with bgBrake_ISF_weight and parabola_fit_source"
+  },
+  "profile bgBrake_ISF_weight": {
+   "type": "float",
+   "low": 0.0,
+   "high": 0.3,
+   "step": 0.01,
+   "phone": 0.03,
+   "_note": "hypo side of the acceleration term"
+  },
+  "profile smb_delivery_ratio": {
+   "type": "float",
+   "low": 0.1,
+   "high": 0.7,
+   "step": 0.05,
+   "phone": 0.2,
+   "_note": "with _min / _max / _bg_range (the interpolation); chain min <= ratio <= max"
+  },
+  "profile smb_delivery_ratio_min": {
+   "type": "float",
+   "low": 0.05,
+   "high": 0.4,
+   "step": 0.05,
+   "phone": 0.1,
+   "_note": "lower end of the delivery-ratio interpolation"
+  },
+  "profile smb_delivery_ratio_max": {
+   "type": "float",
+   "low": 0.3,
+   "high": 0.9,
+   "step": 0.05,
+   "phone": 0.5,
+   "_note": "upper end of the delivery-ratio interpolation"
+  },
+  "profile smb_delivery_ratio_bg_range": {
+   "type": "float",
+   "low": 18.0,
+   "high": 90.0,
+   "step": 9.0,
+   "phone": 18.0,
+   "_note": "mg/dl; the phone value is itself fitted to the echoes (_assumed / _overrides in ns_settings.json)"
+  },
+  "profile iob_threshold_percent": {
+   "type": "int",
+   "low": 50,
+   "high": 100,
+   "step": 5,
+   "phone": 80,
+   "_note": "gates SMB entirely above the threshold (iobTH)"
+  }
+ },
+ "constraints": [
+  [
+   "profile smb_delivery_ratio_min",
+   "<=",
+   "profile smb_delivery_ratio",
+   "<=",
+   "profile smb_delivery_ratio_max"
+  ],
+  [
+   "profile autoISF_min",
+   "<=",
+   "profile autoISF_max"
+  ]
+ ]
+}

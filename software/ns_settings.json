@@ -92,8 +92,7 @@
     "ignore_inactivity_overnight": true,
     "inactivity_idle_start": 22,
     "inactivity_idle_end": 6,
-    "activity_ratio": 0.67,
-    "_source_of_state": "Nightscout has no step counts. The activity state per loop is taken from the original consoleError line 'Activity monitor ...' and translated into synthetic step counts that reproduce that state, so the scale factors above stay tunable. The export keys steps_activity_detected / steps_inactivity_detected are runtime states (they flip with the user's movement) and are not imported."
+    "_source_of_state": "Nightscout has no step counts. The activity state per loop is taken from the original consoleError line 'Activity monitor ...' and translated into synthetic step counts that reproduce that state, so the scale factors above stay tunable. The export keys steps_activity_detected / steps_inactivity_detected are runtime states (they flip with the user's movement) and are not imported. activity_ratio is a runtime state too (1.0 / 0.835 / 0.67 across the exports) and is computed per loop, not configured."
   },
   "flags": {
     "exercise_mode": false,

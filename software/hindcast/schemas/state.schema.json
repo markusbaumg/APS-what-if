@@ -1,0 +1,81 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://github.com/markusbaumg/APS-what-if/software/hindcast/schemas/state.schema.json",
+ "title": "State",
+ "x-contract-version": 1,
+ "type": "object",
+ "properties": {
+  "phase": {
+   "type": "string"
+  },
+  "trials_done": {
+   "type": "integer"
+  },
+  "queue_len": {
+   "type": "integer"
+  },
+  "pid": {
+   "type": "integer"
+  },
+  "heartbeat": {
+   "type": "string"
+  },
+  "stale_context": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "last_key": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "budget_left_s": {
+   "type": [
+    "number",
+    "null"
+   ]
+  },
+  "disk_free_mb": {
+   "type": [
+    "number",
+    "null"
+   ]
+  },
+  "started": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "round": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "exit_code": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "stop_reason": {
+   "type": [
+    "string",
+    "null"
+   ]
+  }
+ },
+ "additionalProperties": false,
+ "description": "studies/<study>/STATE.json, rewritten by atomic rename after every trial (the run's heartbeat).",
+ "required": [
+  "phase",
+  "trials_done",
+  "queue_len",
+  "pid",
+  "heartbeat"
+ ]
+}

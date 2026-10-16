@@ -1,0 +1,210 @@
+{
+  "_about": [
+    "Hindcast vocabulary: the may / may-not list of docs/hindcast/DESIGN.md section 3 as data (backlog H-205).",
+    "hindcast/lint.py enforces it on every candidate card, proposal and GitHub issue body; the skill's",
+    "references/vocabulary.md is generated from this file (python -m hindcast.lint --markdown).",
+    "honesty_statement: the paragraph that appears verbatim on every page, card and proposal. lint.py removes it from a",
+    "  text before checking, so its own wording ('what glucose would have done') never trips a rule.",
+    "may: phrases every surface may use; tests assert each one passes every kind.",
+    "may_not: refused wording. `pattern` is a case-insensitive regex; when absent the phrase is matched as whole words.",
+    "  `example` is a sentence the tests expect to be refused, `why` the reason shown to the author.",
+    "privacy: regexes applied to kind 'issue' only. The repository is public: what ns_settings.json already publishes",
+    "  (preference names and values) may appear in an issue; what Nightscout holds (glucose values, insulin units per day,",
+    "  loop counts per day, transcript excerpts, prediction arrays) may not. `passes` lists wording the rule must accept."
+  ],
+  "honesty_statement": "Hindcast replays the loop's decisions under other settings over the glucose and insulin history that the phone's own settings produced. It says where and how much the loop would have asked differently; it cannot say what glucose would have done. A variant that boluses earlier is charged for its bolus and for the later ones the phone actually gave, so deltas overstate aggressive settings and understate gentle ones. The base replay disagrees with the phone in about 4 % of loops; differences smaller than that floor are ties. Nothing here changes the phone; settings are for you and your care team to review. This is one person's insulin dosing, not medical advice.",
+  "may": [
+    "would have asked for",
+    "would have microbolused",
+    "would have set a zero temp",
+    "the factor would have sat on the cap",
+    "the loop would have disabled SMB in N more loops",
+    "asks for more insulin in the two hours before a recorded low",
+    "indistinguishable within the noise floor",
+    "not testable on these days",
+    "reacts earlier",
+    "reacts later",
+    "review order",
+    "recommended for review",
+    "a low followed here",
+    "tie",
+    "out of envelope",
+    "not distinguishable from candidate 3"
+  ],
+  "may_not": [
+    {
+      "phrase": "better",
+      "pattern": "\\bbetter\\b",
+      "why": "an outcome judgement; the replay only knows what the loop would have asked, not what followed",
+      "example": "This variant is better on the sport day."
+    },
+    {
+      "phrase": "best",
+      "pattern": "\\bbest\\b",
+      "why": "an outcome judgement; the table is in review order, not a ranking by outcome",
+      "example": "The best setting is dura_ISF_weight 0.5."
+    },
+    {
+      "phrase": "optimal",
+      "pattern": "\\boptim(?:al|um|ally|ised|ized)\\b",
+      "why": "an outcome judgement; nothing here is optimised for glucose",
+      "example": "autoISF_max 1.4 is optimal for weekdays."
+    },
+    {
+      "phrase": "safer",
+      "pattern": "\\bsafe(?:r|st)?\\b",
+      "why": "a safety judgement about glucose outcomes; the replay cannot make one ('safety reading' for a number a human checks is fine)",
+      "example": "The lower cap is safer."
+    },
+    {
+      "phrase": "fewer lows",
+      "pattern": "\\b(?:fewer|less|more|no|without|zero)\\s+(?:lows|hypos)\\b|\\b(?:reduc\\w*|cut|avoid\\w*)\\s+(?:the\\s+)?(?:lows|hypos)\\b",
+      "why": "a glucose outcome; virtual glucose is never computed",
+      "example": "Expect fewer lows overnight."
+    },
+    {
+      "phrase": "fewer highs",
+      "pattern": "\\b(?:fewer|less|more|no|without|zero)\\s+highs\\b|\\b(?:reduc\\w*|cut|avoid\\w*)\\s+(?:the\\s+)?highs\\b",
+      "why": "a glucose outcome; virtual glucose is never computed",
+      "example": "This gives fewer highs after breakfast."
+    },
+    {
+      "phrase": "better control",
+      "pattern": "\\b(?:better|tighter|good|improved?|poor|worse|glyc(?:a)?emic|glucose)\\s+control\\b",
+      "why": "a glucose outcome; the replay has no glucose response model",
+      "example": "The result is tighter control in the morning."
+    },
+    {
+      "phrase": "time in range",
+      "pattern": "\\btime[- ]in[- ]range\\b|\\bTIR\\b|\\b(?:in|within)\\s+range\\b",
+      "why": "a time-in-range figure is an outcome statistic that cannot follow from a decision replay",
+      "example": "Time in range rises by 3 %."
+    },
+    {
+      "phrase": "HbA1c",
+      "pattern": "\\bhba1c\\b|\\ba1c\\b|\\bgmi\\b",
+      "why": "an outcome statistic; never computed",
+      "example": "A lower HbA1c is expected."
+    },
+    {
+      "phrase": "hypo count",
+      "pattern": "\\bhypo\\s+count\\b|\\bnumber\\s+of\\s+(?:hypos|lows|highs)\\b|\\bhypos\\b|\\bhypoglyc(?:a)?emi(?:a|c)\\b",
+      "why": "counting lows or highs is a glucose outcome; a recorded low may only be named positionally ('a low followed here')",
+      "example": "The hypo count drops from 3 to 1."
+    },
+    {
+      "phrase": "would have prevented",
+      "pattern": "\\bwould\\s+have\\s+(?:prevented|avoided|caught|stopped|headed\\s+off)\\b|\\bprevent(?:s|ed|ing)?\\s+(?:a|the|any|this|that|most|all)?\\s*(?:low|high|hypo|spike|rise|drop)s?\\b",
+      "why": "a counterfactual glucose outcome; the replay cannot say what glucose would have done",
+      "example": "It would have prevented the low at 09:41."
+    },
+    {
+      "phrase": "statements about the future",
+      "pattern": "\\bwill\\s+(?:lower|raise|reduce|increase|prevent|improve|keep|avoid|lead\\s+to|result\\s+in|cause|bring|give|make|help|stop)\\b|\\bgoing\\s+to\\b|\\bin\\s+(?:the\\s+)?future\\b|\\bnext\\s+(?:week|month|time)\\b|\\bfrom\\s+now\\s+on\\b",
+      "why": "a hindcast says nothing about the future; it re-runs recorded days",
+      "example": "This setting will reduce the morning rise."
+    },
+    {
+      "phrase": "recommended setting (without 'for review')",
+      "pattern": "\\brecommend(?:ed|s|ation|ations|ing)?\\b(?![^.\\n;]{0,80}\\bfor\\s+(?:your\\s+|the\\s+|human\\s+|a\\s+)?review\\b)",
+      "why": "settings are recommended for review by the person and their care team, never as such",
+      "example": "Recommended setting: autoISF_max 1.4."
+    },
+    {
+      "phrase": "glucose would have",
+      "pattern": "\\b(?:bg|glucose|blood\\s+sugar|sugar)s?\\s+would\\s+(?:have|not\\s+have|never\\s+have|stay|drop|rise|fall|be)\\b",
+      "why": "a counterfactual glucose statement; the replay only knows the loop's decisions",
+      "example": "Glucose would have stayed under 10 after lunch."
+    },
+    {
+      "phrase": "lower glucose",
+      "pattern": "\\b(?:lower|higher|flatter|stabler|more\\s+stable|smoother)\\s+(?:bg|glucose|blood\\s+sugar)s?\\b",
+      "why": "a glucose outcome claim",
+      "example": "The variant leads to lower glucose in the afternoon."
+    },
+    {
+      "phrase": "improves",
+      "pattern": "\\bimprov(?:e|es|ed|ing|ement|ements)\\b",
+      "why": "a value judgement about outcomes; say what the loop would have asked instead",
+      "example": "dura_ISF_weight 0.5 improves the morning."
+    },
+    {
+      "phrase": "worse",
+      "pattern": "\\bworse\\b|\\bworsen(?:s|ed|ing)?\\b",
+      "why": "a value judgement about outcomes",
+      "example": "The weekend looks worse with this cap."
+    }
+  ],
+  "privacy": [
+    {
+      "name": "U/day",
+      "pattern": "\\bU\\s*/\\s*(?:day|d)\\b|\\bunits?\\s+per\\s+day\\b|\\bTDD\\b",
+      "why": "insulin per day is Nightscout data; it belongs in the private artifact, not in a public issue",
+      "example": "SMB total +4.05 U/day on the first day.",
+      "passes": "the day count and the parameter ranges are in the campaign table"
+    },
+    {
+      "name": "mmol",
+      "pattern": "\\bmmol\\b",
+      "why": "a glucose value or unit; glucose data never leaves the private artifact",
+      "example": "minGuard fell to 3.6 mmol.",
+      "passes": "autoISF_max 1.3 -> 1.5 (preference values may be named)"
+    },
+    {
+      "name": "mg/dl",
+      "pattern": "\\bmg\\s*/\\s*dl\\b",
+      "why": "a glucose value or unit",
+      "example": "BG 65 mg/dl at the time of the loop.",
+      "passes": "smb_delivery_ratio_bg_range stays at its current value"
+    },
+    {
+      "name": "BG-like number next to a time",
+      "pattern": "\\b\\d{1,2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?Z?\\b[^\\d\\n]{1,30}\\b(?:(?:[2-9]|1\\d|2[0-5])\\.\\d|(?:[4-9]\\d|[1-3]\\d\\d))\\b(?!\\s*(?:trials?|variants?|days?|rounds?|workers?|%|min\\b|h\\b|kB|MB|px|s\\b))|\\b(?:(?:[2-9]|1\\d|2[0-5])\\.\\d|(?:[4-9]\\d|[1-3]\\d\\d))\\b(?!\\s*(?:trials?|variants?|days?|rounds?|workers?|%|min\\b|h\\b|kB|MB|px|s\\b))[^\\d\\n]{1,30}\\b\\d{1,2}:\\d{2}\\b",
+      "why": "a glucose reading with its time stamp is a transcript excerpt (2.0-25.9 read as mmol, 40-399 as mg/dl; a number followed by trials/variants/days/% is a count and passes)",
+      "example": "At 09:00 the reading was 5.4 and falling.",
+      "passes": "19:42 round 4, 240 trials done; the 2026-09-06T09:00:37Z loop differs, see the artifact"
+    },
+    {
+      "name": "Microbolusing",
+      "pattern": "\\bMicrobolusing\\b|\\binsulinReq\\s*[:=]|\\beventualBG\\b|\\bminPredBG\\b|\\bminGuardBG\\b|\\bISF\\s+unchanged\\b|\\bISF\\s+from\\s+\\d",
+      "why": "wording of the loop's reason or consoleError text is a transcript excerpt",
+      "example": "Microbolusing 0.3U. insulinReq: 0.45",
+      "passes": "the variant would have microbolused in more loops than base"
+    },
+    {
+      "name": "predBGs",
+      "pattern": "\\b(?:IOB|ZT|UAM|COB)?predBGs?\\b|\\bprediction\\s+arrays?\\b[^\\n]{0,20}\\[",
+      "why": "prediction arrays are Nightscout devicestatus data",
+      "example": "predBGs: [120, 118, 115]",
+      "passes": "both prediction fans are in the drill-down of the artifact"
+    },
+    {
+      "name": "insulin units",
+      "pattern": "(?<![\\w.])(?:[1-9]\\d*(?:\\.\\d+)?|0\\.[5-9]\\d*)\\s?U\\b(?:\\s*/\\s*h)?",
+      "why": "an insulin amount in units is dosing data (amounts under 0.5 U pass so tolerances such as 0.05 U can be named)",
+      "example": "The variant asks for 2.65 U more.",
+      "passes": "within 0.05 U of the phone"
+    },
+    {
+      "name": "loop count",
+      "pattern": "\\b\\d+(?:[ ,.]\\d{3})*\\s*(?:(?:more|fewer|less|additional|extra|changed|differing)\\s+)?loops\\b|\\bloops?\\s*[:=]\\s*\\d",
+      "why": "loop counts per day describe the person's data volume; issues carry day counts and trial counts only",
+      "example": "1 311 loops on the search day.",
+      "passes": "replayed over 7 days, 240 trials done"
+    },
+    {
+      "name": "carbs",
+      "pattern": "\\b\\d+(?:\\.\\d+)?\\s?g\\s+(?:of\\s+)?carb",
+      "why": "carb entries are Nightscout treatment data",
+      "example": "after 45 g carbs at breakfast",
+      "passes": "carbs are shown as triangles on the artifact"
+    },
+    {
+      "name": "glucose statistic",
+      "pattern": "\\d+(?:\\.\\d+)?\\s?%\\s*(?:>|<|above|below|over|under)\\s*\\d|\\bpct_(?:gt|lt)\\d+\\b|\\bbg_mean\\b",
+      "why": "a share of time above or below a glucose level is Nightscout-derived data",
+      "example": "12 % > 180 on the hold-out day",
+      "passes": "cap binding 9.7 % of loops (a decision share, no glucose level)"
+    }
+  ]
+}

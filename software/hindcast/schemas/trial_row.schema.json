@@ -1,0 +1,142 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://github.com/markusbaumg/APS-what-if/software/hindcast/schemas/trial_row.schema.json",
+ "title": "TrialRow",
+ "x-contract-version": 1,
+ "type": "object",
+ "properties": {
+  "trial": {
+   "type": "integer"
+  },
+  "key": {
+   "type": "string"
+  },
+  "phase": {
+   "type": "string"
+  },
+  "vhash": {
+   "type": "string"
+  },
+  "variant": {
+   "type": "string"
+  },
+  "params": {
+   "type": "object",
+   "additionalProperties": {}
+  },
+  "day": {
+   "type": "string"
+  },
+  "status": {
+   "enum": [
+    "done",
+    "failed",
+    "blocked",
+    "stale",
+    "running"
+   ]
+  },
+  "code_sha": {
+   "type": "string"
+  },
+  "settings_sha": {
+   "type": "string"
+  },
+  "freeze_sha": {
+   "type": "string"
+  },
+  "seconds": {
+   "type": [
+    "number",
+    "null"
+   ]
+  },
+  "worker": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "rung": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "round": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "started": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "finished": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "metrics": {
+   "type": "object",
+   "additionalProperties": {}
+  },
+  "feasible": {
+   "type": [
+    "boolean",
+    "null"
+   ]
+  },
+  "flags": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "files": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "string"
+   }
+  },
+  "error": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "control": {
+   "anyOf": [
+    {
+     "enum": [
+      "base",
+      "sentinel",
+      "null"
+     ]
+    },
+    {
+     "type": "null"
+    }
+   ]
+  }
+ },
+ "additionalProperties": false,
+ "description": "One line of trials.jsonl: one (variant, day) evaluation. `metrics` keys belong to metrics.py.",
+ "required": [
+  "trial",
+  "key",
+  "phase",
+  "vhash",
+  "variant",
+  "params",
+  "day",
+  "status",
+  "code_sha",
+  "settings_sha",
+  "freeze_sha"
+ ]
+}

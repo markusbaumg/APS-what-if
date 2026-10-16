@@ -1,0 +1,346 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://github.com/markusbaumg/APS-what-if/software/hindcast/schemas/study.schema.json",
+ "title": "Study",
+ "x-contract-version": 1,
+ "type": "object",
+ "properties": {
+  "name": {
+   "type": "string"
+  },
+  "created": {
+   "type": "string"
+  },
+  "source": {
+   "type": "string"
+  },
+  "host": {
+   "type": "string"
+  },
+  "settings_sha": {
+   "type": "string"
+  },
+  "code_sha": {
+   "type": "string"
+  },
+  "days": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/StudyDay"
+   }
+  },
+  "space": {
+   "type": "object",
+   "additionalProperties": {
+    "$ref": "#/$defs/SpaceParam"
+   }
+  },
+  "objective_version": {
+   "type": "integer",
+   "default": 1
+  },
+  "contract_version": {
+   "type": "integer",
+   "default": 1
+  },
+  "core_versions": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "string"
+   }
+  },
+  "constraints": {
+   "type": "array",
+   "items": {
+    "type": "array",
+    "items": {
+     "type": "string"
+    }
+   }
+  },
+  "base_vdf_lines": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "question": {
+   "enum": [
+    "explore",
+    "earlier",
+    "gentler"
+   ],
+   "default": "explore"
+  },
+  "objective": {
+   "$ref": "#/$defs/Objective"
+  },
+  "phases": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/Phase"
+   }
+  },
+  "budget": {
+   "$ref": "#/$defs/Budget"
+  },
+  "sentinel_every": {
+   "type": "integer",
+   "default": 25
+  },
+  "outputs": {
+   "type": "string",
+   "default": "seconds/bg/iob/autosens/acce/bg_ISF/pp/dura/ISFs/insReq/SMB/basal"
+  },
+  "private_repo": {
+   "type": "boolean",
+   "default": false
+  },
+  "notes": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  }
+ },
+ "additionalProperties": false,
+ "description": "studies/<study>/study.json (DESIGN.md section 4.5).",
+ "required": [
+  "name",
+  "created",
+  "source",
+  "host",
+  "settings_sha",
+  "code_sha",
+  "days",
+  "space"
+ ],
+ "$defs": {
+  "Budget": {
+   "type": "object",
+   "properties": {
+    "hours": {
+     "type": "number",
+     "default": 6.0
+    },
+    "workers": {
+     "type": "integer",
+     "default": 4
+    }
+   },
+   "additionalProperties": false,
+   "description": "Budget(hours: float = 6.0, workers: int = 4)"
+  },
+  "Objective": {
+   "type": "object",
+   "properties": {
+    "scalar_weights": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "number"
+     }
+    },
+    "envelope": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "number"
+     }
+    },
+    "feasible": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "number"
+     }
+    },
+    "quarantine": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "number"
+     }
+    }
+   },
+   "additionalProperties": false,
+   "description": "Weights and envelopes of DESIGN.md section 5; shown on the page, never hidden."
+  },
+  "Phase": {
+   "type": "object",
+   "properties": {
+    "kind": {
+     "enum": [
+      "floor",
+      "oaat",
+      "grid",
+      "lhs",
+      "halving",
+      "coordinate",
+      "optuna",
+      "validate",
+      "cv",
+      "grow"
+     ]
+    },
+    "state": {
+     "enum": [
+      "pending",
+      "running",
+      "done",
+      "skipped",
+      "stopped"
+     ],
+     "default": "pending"
+    },
+    "points": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "n": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "seed": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "rungs": {
+     "type": [
+      "array",
+      "null"
+     ],
+     "items": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "string"
+       }
+      ]
+     }
+    },
+    "sampler": {
+     "anyOf": [
+      {
+       "enum": [
+        "tpe",
+        "nsga2"
+       ]
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "top": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "days": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "grid": {
+     "type": [
+      "object",
+      "null"
+     ],
+     "additionalProperties": {
+      "type": "array",
+      "items": {}
+     }
+    }
+   },
+   "additionalProperties": false,
+   "description": "One search phase; DESIGN.md section 5.4. Options not used by a kind stay None and are omitted.",
+   "required": [
+    "kind"
+   ]
+  },
+  "SpaceParam": {
+   "type": "object",
+   "properties": {
+    "type": {
+     "enum": [
+      "float",
+      "int",
+      "bool",
+      "choice"
+     ]
+    },
+    "low": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "high": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "step": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "choices": {
+     "type": [
+      "array",
+      "null"
+     ],
+     "items": {}
+    },
+    "phone": {}
+   },
+   "additionalProperties": false,
+   "description": "One searched parameter. float/int: low, high, step (step grid); bool: nothing; choice: choices.",
+   "required": [
+    "type"
+   ]
+  },
+  "StudyDay": {
+   "type": "object",
+   "properties": {
+    "day": {
+     "type": "string"
+    },
+    "role": {
+     "enum": [
+      "search",
+      "holdout",
+      "quarantined"
+     ],
+     "default": "search"
+    },
+    "tags": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "quarantine_reason": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "additionalProperties": false,
+   "description": "One replayed UTC day. `tags` are typed by the user (workday, weekend, sport...), never inferred.",
+   "required": [
+    "day"
+   ]
+  }
+ }
+}

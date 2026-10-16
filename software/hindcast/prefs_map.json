@@ -1,0 +1,748 @@
+{
+  "_about": [
+    "VDF key -> AAPS preference, for the candidate card's 'Show AAPS preference names' (backlog H-004).",
+    "Keys are the bare profile keys of a VDF row 'profile <key> <value>' (also the keys of ns_settings.json's",
+    "autoisf / smb / activity_monitor / flags / safety sections and of the profile dict ns_profile.profile_at() builds).",
+    "Lookup: strip the VDF group ('profile ') and index `keys`; a missing key is unmapped.",
+    "Honesty rule: `title` is the wording of the AAPS preference screen (AAPS 3.4.x + autoISF 3.2 build) as the author",
+    "knows it in October 2026, or null. A null title is NOT a guess to be filled from the key name: it means the",
+    "wording was not verified; the card prints the VDF key instead. `pref_key` is the SharedPreferences key as it",
+    "appears in software/aaps_preferences.json (the scrubbed export of 2026-09-07) and is factual where given; null",
+    "means the export carries no such key (emulator-only key, hard-coded in AAPS, or derived at run time).",
+    "Titles should be cross-checked once against the fork's res/values/strings.xml; note the result in `_verified`."
+  ],
+  "_verified": {
+    "against_strings_xml": false,
+    "note": "titles from the author's knowledge of the preference screens, not yet diffed against the autoISF 3.2 strings.xml"
+  },
+  "_fields": {
+    "vdf": "the VDF row group and key, e.g. 'profile autoISF_max'",
+    "settings_section": "where the current value lives: a section of ns_settings.json (autoisf, smb, activity_monitor, flags, safety, nightscout), 'profile' (the Nightscout profile store / AAPS profile editor), 'derived' (computed per loop), 'emulator' (emulator-only key)",
+    "pref_key": "AAPS SharedPreferences key as in aaps_preferences.json, or null",
+    "screen": "the preference screen or editor the setting sits on, or null",
+    "title": "the title shown on the phone, or null when not verified",
+    "unit": "one of _units, or null",
+    "note": "optional; explains a null or a unit trap"
+  },
+  "_units": {
+    "on/off": "boolean switch",
+    "factor": "dimensionless multiplier on ISF or a limit",
+    "weight": "dimensionless autoISF weight (0 disables the effect)",
+    "ratio": "dimensionless share, 0..1",
+    "%": "percent",
+    "min": "minutes",
+    "h": "hours",
+    "hour of day": "local hour 0..23",
+    "mg/dl": "glucose in mg/dl inside the profile dict (the phone shows the user's unit; ns_settings.json gives mg/dl unless the key name says otherwise)",
+    "mmol/L": "glucose in mmol/L (only where the key is kept in the user's unit)",
+    "U": "insulin units",
+    "U/h": "insulin units per hour",
+    "g": "grams of carbohydrate",
+    "g/U": "grams per unit (carb ratio)",
+    "glucose per U": "ISF: mg/dl per U inside the profile dict, mmol/L per U in the AAPS profile editor",
+    "readings": "number of CGM readings",
+    "text": "free text / version string"
+  },
+  "keys": {
+    "enable_autoISF": {
+      "vdf": "profile enable_autoISF",
+      "settings_section": "autoisf",
+      "pref_key": "openapsama_enable_autoISF",
+      "screen": "autoISF settings",
+      "title": "Enable autoISF",
+      "unit": "on/off"
+    },
+    "autoISF_version": {
+      "vdf": "profile autoISF_version",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "text",
+      "note": "not a preference: the plugin version printed in consoleError ('start AutoISF 3.2.0'); determine_basal.py compares it lexically"
+    },
+    "autoISF_max": {
+      "vdf": "profile autoISF_max",
+      "settings_section": "autoisf",
+      "pref_key": "autoISF_max",
+      "screen": "autoISF settings",
+      "title": "autoISF max",
+      "unit": "factor"
+    },
+    "autoISF_min": {
+      "vdf": "profile autoISF_min",
+      "settings_section": "autoisf",
+      "pref_key": "autoISF_min",
+      "screen": "autoISF settings",
+      "title": "autoISF min",
+      "unit": "factor"
+    },
+    "bgAccel_ISF_weight": {
+      "vdf": "profile bgAccel_ISF_weight",
+      "settings_section": "autoisf",
+      "pref_key": "bgAccel_ISF_weight",
+      "screen": "autoISF settings",
+      "title": "bgAccel ISF weight",
+      "unit": "weight"
+    },
+    "bgBrake_ISF_weight": {
+      "vdf": "profile bgBrake_ISF_weight",
+      "settings_section": "autoisf",
+      "pref_key": "bgBrake_ISF_weight",
+      "screen": "autoISF settings",
+      "title": "bgBrake ISF weight",
+      "unit": "weight"
+    },
+    "dura_ISF_weight": {
+      "vdf": "profile dura_ISF_weight",
+      "settings_section": "autoisf",
+      "pref_key": "dura_ISF_weight",
+      "screen": "autoISF settings",
+      "title": "dura ISF weight",
+      "unit": "weight"
+    },
+    "enable_dura_ISF_with_COB": {
+      "vdf": "profile enable_dura_ISF_with_COB",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": "autoISF settings",
+      "title": null,
+      "unit": "on/off",
+      "note": "no key of that name in the 2026-09-07 export; determine_basal.py only reads it for autoISF_version < 3.0.1"
+    },
+    "pp_ISF_weight": {
+      "vdf": "profile pp_ISF_weight",
+      "settings_section": "autoisf",
+      "pref_key": "pp_ISF_weight",
+      "screen": "autoISF settings",
+      "title": "pp ISF weight",
+      "unit": "weight"
+    },
+    "enable_pp_ISF_always": {
+      "vdf": "profile enable_pp_ISF_always",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": "autoISF settings",
+      "title": null,
+      "unit": "on/off",
+      "note": "no key of that name in the 2026-09-07 export; title not verified"
+    },
+    "pp_ISF_hours": {
+      "vdf": "profile pp_ISF_hours",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": "autoISF settings",
+      "title": null,
+      "unit": "h",
+      "note": "hours after the last carb entry during which pp ISF applies when enable_pp_ISF_always is off; no key of that name in the export"
+    },
+    "lower_ISFrange_weight": {
+      "vdf": "profile lower_ISFrange_weight",
+      "settings_section": "autoisf",
+      "pref_key": "lower_ISFrange_weight",
+      "screen": "autoISF settings",
+      "title": "lower ISFrange weight",
+      "unit": "weight"
+    },
+    "higher_ISFrange_weight": {
+      "vdf": "profile higher_ISFrange_weight",
+      "settings_section": "autoisf",
+      "pref_key": "higher_ISFrange_weight",
+      "screen": "autoISF settings",
+      "title": "higher ISFrange weight",
+      "unit": "weight"
+    },
+    "delta_ISFrange_weight": {
+      "vdf": "profile delta_ISFrange_weight",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": "autoISF settings",
+      "title": "delta ISFrange weight",
+      "unit": "weight",
+      "note": "no key of that name in the 2026-09-07 export (value 0.0 in ns_settings.json is the autoISF default)"
+    },
+    "drift_ISF_weight": {
+      "vdf": "profile drift_ISF_weight",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "weight",
+      "note": "emulator prototype (determine_basal.py 2025-07-18 'drift_ISF prototype'); no AAPS preference"
+    },
+    "meal_type_weight": {
+      "vdf": "profile meal_type_weight",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "weight",
+      "note": "emulator / prototype key read by determine_basal.py's meal_addon logic; no key in the export"
+    },
+    "meal_addon": {
+      "vdf": "profile meal_addon",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "weight",
+      "note": "emulator / prototype key (added to bgAccel_ISF_weight); no key in the export"
+    },
+    "parabola_fit_source": {
+      "vdf": "profile parabola_fit_source",
+      "settings_section": "autoisf",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "readings",
+      "note": "glucose source for the parabola fit (emulator_core: 'predating A3.2.0.2 Libre3'); no key in the export"
+    },
+    "enableSMB_always": {
+      "vdf": "profile enableSMB_always",
+      "settings_section": "smb",
+      "pref_key": "enableSMB_always",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Enable SMB always",
+      "unit": "on/off"
+    },
+    "enableSMB_with_COB": {
+      "vdf": "profile enableSMB_with_COB",
+      "settings_section": "smb",
+      "pref_key": "enableSMB_with_COB",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Enable SMB with COB",
+      "unit": "on/off"
+    },
+    "enableSMB_with_temptarget": {
+      "vdf": "profile enableSMB_with_temptarget",
+      "settings_section": "smb",
+      "pref_key": "enableSMB_with_temptarget",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Enable SMB with temp target",
+      "unit": "on/off"
+    },
+    "enableSMB_after_carbs": {
+      "vdf": "profile enableSMB_after_carbs",
+      "settings_section": "smb",
+      "pref_key": "enableSMB_after_carbs",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Enable SMB after carbs",
+      "unit": "on/off"
+    },
+    "allowSMB_with_high_temptarget": {
+      "vdf": "profile allowSMB_with_high_temptarget",
+      "settings_section": "smb",
+      "pref_key": "enableSMB_with_high_temptarget",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Enable SMB with high temp target",
+      "unit": "on/off",
+      "note": "oref name allowSMB_with_high_temptarget, AAPS key enableSMB_with_high_temptarget"
+    },
+    "enableUAM": {
+      "vdf": "profile enableUAM",
+      "settings_section": "smb",
+      "pref_key": "use_uam",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Enable UAM",
+      "unit": "on/off"
+    },
+    "enableSMB_EvenOn_OddOff": {
+      "vdf": "profile enableSMB_EvenOn_OddOff",
+      "settings_section": "smb",
+      "pref_key": null,
+      "screen": "autoISF settings",
+      "title": null,
+      "unit": "on/off",
+      "note": "autoISF: SMB enabled by an even temp target, disabled by an odd one; key and title not verified in the export"
+    },
+    "enableSMB_EvenOn_OddOff_always": {
+      "vdf": "profile enableSMB_EvenOn_OddOff_always",
+      "settings_section": "smb",
+      "pref_key": null,
+      "screen": "autoISF settings",
+      "title": null,
+      "unit": "on/off",
+      "note": "autoISF: the parity rule also for the profile target; the export carries 'Enable alternative activation of SMB always' = true, which may be this preference - unverified, so left null"
+    },
+    "SMBInterval": {
+      "vdf": "profile SMBInterval",
+      "settings_section": "smb",
+      "pref_key": "smbinterval",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": null,
+      "unit": "min",
+      "note": "minutes between SMBs; title wording not verified"
+    },
+    "maxSMBBasalMinutes": {
+      "vdf": "profile maxSMBBasalMinutes",
+      "settings_section": "smb",
+      "pref_key": "smbmaxminutes",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Max minutes of basal to limit SMB to",
+      "unit": "min"
+    },
+    "maxUAMSMBBasalMinutes": {
+      "vdf": "profile maxUAMSMBBasalMinutes",
+      "settings_section": "smb",
+      "pref_key": "uamsmbmaxminutes",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Max minutes of basal to limit SMB to for UAM",
+      "unit": "min"
+    },
+    "smb_delivery_ratio": {
+      "vdf": "profile smb_delivery_ratio",
+      "settings_section": "smb",
+      "pref_key": "openapsama_smb_delivery_ratio",
+      "screen": "autoISF settings",
+      "title": "SMB delivery ratio",
+      "unit": "ratio"
+    },
+    "smb_delivery_ratio_min": {
+      "vdf": "profile smb_delivery_ratio_min",
+      "settings_section": "smb",
+      "pref_key": "openapsama_smb_delivery_ratio_min",
+      "screen": "autoISF settings",
+      "title": null,
+      "unit": "ratio",
+      "note": "title wording ('min' vs 'minimum') not verified"
+    },
+    "smb_delivery_ratio_max": {
+      "vdf": "profile smb_delivery_ratio_max",
+      "settings_section": "smb",
+      "pref_key": "openapsama_smb_delivery_ratio_max",
+      "screen": "autoISF settings",
+      "title": null,
+      "unit": "ratio",
+      "note": "title wording ('max' vs 'maximum') not verified"
+    },
+    "smb_delivery_ratio_bg_range": {
+      "vdf": "profile smb_delivery_ratio_bg_range",
+      "settings_section": "smb",
+      "pref_key": "openapsama_smb_delivery_ratio_bg_range",
+      "screen": "autoISF settings",
+      "title": null,
+      "unit": "mg/dl",
+      "note": "the phone stores the user's unit (export: 1.0 mmol); the profile dict holds mg/dl and ns_settings.json carries 36 fitted to the phone's echoes (see _assumed / _overrides there)"
+    },
+    "smb_max_range_extension": {
+      "vdf": "profile smb_max_range_extension",
+      "settings_section": "smb",
+      "pref_key": "openapsama_smb_max_range_extension",
+      "screen": "autoISF settings",
+      "title": "SMB max range extension",
+      "unit": "factor",
+      "note": "maxBolus = round(x * current_basal * maxUAMSMBBasalMinutes / 60, 1)"
+    },
+    "iob_threshold_percent": {
+      "vdf": "profile iob_threshold_percent",
+      "settings_section": "smb",
+      "pref_key": "iob_threshold_percent",
+      "screen": "autoISF settings",
+      "title": "iob threshold percent",
+      "unit": "%",
+      "note": "share of max_iob above which SMBs are limited (100 = off)"
+    },
+    "activity_detection": {
+      "vdf": "profile activity_detection",
+      "settings_section": "activity_monitor",
+      "pref_key": "activity_detection",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "on/off",
+      "note": "title wording not verified"
+    },
+    "activity_scale_factor": {
+      "vdf": "profile activity_scale_factor",
+      "settings_section": "activity_monitor",
+      "pref_key": "activity_scale_factor",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "factor",
+      "note": "ISF ratio 1 - 0.3*x (activity) / 1 - 0.15*x (partial activity); title not verified"
+    },
+    "inactivity_scale_factor": {
+      "vdf": "profile inactivity_scale_factor",
+      "settings_section": "activity_monitor",
+      "pref_key": "inactivity_scale_factor",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "factor",
+      "note": "ISF ratio 1 + 0.2*x (inactivity) / 1 + 0.1*x (partial inactivity); title not verified"
+    },
+    "ignore_inactivity_overnight": {
+      "vdf": "profile ignore_inactivity_overnight",
+      "settings_section": "activity_monitor",
+      "pref_key": "ignore_inactivity_overnight",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "on/off",
+      "note": "title not verified"
+    },
+    "inactivity_idle_start": {
+      "vdf": "profile inactivity_idle_start",
+      "settings_section": "activity_monitor",
+      "pref_key": "inactivity_idle_start",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "hour of day",
+      "note": "title not verified"
+    },
+    "inactivity_idle_end": {
+      "vdf": "profile inactivity_idle_end",
+      "settings_section": "activity_monitor",
+      "pref_key": "inactivity_idle_end",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "hour of day",
+      "note": "title not verified"
+    },
+    "steps_activity": {
+      "vdf": "profile steps_activity",
+      "settings_section": "activity_monitor",
+      "pref_key": "steps_activity_detected",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "on/off",
+      "note": "not read by determine_basal.py; title not verified"
+    },
+    "steps_inactivity": {
+      "vdf": "profile steps_inactivity",
+      "settings_section": "activity_monitor",
+      "pref_key": "steps_inactivity_detected",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "on/off",
+      "note": "not read by determine_basal.py; title not verified"
+    },
+    "activity_ratio": {
+      "vdf": "profile activity_ratio",
+      "settings_section": "activity_monitor",
+      "pref_key": "activity_ratio",
+      "screen": "autoISF activity monitor",
+      "title": null,
+      "unit": "ratio",
+      "note": "not read by determine_basal.py; title not verified"
+    },
+    "exercise_mode": {
+      "vdf": "profile exercise_mode",
+      "settings_section": "flags",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "on/off",
+      "note": "oref0 key; AAPS has no preference of its own and derives it from high_temptarget_raises_sensitivity (ns_profile.py)"
+    },
+    "high_temptarget_raises_sensitivity": {
+      "vdf": "profile high_temptarget_raises_sensitivity",
+      "settings_section": "flags",
+      "pref_key": "high_temptarget_raises_sensitivity",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "High temptarget raises sensitivity",
+      "unit": "on/off"
+    },
+    "low_temptarget_lowers_sensitivity": {
+      "vdf": "profile low_temptarget_lowers_sensitivity",
+      "settings_section": "flags",
+      "pref_key": "low_temptarget_lowers_sensitivity",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Low temptarget lowers sensitivity",
+      "unit": "on/off",
+      "note": "export says true, ns_settings.json keeps false (see _assumed there)"
+    },
+    "sensitivity_raises_target": {
+      "vdf": "profile sensitivity_raises_target",
+      "settings_section": "flags",
+      "pref_key": "sensitivity_raises_target",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Sensitivity raises target",
+      "unit": "on/off"
+    },
+    "resistance_lowers_target": {
+      "vdf": "profile resistance_lowers_target",
+      "settings_section": "flags",
+      "pref_key": "resistance_lowers_target",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Resistance lowers target",
+      "unit": "on/off"
+    },
+    "half_basal_exercise_target": {
+      "vdf": "profile half_basal_exercise_target",
+      "settings_section": "flags",
+      "pref_key": "half_basal_exercise_target",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Half basal exercise target",
+      "unit": "mmol/L",
+      "note": "ns_settings.json keeps the mmol value (8.9) because determine_basal.py multiplies by 18 for mmol users of autoISF >= 3.1; the phone stores mg/dl (export 160.2)"
+    },
+    "half_basal_exercise_target_mgdl": {
+      "vdf": "profile half_basal_exercise_target_mgdl",
+      "settings_section": "flags",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "mg/dl",
+      "note": "emulator-side mg/dl copy of half_basal_exercise_target; not an AAPS preference"
+    },
+    "skip_neutral_temps": {
+      "vdf": "profile skip_neutral_temps",
+      "settings_section": "flags",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "on/off",
+      "note": "hard-coded false in AAPS; no preference"
+    },
+    "A52_risk_enable": {
+      "vdf": "profile A52_risk_enable",
+      "settings_section": "flags",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "on/off",
+      "note": "hard-coded false in AAPS; no preference"
+    },
+    "adv_target_adjustments": {
+      "vdf": "profile adv_target_adjustments",
+      "settings_section": "flags",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "on/off",
+      "note": "hard-coded false in AAPS SMB; no preference"
+    },
+    "calibrationIgnore": {
+      "vdf": "profile calibrationIgnore",
+      "settings_section": "flags",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "on/off",
+      "note": "emulator extension for the calibration transition (determine_basal.py 2025-05-03); no AAPS preference"
+    },
+    "calibration_end": {
+      "vdf": "profile calibration_end",
+      "settings_section": "flags",
+      "pref_key": "calibration_end",
+      "screen": null,
+      "title": null,
+      "unit": "on/off",
+      "note": "key present in the export; not read by determine_basal.py; title not verified"
+    },
+    "calibration_stops_SMB": {
+      "vdf": "profile calibration_stops_SMB",
+      "settings_section": "flags",
+      "pref_key": "calibration_stops_SMB",
+      "screen": null,
+      "title": null,
+      "unit": "on/off",
+      "note": "key present in the export; not read by determine_basal.py; title not verified"
+    },
+    "fsl_exp1_factor": {
+      "vdf": "profile fsl_exp1_factor",
+      "settings_section": "flags",
+      "pref_key": "fsl_exp1_factor",
+      "screen": null,
+      "title": null,
+      "unit": "factor",
+      "note": "key present in the export; not read by determine_basal.py; title not verified"
+    },
+    "max_iob": {
+      "vdf": "profile max_iob",
+      "settings_section": "safety",
+      "pref_key": "openapsmb_max_iob",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Maximum total IOB OpenAPS can't go over [U]",
+      "unit": "U",
+      "note": "locked for unattended Hindcast runs (DESIGN.md section 3); the export also carries openapsma_max_iob (AMA) = 2.0"
+    },
+    "max_basal": {
+      "vdf": "profile max_basal",
+      "settings_section": "safety",
+      "pref_key": "openapsma_max_basal",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Max U/hr a Temp Basal can be set to",
+      "unit": "U/h",
+      "note": "locked; the profile value is the preference after applyBasalConstraints (ns_profile.py)"
+    },
+    "max_daily_safety_multiplier": {
+      "vdf": "profile max_daily_safety_multiplier",
+      "settings_section": "safety",
+      "pref_key": "openapsama_max_daily_safety_multiplier",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Max daily safety multiplier",
+      "unit": "factor",
+      "note": "locked"
+    },
+    "current_basal_safety_multiplier": {
+      "vdf": "profile current_basal_safety_multiplier",
+      "settings_section": "safety",
+      "pref_key": "openapsama_current_basal_safety_multiplier",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Current basal safety multiplier",
+      "unit": "factor",
+      "note": "locked"
+    },
+    "autosens_min": {
+      "vdf": "profile autosens_min",
+      "settings_section": "safety",
+      "pref_key": "autosens_min",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Autosens min",
+      "unit": "factor",
+      "note": "autosens itself cannot be tested by the replay (the ratio enters as recorded)"
+    },
+    "autosens_max": {
+      "vdf": "profile autosens_max",
+      "settings_section": "safety",
+      "pref_key": "autosens_max",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": "Autosens max",
+      "unit": "factor",
+      "note": "also caps the autoISF ratio in determine_basal.py"
+    },
+    "lgsThreshold": {
+      "vdf": "profile lgsThreshold",
+      "settings_section": "safety",
+      "pref_key": "lgsThreshold",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": null,
+      "unit": "mg/dl",
+      "note": "locked; ns_profile converts a value < 36 from mmol; title wording not verified"
+    },
+    "bolus_increment": {
+      "vdf": "profile bolus_increment",
+      "settings_section": "safety",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "U",
+      "note": "locked; a pump property (Omnipod Dash 0.05), not a preference"
+    },
+    "carbsReqThreshold": {
+      "vdf": "profile carbsReqThreshold",
+      "settings_section": "safety",
+      "pref_key": "carbsReqThreshold",
+      "screen": "OpenAPS SMB / autoISF settings",
+      "title": null,
+      "unit": "g",
+      "note": "title wording not verified"
+    },
+    "remainingCarbsCap": {
+      "vdf": "profile remainingCarbsCap",
+      "settings_section": "safety",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "g",
+      "note": "hard-coded 90 in AAPS; no preference"
+    },
+    "maxCOB": {
+      "vdf": "profile maxCOB",
+      "settings_section": "safety",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "g",
+      "note": "hard-coded 120 in AAPS; no preference"
+    },
+    "sens": {
+      "vdf": "profile sens",
+      "settings_section": "profile",
+      "pref_key": null,
+      "screen": "Profile editor",
+      "title": "ISF",
+      "unit": "glucose per U",
+      "note": "locked; mg/dl per U in the profile dict, mmol/L per U in the editor (profile_history names it 'profile ISF (mmol/U)')"
+    },
+    "carb_ratio": {
+      "vdf": "profile carb_ratio",
+      "settings_section": "profile",
+      "pref_key": null,
+      "screen": "Profile editor",
+      "title": "IC",
+      "unit": "g/U",
+      "note": "locked; cannot be tested by the replay (enters through the recorded COB)"
+    },
+    "current_basal": {
+      "vdf": "profile current_basal",
+      "settings_section": "profile",
+      "pref_key": null,
+      "screen": "Profile editor",
+      "title": "Basal",
+      "unit": "U/h",
+      "note": "locked; cannot be tested by the replay (enters through the recorded IOB); rounded to the pump step"
+    },
+    "dia": {
+      "vdf": "profile dia",
+      "settings_section": "profile",
+      "pref_key": null,
+      "screen": "Profile editor",
+      "title": "DIA",
+      "unit": "h",
+      "note": "locked; cannot be tested by the replay"
+    },
+    "min_bg": {
+      "vdf": "profile min_bg",
+      "settings_section": "profile",
+      "pref_key": null,
+      "screen": "Profile editor",
+      "title": "Target range (low)",
+      "unit": "mg/dl",
+      "note": "profile target low, or the temp target's low while a TT runs"
+    },
+    "max_bg": {
+      "vdf": "profile max_bg",
+      "settings_section": "profile",
+      "pref_key": null,
+      "screen": "Profile editor",
+      "title": "Target range (high)",
+      "unit": "mg/dl",
+      "note": "profile target high, or the temp target's high while a TT runs"
+    },
+    "target_bg": {
+      "vdf": "profile target_bg",
+      "settings_section": "derived",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "mg/dl",
+      "note": "(min_bg + max_bg) / 2, computed per loop"
+    },
+    "max_daily_basal": {
+      "vdf": "profile max_daily_basal",
+      "settings_section": "derived",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "U/h",
+      "note": "largest scheduled basal of the active profile, computed per loop"
+    },
+    "profile_percentage": {
+      "vdf": "profile profile_percentage",
+      "settings_section": "derived",
+      "pref_key": null,
+      "screen": "Profile switch",
+      "title": null,
+      "unit": "%",
+      "note": "percentage of the running profile switch"
+    },
+    "temptargetSet": {
+      "vdf": "profile temptargetSet",
+      "settings_section": "derived",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "on/off",
+      "note": "whether a temp target is active at the loop time"
+    },
+    "out_units": {
+      "vdf": "profile out_units",
+      "settings_section": "nightscout",
+      "pref_key": "units",
+      "screen": "General settings",
+      "title": null,
+      "unit": "text",
+      "note": "'mmol/L' or 'mg/dl' (zipped logs deliver 'mmol\\/L'); title wording not verified"
+    }
+  }
+}

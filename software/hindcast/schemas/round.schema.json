@@ -1,0 +1,164 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://github.com/markusbaumg/APS-what-if/software/hindcast/schemas/round.schema.json",
+ "title": "Round",
+ "x-contract-version": 1,
+ "type": "object",
+ "properties": {
+  "round": {
+   "type": "integer"
+  },
+  "phase": {
+   "type": "string"
+  },
+  "started": {
+   "type": "string"
+  },
+  "finished": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "trials": {
+   "type": "integer",
+   "default": 0
+  },
+  "variants": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/Candidate"
+   }
+  },
+  "dead_parameters": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/DeadParameter"
+   }
+  },
+  "floors": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "object",
+    "additionalProperties": {
+     "type": "number"
+    }
+   }
+  },
+  "front": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "notes": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  }
+ },
+ "additionalProperties": false,
+ "description": "studies/<study>/round.json: the variants of one round with verdicts; <= 2 KB per variant.",
+ "required": [
+  "round",
+  "phase",
+  "started"
+ ],
+ "$defs": {
+  "Candidate": {
+   "type": "object",
+   "properties": {
+    "vhash": {
+     "type": "string"
+    },
+    "variant": {
+     "type": "string"
+    },
+    "verdict": {
+     "enum": [
+      "pending",
+      "base",
+      "dead",
+      "candidate",
+      "tie",
+      "infeasible",
+      "recommended"
+     ]
+    },
+    "why": {
+     "type": "string"
+    },
+    "params": {
+     "type": "object",
+     "additionalProperties": {}
+    },
+    "rank": {
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "days": {
+     "type": "integer",
+     "default": 0
+    },
+    "feasible": {
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "effect": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "number"
+     }
+    },
+    "flags": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "tie_with": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   },
+   "additionalProperties": false,
+   "description": "One variant as the skill and the page see it: verdict + why + the components of DESIGN.md section 5.2.",
+   "required": [
+    "vhash",
+    "variant",
+    "verdict",
+    "why"
+   ]
+  },
+  "DeadParameter": {
+   "type": "object",
+   "properties": {
+    "key": {
+     "type": "string"
+    },
+    "why": {
+     "type": "string"
+    },
+    "floor_ratio": {
+     "type": [
+      "number",
+      "null"
+     ]
+    }
+   },
+   "additionalProperties": false,
+   "description": "DeadParameter(key: str, why: str, floor_ratio: float | None = None)",
+   "required": [
+    "key",
+    "why"
+   ]
+  }
+ }
+}
