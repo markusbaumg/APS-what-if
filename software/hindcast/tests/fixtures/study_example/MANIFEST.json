@@ -1,0 +1,127 @@
+{
+ "generated": "2026-10-16T22:11:19Z",
+ "results_dir": "results/example_2026-09-06",
+ "sources": {
+  "base": "results/example_2026-09-06/2026-09-06T06-00-00Z.base.csv",
+  "autoISF_max_1.3__dura_ISF_weight_0.5": "results/example_2026-09-06/2026-09-06T06-00-00Z.autoISF_max_1.3__dura_ISF_weight_0.5.csv",
+  "autoISF_max_1.3__dura_ISF_weight_0.7": "results/example_2026-09-06/2026-09-06T06-00-00Z.autoISF_max_1.3__dura_ISF_weight_0.7.csv",
+  "autoISF_max_1.5__dura_ISF_weight_0.5": "results/example_2026-09-06/2026-09-06T06-00-00Z.autoISF_max_1.5__dura_ISF_weight_0.5.csv",
+  "autoISF_max_1.5__dura_ISF_weight_0.7": "results/example_2026-09-06/2026-09-06T06-00-00Z.autoISF_max_1.5__dura_ISF_weight_0.7.csv"
+ },
+ "day": "2026-09-06",
+ "window": [
+  "2026-09-06T06:00:00Z",
+  "2026-09-06T12:00:00Z"
+ ],
+ "loops": 340,
+ "code_sha": "419bdb8ddbba000cf7770f1d050037c8921f64f6",
+ "settings_sha": "0b8122b09d9509aad1af5ebe97203241f384dade",
+ "base_vhash": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+ "vhash": {
+  "base": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+  "autoISF_max_1.3__dura_ISF_weight_0.5": "bd3c184c0eb117ac77f3dc39a545561816c609d3",
+  "autoISF_max_1.3__dura_ISF_weight_0.7": "ad0662e5a1c0881c7291f91080c87504dcd4921b",
+  "autoISF_max_1.5__dura_ISF_weight_0.5": "b85a419e9024dd3e7cf04594fee7443b67ade228",
+  "autoISF_max_1.5__dura_ISF_weight_0.7": "e1336f715a3d4c66aa228bb3876a85171a28ff50"
+ },
+ "files": {
+  "study.json": {
+   "bytes": 1933,
+   "sha1": "ec5d8a6078a3956d3bc966dc2c2e77b8734b0c8b"
+  },
+  "STATE.json": {
+   "bytes": 222,
+   "sha1": "9d8513268ba8c5a8fd4cb49e3f85e4da4eaf8355"
+  },
+  "trials.jsonl": {
+   "bytes": 13879,
+   "sha1": "72cb65fae479c0f0a90d8c0fbd490bbf9cc48198"
+  },
+  "round.json": {
+   "bytes": 6306,
+   "sha1": "6dc1845872d4e8a26fdeb6c1c151d2bf1b59b29e"
+  },
+  "status.json": {
+   "bytes": 1642,
+   "sha1": "147dad91c866e6dc8e3bf04ef2b997d77b7af6ad"
+  },
+  "series/2026-09-06/b85a419e9024dd3e7cf04594fee7443b67ade228.json": {
+   "bytes": 28413,
+   "sha1": "c63e3043be957bb3146cf03692194f16b14db3c1"
+  },
+  "series/2026-09-06/ad0662e5a1c0881c7291f91080c87504dcd4921b.json": {
+   "bytes": 28394,
+   "sha1": "1a53dd62cbf6c979ce36d1c227a3bfdfe8e797c1"
+  },
+  "series/2026-09-06/e1336f715a3d4c66aa228bb3876a85171a28ff50.json": {
+   "bytes": 28411,
+   "sha1": "77b8ff1aa0f7517692e6ee60a86d4f5ccaedd0be"
+  },
+  "series/2026-09-06/orig.json": {
+   "bytes": 26960,
+   "sha1": "1633fc078cc6064afec76f6a69ff26e09411addd"
+  },
+  "series/2026-09-06/bd3c184c0eb117ac77f3dc39a545561816c609d3.json": {
+   "bytes": 28397,
+   "sha1": "9c41ad183047ece60fb992df5f1f4b2fd41e6a7c"
+  },
+  "series/2026-09-06/da39a3ee5e6b4b0d3255bfef95601890afd80709.json": {
+   "bytes": 28362,
+   "sha1": "a6fd1ae482a6362cb4a8df76f0bf535682772b09"
+  }
+ },
+ "table": {
+  "base": {
+   "delta_U": 1.374,
+   "delta_vs_base_U": 0.0,
+   "rise_vs_base_U": 0.0,
+   "smb_less": 2,
+   "at_autoISF_max_pct": 9.706
+  },
+  "autoISF_max_1.3__dura_ISF_weight_0.5": {
+   "delta_U": 0.968,
+   "delta_vs_base_U": -0.407,
+   "rise_vs_base_U": -0.358,
+   "smb_less": 9,
+   "at_autoISF_max_pct": 9.412
+  },
+  "autoISF_max_1.3__dura_ISF_weight_0.7": {
+   "delta_U": 1.374,
+   "delta_vs_base_U": 0.0,
+   "rise_vs_base_U": 0.0,
+   "smb_less": 2,
+   "at_autoISF_max_pct": 9.706
+  },
+  "autoISF_max_1.5__dura_ISF_weight_0.5": {
+   "delta_U": 0.973,
+   "delta_vs_base_U": -0.401,
+   "rise_vs_base_U": -0.356,
+   "smb_less": 9,
+   "at_autoISF_max_pct": 3.824
+  },
+  "autoISF_max_1.5__dura_ISF_weight_0.7": {
+   "delta_U": 1.38,
+   "delta_vs_base_U": 0.005,
+   "rise_vs_base_U": 0.002,
+   "smb_less": 2,
+   "at_autoISF_max_pct": 3.824
+  }
+ },
+ "floors": {
+  "floor_smb_U": 1.4500000000000002,
+  "floor_tbr_U": 0.07575722220010223,
+  "floor_total_U": 1.374242777799898,
+  "floor_rise_U": 1.3800186111271349,
+  "floor_rest_U": 0.005775833327240409,
+  "floor_P_U": 0.0,
+  "floor_loops": 26.0,
+  "agreement_pct": 92.3529411764706,
+  "loops": 340
+ },
+ "review_order": [
+  "autoISF_max_1.3__dura_ISF_weight_0.5",
+  "autoISF_max_1.5__dura_ISF_weight_0.5",
+  "autoISF_max_1.5__dura_ISF_weight_0.7",
+  "autoISF_max_1.3__dura_ISF_weight_0.7"
+ ]
+}

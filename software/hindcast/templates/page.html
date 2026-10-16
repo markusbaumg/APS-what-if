@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>$TITLE</title>
+<meta name="description" content="Hindcast study $STUDY_NAME: where and how much the loop would have asked differently under other settings; decisions only, never glucose outcomes.">
+<style>
+$CSS
+</style>
+</head>
+<body>
+<header class="site-head">
+  <div class="wrap">
+    <h1>$STUDY_NAME</h1>
+    <div class="meta">
+      <span>Hindcast study</span>
+      <span>question: <b>$QUESTION</b></span>
+      <span>generated $GENERATED</span>
+      <span>$MODE</span>
+    </div>
+  </div>
+</header>
+<div class="honesty-band">
+  <div class="wrap">
+    <p class="honesty" id="honesty"><strong>Read this first.</strong> $HONESTY</p>
+  </div>
+</div>
+<nav class="tabs" aria-label="views"><div class="wrap" id="tabs"></div></nav>
+<main class="wrap" id="views"></main>
+<footer class="wrap">
+  <span>Hindcast report, contract $CONTRACT_VERSION</span>
+  <span>ECharts $ECHARTS_VERSION from cdnjs (the only external script)</span>
+  <span>$SIZE_NOTE</span>
+</footer>
+$DATA_SCRIPTS
+<script src="$ECHARTS_URL"></script>
+<script>
+$THEME_JS
+</script>
+<script>
+$PAGE_JS
+</script>
+$VIEWS_JS
+<script>
+window.HC.boot();
+</script>
+</body>
+</html>

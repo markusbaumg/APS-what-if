@@ -1,0 +1,88 @@
+{
+ "name": "study_example",
+ "created": "2026-09-08T01:22:00Z",
+ "source": "https://ns.vivikusi.ch",
+ "host": "ns.vivikusi.ch",
+ "settings_sha": "0b8122b09d9509aad1af5ebe97203241f384dade",
+ "code_sha": "419bdb8ddbba000cf7770f1d050037c8921f64f6",
+ "days": [
+  {
+   "day": "2026-09-06",
+   "role": "search",
+   "tags": []
+  }
+ ],
+ "space": {
+  "profile autoISF_max": {
+   "type": "choice",
+   "choices": [
+    1.3,
+    1.5
+   ],
+   "phone": 1.3
+  },
+  "profile dura_ISF_weight": {
+   "type": "choice",
+   "choices": [
+    0.5,
+    0.7
+   ],
+   "phone": 0.7
+  }
+ },
+ "objective_version": 1,
+ "contract_version": 1,
+ "core_versions": {
+  "emulator_core.py": "2026-10-16 12:00",
+  "determine_basal.py": "2026-10-16 13:00",
+  "emulator_optimize.py": "2026-10-16 12:00"
+ },
+ "constraints": [],
+ "base_vdf_lines": [],
+ "question": "explore",
+ "objective": {
+  "scalar_weights": {
+   "rest": 2.0,
+   "lowside": 0.3
+  },
+  "envelope": {
+   "max_3h_U": 1.0,
+   "max_day_pct_tdd": 15.0
+  },
+  "feasible": {
+   "cap_binding_max_pct": 50.0
+  },
+  "quarantine": {
+   "agreement_pct_min": 94.0,
+   "cgm_gap_max_min": 120.0
+  }
+ },
+ "phases": [
+  {
+   "kind": "grid",
+   "state": "done",
+   "grid": {
+    "profile autoISF_max": [
+     1.3,
+     1.5
+    ],
+    "profile dura_ISF_weight": [
+     0.5,
+     0.7
+    ]
+   }
+  }
+ ],
+ "budget": {
+  "hours": 1.0,
+  "workers": 1
+ },
+ "sentinel_every": 25,
+ "outputs": "seconds/bg/iob/autosens/acce/bg_ISF/pp/dura/ISFs/insReq/SMB/basal",
+ "private_repo": false,
+ "notes": [
+  "Fixture study built by hindcast/tests/make_fixtures.py from results/example_2026-09-06 (the documented emulator_optimize run): the result CSVs are read, nothing is replayed, no network.",
+  "freeze_sha is empty: the example run replayed the live Nightscout source through emulator_optimize, not a frozen day.",
+  "The window is 2026-09-06T06:00:00Z..2026-09-06T12:00:00Z, not a whole day; the floors are those of this window."
+ ]
+}

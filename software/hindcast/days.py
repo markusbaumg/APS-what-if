@@ -1,9 +1,11 @@
 """
-days.py  -  Hindcast day inventory: UTC day specs, cache finality, day character and confounder badges (H-101, H-104)
+days.py  -  Hindcast day inventory: UTC day specs, cache finality, day character, confounder badges and the day
+            quarantine (H-101, H-104, H-204)
 
 Days are the unit of everything in Hindcast (DESIGN.md section 5.4); this module answers the day-level questions
-the freeze, the warm-up and later the quarantine (H-204) ask, from the Nightscout day cache and `ns_settings.json`
-alone. It opens no socket: the only object it builds from `ns_client` is the client's path layout.
+the freeze, the warm-up and the quarantine ask, from the Nightscout day cache, `ns_settings.json`, the frozen meta
+and the base trial's metrics alone. It opens no socket: the only object it builds from `ns_client` is the client's
+path layout.
 
     from hindcast import days
     days.parse_days('2026-08-30..2026-09-01')          -> ['2026-08-30', '2026-08-31', '2026-09-01']
@@ -34,6 +36,22 @@ Confounders (strings for the badges; local time of the phone from the records' u
     (no loop run) >= LOOP_GAP_MIN minutes, autoISF version changes inside the day (H-712: the smoother changed with
     3.2.1), Profile Switches with a percentage or time shift, Temporary Targets longer than LONG_TT_MIN.
 They never quote glucose values (the strings may travel into an issue body; DESIGN.md section 9 privacy).
+
+Quarantine (H-204, DESIGN.md section 5.4 phase 0). A day is quarantined - listed with its reasons on the page and in
+status.json, excluded from scoring, never hidden - when any of these holds:
+    1. the base replay's `agreement_pct` is below `agreement_pct_min` (94 %: the study would measure the emulator,
+       not the settings),
+    2. the longest CGM gap of the day exceeds `cgm_gap_max_min` (120 min; from the frozen meta's character record,
+       or from raw entries when given),
+    3. ns_settings.json `profile_history` records a change INSIDE the day of a key the study searches (the phone's
+       own value of that key is not one value on that day),
+    4. the loop counts of the day's trials differ across variants (state leaked between in-process replays, or a
+       failed run; DESIGN.md section 5.1 makes this a hard stop as well).
+Thresholds come from study.json (`objective.quarantine`, contracts.Objective) with QUARANTINE_THRESHOLDS as the
+defaults. `quarantine_reasons()` judges one day from the pieces, `quarantine_from_trials()` collects the pieces for a
+study from its trial rows and frozen metas, `apply_quarantine()` sets the StudyDay roles, `quarantine_listing()`
+renders the list. Every reason string passes hindcast.lint for the kinds 'line' and 'issue' (no glucose values, no
+loop counts, no insulin amounts; tests/test_quarantine.py checks it).
 """
 import datetime
 import json
@@ -592,6 +610,188 @@ def summarize(meta):
     if conf:
         bits.append(f'{len(conf)} badge{"s" if len(conf) != 1 else ""}')
     return ', '.join(bits)
+
+
+# ----------------------------------------------------------------------------- quarantine (H-204)
+
+QUARANTINE_THRESHOLDS = {'agreement_pct_min': 94.0, 'cgm_gap_max_min': 120.0}
+QUARANTINE_ROLE = 'quarantined'
+
+
+def quarantine_thresholds(study=None, overrides=None):
+    """QUARANTINE_THRESHOLDS updated from study.objective.quarantine (study.json) and `overrides`; unknown keys and
+    non-numbers are ignored."""
+    out = dict(QUARANTINE_THRESHOLDS)
+    sources = []
+    obj = getattr(study, 'objective', None) if study is not None else None
+    if obj is not None:
+        q = getattr(obj, 'quarantine', None)
+        if q is None and isinstance(obj, dict):
+            q = obj.get('quarantine')
+        sources.append(q)
+    elif isinstance(study, dict):
+        sources.append(((study.get('objective') or {}).get('quarantine')))
+    sources.append(overrides)
+    for src in sources:
+        for k, v in (src or {}).items():
+            if k in out and isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[k] = float(v)
+    return out
+
+
+def searched_items(searched_keys):
+    """{'autoISF_max', ...}: the <item> part of '<array> <item>' keys (a bare item passes as itself)."""
+    out = set()
+    for name in searched_keys or []:
+        parts = str(name).split()
+        if parts:
+            out.add(parts[-1])
+    return out
+
+
+def history_hits(settings, day, searched_keys):
+    """profile_history changes inside `day` whose parameter is a searched key: [(when_ms, parameter, from, to)]. The
+    parameter text of a history entry is matched on its last word ('autoISF_max'; 'profile ISF (mmol/U)' never
+    matches a searchable key)."""
+    items = searched_items(searched_keys)
+    if not items:
+        return []
+    start, end = day_bounds(day)
+    out = []
+    for when, key, old, new in history_changes_in(settings, start, end):
+        words = str(key).replace('(', ' ').replace(')', ' ').split()
+        if key in items or (words and words[-1] in items) or (words and words[0] in items):
+            out.append((when, key, old, new))
+    return out
+
+
+def _fmt_minutes(v):
+    return str(int(round(v))) if isinstance(v, (int, float)) else str(v)
+
+
+def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, meta=None, entries=None,
+                       loop_counts=None, thresholds=None):
+    """The reasons `day` is quarantined ([] = it takes part in scoring). Pieces, each optional:
+    `base_metrics` the base trial's metrics dict (agreement_pct), `meta` the frozen meta (character.cgm_gap_min) or
+    `entries` raw CGM entries (the gap is measured here), `settings` + `searched_keys` for the profile_history rule,
+    `loop_counts` {variant: loops} or a list of loop counts of the day's trials. Strings are lint-clean for the kinds
+    'line' and 'issue'."""
+    thr = quarantine_thresholds(None, thresholds)
+    out = []
+    if isinstance(base_metrics, dict):
+        pct = base_metrics.get('agreement_pct')
+        if isinstance(pct, (int, float)) and not isinstance(pct, bool) and pct < thr['agreement_pct_min']:
+            out.append(f'base agreement {pct:.1f} % (threshold {thr["agreement_pct_min"]:g} %): the replay would '
+                       f'measure the emulator, not the settings')
+    gap = None
+    if entries is not None:
+        start, end = day_bounds(day)
+        gap = max([m for _, _, m in cgm_gaps(entries, start, end)], default=0)
+    elif isinstance(meta, dict):
+        gap = ((meta.get('character') or {}).get('cgm_gap_min'))
+    if isinstance(gap, (int, float)) and not isinstance(gap, bool) and gap > thr['cgm_gap_max_min']:
+        out.append(f'CGM gap {_fmt_minutes(gap)} min (threshold {thr["cgm_gap_max_min"]:g} min)')
+    for when, key, old, new in history_hits(settings, day, searched_keys):
+        out.append(f'profile_history: {key} changed {_fmt(old)}->{_fmt(new)} inside the day and {key} is a searched key')
+    counts = loop_counts.values() if isinstance(loop_counts, dict) else (loop_counts or [])
+    counts = {int(c) for c in counts if isinstance(c, (int, float)) and not isinstance(c, bool)}
+    if len(counts) > 1:
+        out.append('loop counts differ across the variants of this day (state leaked between replays, or a failed run)')
+    return out
+
+
+def _is_base_row(row):
+    status = getattr(row, 'status', None)
+    control = getattr(row, 'control', None)
+    params = getattr(row, 'params', None)
+    return status == 'done' and (control == 'base' or not params)
+
+
+def quarantine_from_trials(study, rows, metas=None, settings=None, thresholds=None, days_=None):
+    """{day: [reasons]} for the study's days from its trial rows (contracts.TrialRow: base metrics, loop counts per
+    variant; only the latest row per key, as trials.jsonl is append-only), the frozen metas {day: meta} and
+    ns_settings.json; days without reasons map to []. `days_` limits the days judged (default: every day of the
+    study)."""
+    thr = quarantine_thresholds(study, thresholds)
+    searched = list(getattr(study, 'space', {}) or {})
+    want = list(days_) if days_ is not None else [d.day for d in getattr(study, 'days', [])]
+    from hindcast.study import StudyDir                     # lazy: study imports days lazily too
+    base_by_day, counts_by_day = {}, {}
+    # trials.jsonl is append-only: only the latest row per key counts (a done row superseded by a stale / failed
+    # re-evaluation row no longer contributes its metrics)
+    for r in StudyDir.latest_by_key(rows or []).values():
+        if getattr(r, 'status', None) != 'done':
+            continue
+        day = r.day
+        if _is_base_row(r):
+            base_by_day[day] = r.metrics
+        loops = (r.metrics or {}).get('loops')
+        if isinstance(loops, (int, float)):
+            counts_by_day.setdefault(day, {})[r.vhash] = int(loops)
+    out = {}
+    for day in want:
+        out[day] = quarantine_reasons(day, settings=settings, searched_keys=searched, base_metrics=base_by_day.get(day),
+                                      meta=(metas or {}).get(day), loop_counts=counts_by_day.get(day), thresholds=thr)
+    return out
+
+
+def _previous_role(reason_text):
+    """The role a quarantined day had before ('was <role>: ...' prefix of quarantine_reason), default 'search'."""
+    text = str(reason_text or '')
+    if text.startswith('was ') and ':' in text:
+        prev = text[4:].split(':', 1)[0].strip()
+        if prev in ('search', 'holdout'):
+            return prev
+    return 'search'
+
+
+def apply_quarantine(study, reasons_by_day, restore=False):
+    """Set role 'quarantined' on the study's days that have reasons, with quarantine_reason = 'was <role>: <reasons>'
+    (the previous role is kept in that prefix); returns [(day, reasons)] of the days whose role changed. A day that is
+    already quarantined gets its reasons refreshed. `restore=True` gives a quarantined day that has no reasons any more
+    its previous role back (reasons [] in the returned list)."""
+    changed = []
+    for d in getattr(study, 'days', []):
+        reasons = list((reasons_by_day or {}).get(d.day) or [])
+        if reasons:
+            prev = _previous_role(d.quarantine_reason) if d.role == QUARANTINE_ROLE else d.role
+            d.quarantine_reason = f'was {prev}: ' + '; '.join(reasons)
+            if d.role != QUARANTINE_ROLE:
+                d.role = QUARANTINE_ROLE
+                changed.append((d.day, reasons))
+        elif restore and d.role == QUARANTINE_ROLE:
+            d.role = _previous_role(d.quarantine_reason)
+            d.quarantine_reason = None
+            changed.append((d.day, []))
+    return changed
+
+
+def scoring_days(study, reasons_by_day=None, role='search'):
+    """The days of `role` that are not quarantined (by their study role or by `reasons_by_day`)."""
+    out = []
+    for d in getattr(study, 'days', []):
+        if d.role != role:
+            continue
+        if reasons_by_day and reasons_by_day.get(d.day):
+            continue
+        out.append(d.day)
+    return out
+
+
+def quarantine_listing(reasons_by_day, thresholds=None):
+    """Text lines: the quarantined days with their reasons (listed, not hidden), then the thresholds used."""
+    thr = quarantine_thresholds(None, thresholds)
+    q = {d: r for d, r in sorted((reasons_by_day or {}).items()) if r}
+    if not q:
+        lines = ['quarantined days: none']
+    else:
+        lines = [f'quarantined days ({len(q)}; listed, excluded from scoring):']
+        for d, reasons in q.items():
+            for i, r in enumerate(reasons):
+                lines.append(f'  {d if i == 0 else " " * len(d)}  {r}')
+    lines.append(f'  thresholds: base agreement >= {thr["agreement_pct_min"]:g} %, CGM gap <= {thr["cgm_gap_max_min"]:g} min, '
+                 f'no profile_history change of a searched key inside the day, equal loop counts across variants')
+    return lines
 
 
 if __name__ == '__main__':

@@ -1,0 +1,12 @@
+{
+ "phase": "grid",
+ "trials_done": 5,
+ "queue_len": 0,
+ "pid": 0,
+ "heartbeat": "2026-09-08T01:22:25Z",
+ "stale_context": [],
+ "started": "2026-09-08T01:22:00Z",
+ "round": 1,
+ "exit_code": 0,
+ "stop_reason": "finished"
+}

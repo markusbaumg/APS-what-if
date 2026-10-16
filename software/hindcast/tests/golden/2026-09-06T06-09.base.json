@@ -1,0 +1,80 @@
+{
+ "format": 1,
+ "about": "hc check golden metrics (H-902): the base replay (empty VDF) of the frozen window as measured on the code below; re-baselined only by `hc check --write-golden` in a PR that names the fidelity issue that moved them. DESIGN.md section 9 numbers are kept for reference, the gate uses these.",
+ "day": "2026-09-06",
+ "window": [
+  "2026-09-06T06:00:00Z",
+  "2026-09-06T09:00:00Z"
+ ],
+ "written": "2026-10-16T22:26:53Z",
+ "reason": "initial baseline (H-902) of the tree of 2026-10-17, fidelity work in progress",
+ "code_sha": "0937331a9a03235319b3223b515fc61b0ecb5b9f",
+ "settings_sha": "f07cdfacbbab735a47257a8ac12a81124ad2c0c9",
+ "freeze_sha": "beaa7186de95dc82cb5858b306f7f0ac659d9162",
+ "csv_sha1": "eb9f7651078f54e10ae29f3b815c40a39c98bda8",
+ "live_checked": true,
+ "versions": {
+  "emulator_core.py": "2026-10-17 00:30",
+  "determine_basal.py": "2026-10-17 00:30",
+  "emulator_optimize.py": "2026-10-16 12:00"
+ },
+ "metrics": {
+  "loops": 180,
+  "smb_exact_pct": 99.444444,
+  "smb_within_pct": 100.0,
+  "insreq_within_pct": 99.444444,
+  "rate_within_pct": 100.0,
+  "isf_within_pct": 100.0,
+  "agreement_pct": 99.444444,
+  "smb_emul_U": 2.6,
+  "smb_orig_U": 2.55
+ },
+ "gates": {
+  "loops": {
+   "kind": "equal",
+   "tol": 0
+  },
+  "smb_exact_pct": {
+   "kind": "min",
+   "tol": 0.0
+  },
+  "smb_within_pct": {
+   "kind": "min",
+   "tol": 0.0
+  },
+  "insreq_within_pct": {
+   "kind": "min",
+   "tol": 0.0
+  },
+  "rate_within_pct": {
+   "kind": "min",
+   "tol": 0.0
+  },
+  "isf_within_pct": {
+   "kind": "min",
+   "tol": 0.0
+  },
+  "agreement_pct": {
+   "kind": "min",
+   "tol": 0.0
+  },
+  "smb_emul_U": {
+   "kind": "abs",
+   "tol": 0.05
+  },
+  "smb_orig_U": {
+   "kind": "abs",
+   "tol": 0.001
+  }
+ },
+ "design_section_9": {
+  "smb_exact_pct": 97.0,
+  "smb_within_pct": 99.0,
+  "insreq_within_pct": 100.0,
+  "isf_within_pct": 100.0,
+  "smb_emul_U": [
+   2.65,
+   0.05
+  ]
+ }
+}

@@ -324,3 +324,24 @@ def test_from_csv_columns(no_change_csv):
     assert 80 < min(s.bg) and max(s.bg) < 400                         # mg/dl
     m = M.trial_metrics(no_change_csv)
     assert m['loops'] == 180 and m['is_base'] is True
+
+
+def test_changed_vs_base_is_a_net_count_and_changed_vs_base_loops_a_per_loop_count():
+    """The two change counts are different quantities: `changed_vs_base` = changed_loops - changed_loops_base (net
+    difference of the 'differs from the phone' counts; can be 0 or negative while the variant moves many loops),
+    `changed_vs_base_loops` = loops where the variant's emulated decision differs from the base replay's."""
+    t = [i * 300.0 for i in range(6)]
+    bg = [120.0] * 6
+    phone = [0.0] * 6
+    base = M.LoopSeries.from_arrays(t, bg, smb_phone=phone, smb_emul=[0.3, 0.3, 0, 0, 0, 0])   # differs on loops 0, 1
+    var = M.LoopSeries.from_arrays(t, bg, smb_phone=phone, smb_emul=[0, 0, 0.3, 0.3, 0, 0])    # differs on loops 2, 3
+    m = M.trial_metrics(None, base, series=var)
+    assert m['changed_loops'] == 2 and m['changed_loops_base'] == 2
+    assert m['changed_vs_base'] == 0                       # the same NUMBER of loops differ from the phone ...
+    assert m['changed_vs_base_loops'] == 4                 # ... but four loops differ between variant and base
+    less = M.LoopSeries.from_arrays(t, bg, smb_phone=phone, smb_emul=[0.3, 0, 0, 0, 0, 0])
+    m = M.trial_metrics(None, base, series=less)
+    assert m['changed_vs_base'] == -1 and m['changed_vs_base_loops'] == 1
+    b = M.trial_metrics(None, None, series=base)
+    assert b['changed_vs_base'] == 0 and b['changed_vs_base_loops'] == 0
+    assert 'changed_vs_base_loops' in M.__doc__ and 'changed_vs_base ' in M.__doc__

@@ -469,6 +469,24 @@ def test_status_fits_2kb_and_counts_latest_rows(tmp_path):
         assert word not in text
 
 
+def test_status_shows_an_unschedulable_sentinel_from_guards_json(tmp_path):
+    """guards.json is private (not a STATE/status contract field): `hc study status` prints its sentinel note, the
+    status.json contract is unchanged, and a schedulable sentinel prints nothing."""
+    sd = make_study(tmp_path)
+    assert st.guard_lines(sd) == [] and sd.read_guards() == {}
+    sd.update_guards(sentinel={'schedulable': False, 'days': {'2026-09-06': ['profile autoISF_max: not in ns_settings.json']}})
+    status = st.build_status(sd)
+    text = st.status_text(status)
+    assert 'guards: sentinel: not schedulable on 2026-09-06 (profile autoISF_max: not in ns_settings.json)' in text
+    assert 'guards' not in status.to_dict()
+    sd.write_status(status)
+    c.Status.load(sd.status_path).validate()
+    sd.update_guards(sentinel={'schedulable': True, 'days': {}})
+    assert 'not schedulable' not in st.status_text(st.build_status(sd))
+    sd.update_guards(sentinel=None)
+    assert 'sentinel' not in sd.read_guards()
+
+
 def test_status_top_from_round_json_is_trimmed(tmp_path):
     sd = make_study(tmp_path, days=tuple(f'2026-09-{d:02d}' for d in range(1, 8)))
     variants = []

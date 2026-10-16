@@ -127,6 +127,21 @@ def test_embed_json_escapes_and_refuses_nan():
     assert tag.startswith('<script type="application/json" id="tier1">') and tag.endswith('</script>')
 
 
+def test_embed_json_escapes_comment_open_and_script_open():
+    """'<!--' followed by '<script' inside a <script> element moves the HTML parser into the double-escaped state,
+    where the closing tag no longer ends the element: both openers must leave the page escaped, in any case."""
+    payload = {'note': 'x <!-- <script> y </script> <SCRIPT src=a> <ScRiPt', 'k<!--': ['<!--<Script>']}
+    text = export.embed_json(payload)
+    low = text.lower()
+    assert '<!--' not in text and '<script' not in low and '</' not in text
+    assert '\\u003c!--' in text and '\\u003cscript' in low
+    assert json.loads(text) == payload                 # the escapes are plain JSON: JSON.parse reads them back
+    assert json.loads(text.replace('<\\/', '</')) == payload
+    tag = export.script_tag('tier1', payload)
+    inner = tag[len('<script type="application/json" id="tier1">'):-len('</script>')]
+    assert '<!--' not in inner and '<script' not in inner.lower() and '</' not in inner
+
+
 # ----------------------------------------------------------------------------- series from synthetic rows
 
 def test_series_from_rows_shape_and_rounding():

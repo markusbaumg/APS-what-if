@@ -11,7 +11,10 @@ cli.py  -  `hc`, the Hindcast command (DESIGN.md section 4.6)
     hc study run    <name> [--hours H] [--until HH:MM] [--workers N] [--on-stale stop|reeval]
     hc study status <name> [--json]
     hc study stop   <name>
-    hc gh ... | hc lint ... | hc freeze ... | hc warm ... | hc check | hc report | hc serve | hc explain | hc card | hc export
+    hc check [--refreeze] [--no-live] [--write-golden --reason TEXT]          regression gate (H-902)
+    hc replay <day> ...     hc search <name>     hc round <name>                one replay, the search plan, the verdict step
+    hc report <name> | hc serve <name> | hc explain <name> <iso> | hc card <name>
+    hc gh ... | hc lint ... | hc freeze ... | hc warm ... | hc export (not built yet, H-504)
 
 Dispatcher only: the study commands live in study.py (H-301) and space.py (H-303); every other command is handed
 to its module when that module exists in this package and skipped with "not built yet (H-nnn)" and exit code 1
@@ -53,8 +56,11 @@ LAZY_COMMANDS = {
     'serve':   (('hindcast.report', 'hindcast.serve'), 'H-401', 'stdlib http.server on report/'),
     'explain': (('hindcast.explain', 'hindcast.status'), 'H-502', 'the drill-down of one loop as text'),
     'card':    (('hindcast.cards', 'hindcast.card', 'hindcast.export'), 'H-205', 'linted candidate cards -> cards/<rank>.md'),
+    'round':   (('hindcast.round',), 'H-502', 'write round.json and status.json from trials.jsonl'),
+    'search':  (('hindcast.search',), 'H-304', 'the search plan of a study: phases, pending tasks, frozen parameters'),
+    'replay':  (('hindcast.replay',), 'H-102', 'replay one variant on one frozen day and print its metrics'),
     'export':  (('hindcast.export',), 'H-504', 'db rows / tier-1 JSON for the skill'),
-    'gh':      (('hindcast.gh',), 'H-601', 'GitHub labels, epics, campaign and proposal issues'),
+    'gh':      (('hindcast.gh',), 'H-601', 'GitHub labels, backlog issues, campaign issue and round comments'),
     'lint':    (('hindcast.lint',), 'H-205', 'the may / may-not vocabulary and privacy lint'),
 }
 

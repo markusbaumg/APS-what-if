@@ -20,6 +20,31 @@ ones. The base replay disagrees with the phone in about 4 % of loops; difference
 are ties. Nothing here changes the phone; settings are for you and your care team to review. This is one
 person's insulin dosing, not medical advice.
 
+## Commands
+
+`python -m hindcast <command>` from cwd `software/` (alias `hc`); `hc <command> --help` lists the options.
+Exit codes: 0 done, 1 regression (`check`) or command not available, 2 stopped by a guard or a card the
+lint refused, 3 refused or not checked.
+
+| Command | Module | What it does |
+|---|---|---|
+| `hc study new\|run\|status\|stop` | `study.py`, `space.py` | create a study, run or resume its queue (dry evaluator until the orchestrator, H-305, exists), the status summary, the STOP file |
+| `hc warm` | `freeze.py` | fill the Nightscout day cache (the only network step) |
+| `hc freeze` | `freeze.py` | freeze cached UTC days into `frozen/<host>/<day>.loops.jsonl.gz` |
+| `hc replay <day>` | `replay.py` | replay one variant on one frozen day and print its metrics (hand check) |
+| `hc check` | `check.py` | regression gate: base replay of 2026-09-06 06-09Z, frozen vs live-day, against `tests/golden/` |
+| `hc search <name>` | `search.py` | the search plan: phases, pending tasks, parameters frozen as not testable |
+| `hc round <name>` | `round.py` | the verdict step: `round.json` and `status.json` from `trials.jsonl` |
+| `hc report <name>` / `hc serve <name>` | `report.py` | render `studies/<name>/report/index.html`; serve it on localhost |
+| `hc explain <name> <iso>` | `explain.py` | the drill-down of one loop as text (decision pair, factor chain, reason diff) |
+| `hc card <name>` | `cards.py` | linted candidate cards `cards/<rank>.md` plus `.vdf` |
+| `hc gh labels\|issues\|epics\|campaign\|round` | `gh.py` | GitHub labels, backlog issues, the campaign issue and one comment per round |
+| `hc lint` | `lint.py` | the may / may-not vocabulary and privacy lint |
+| `hc export` | - | not built yet (H-504) |
+
+The worker pool (`pool.py`) and the day quarantine (`days.py`) have no command of their own; the
+orchestrator (H-305) drives them.
+
 ## Running the tests
 
 ```bash

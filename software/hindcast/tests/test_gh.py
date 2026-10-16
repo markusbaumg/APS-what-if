@@ -18,6 +18,7 @@ class FakeRunner:
     def __init__(self, labels=(), issues=()):
         self.labels = list(labels)
         self.issues = [dict(i) for i in issues]
+        self.comments = {}                      # issue number -> [comment bodies]
         self.calls = []
         self.next_number = 100 + len(self.issues)
 
@@ -37,7 +38,14 @@ class FakeRunner:
                                 'labels': [{'name': l} for l in i.get('labels', [])]} for i in self.issues])
         if sub == ('issue', 'view'):
             n = int(cmd[3])
-            return json.dumps({'body': next(i['body'] for i in self.issues if i['number'] == n)})
+            fields = cmd[cmd.index('--json') + 1].split(',')
+            issue = next(i for i in self.issues if i['number'] == n)
+            out = {}
+            if 'body' in fields:
+                out['body'] = issue['body']
+            if 'comments' in fields:
+                out['comments'] = [{'body': b, 'author': {'login': 'x'}} for b in self.comments.get(n, [])]
+            return json.dumps(out)
         if sub == ('issue', 'create'):
             self.next_number += 1
             title = cmd[cmd.index('--title') + 1]
@@ -49,6 +57,11 @@ class FakeRunner:
             n = int(cmd[3])
             next(i for i in self.issues if i['number'] == n)['body'] = input_text
             return ''
+        if sub == ('issue', 'comment'):
+            n = int(cmd[3])
+            assert any(i['number'] == n for i in self.issues), 'comment on unknown issue %d' % n
+            self.comments.setdefault(n, []).append(input_text)
+            return 'https://github.com/%s/issues/%d#issuecomment-%d\n' % (REPO, n, len(self.comments[n]))
         raise AssertionError('unexpected gh command %r' % (cmd,))
 
     def created(self):
@@ -56,6 +69,9 @@ class FakeRunner:
 
     def edited(self):
         return [c for c, _ in self.calls if c[1:3] == ['issue', 'edit']]
+
+    def commented(self):
+        return [c for c, _ in self.calls if c[1:3] == ['issue', 'comment']]
 
 
 MINI = """# head
@@ -390,7 +406,337 @@ def test_honesty_matches_design(design_md):
     assert quoted == ghmod.HONESTY
 
 
+# ----------------------------------------------------------------------------- campaign issue and round comments (H-602)
+
+from hindcast import contracts as c                                                          # noqa: E402
+from hindcast import lint                                                                    # noqa: E402
+from hindcast import space as sp                                                             # noqa: E402
+from hindcast import study as st                                                             # noqa: E402
+from hindcast.tests.conftest import NS_SETTINGS                                              # noqa: E402
+
+SETTINGS = sp.load_settings(NS_SETTINGS)
+SPACE = {'profile autoISF_max': {'type': 'float', 'low': 1.1, 'high': 1.8, 'step': 0.05},
+         'profile dura_ISF_weight': {'type': 'float', 'low': 0.3, 'high': 1.0, 'step': 0.05},
+         'profile enable_pp_ISF': {'type': 'bool'}}
+CAMPAIGN_LABELS_READY = list(LABELS)               # a repo where `hc gh labels` ran already
+
+
+def make_study(tmp_path, name='autoISF_oct', days=tuple('2026-09-%02d' % d for d in range(1, 8)), **kw):
+    kw.setdefault('phases', [c.Phase(kind='oaat', points=5), c.Phase(kind='lhs', n=24, seed=1),
+                             c.Phase(kind='validate', top=8, days='holdout')])
+    kw.setdefault('holdout', ['2026-09-05'] if '2026-09-05' in days else [])
+    kw.setdefault('tags', {'2026-09-05': ['weekend', 'sport']} if '2026-09-05' in days else {})
+    kw.setdefault('constraints', [['profile dura_ISF_weight', '<=', 'profile autoISF_max']])
+    sd = st.new_study(name, list(days), SPACE, settings=SETTINGS, studies_dir=str(tmp_path), **kw)
+    return sd, sd.load_study(SETTINGS)
+
+
+def make_round(sd, round_no=1, n=6, phase='lhs', whys=None, notes=(), dead=True):
+    variants = []
+    for i in range(n):
+        params = {'profile autoISF_max': round(1.3 + i * 0.05, 2), 'profile dura_ISF_weight': 0.5}
+        why = (whys or ['asks for more insulin in rising loops'])[i % len(whys or [1])]
+        variants.append(c.Candidate(vhash=c.vhash(params), variant=sp.variant_name(params),
+                                    verdict=c.VERDICTS[i % len(c.VERDICTS)], why=why, params=params, rank=i + 1))
+    rnd = c.Round(round=round_no, phase=phase, started=c.now_iso(), trials=n, variants=variants,
+                  front=[v.vhash for v in variants], notes=list(notes),
+                  dead_parameters=[c.DeadParameter('profile dura_ISF_weight', 'all points inside 1.5 x floor')] if dead else [])
+    rnd.validate().save(sd.round_path)
+    return rnd
+
+
+def issue_lint(text):
+    return [str(f) for f in lint.lint_findings(text, 'issue')]
+
+
+def test_campaign_body_is_the_protocol_and_passes_the_issue_lint(tmp_path):
+    sd, study = make_study(tmp_path, base_vdf_lines=['profile  enable_BG_acceleration  False'], notes=['first campaign'])
+    body = ghmod.campaign_body(study, 'https://claude.ai/artifact/abc123')
+    assert issue_lint(body) == []
+    assert body.startswith(ghmod.campaign_marker('autoISF_oct'))
+    assert '| `profile autoISF_max` | autoISF max | float | 1.1 .. 1.8 step 0.05 |' in body
+    assert '| `profile enable_pp_ISF` | - | bool | false / true | - |' in body
+    assert 'Days: 7 (6 search, 1 hold-out), 2026-09-01 .. 2026-09-07' in body
+    assert 'Day tags (typed by the user): 2026-09-05: weekend, sport' in body
+    assert 'Question: explore: nothing is ranked, the leaderboard is in review order' in body
+    assert 'Phases: oaat (5 levels), lhs (24 points), validate (top 8, holdout)' in body
+    assert 'Budget: 6 h, 4 worker(s)' in body and 'Constraints: `profile dura_ISF_weight <= profile autoISF_max`' in body
+    assert 'Base VDF rows every variant carries: `profile  enable_BG_acceleration  False`' in body
+    assert 'Artifact: https://claude.ai/artifact/abc123' in body and 'Note: first campaign' in body
+    assert 'code_sha %s' % c.short(study.code_sha) in body
+    assert ghmod.HONESTY in body and 'Privacy:' in body and 'Not testable with this method: basal rates' in body
+    # no medical data: no glucose or insulin numbers, no loop counts, no host name
+    assert ' U' not in body.replace(' UKF', '') and 'loops' not in body.replace('in about 4 % of loops', '')
+    assert 'mmol' not in body and study.host not in body.split(ghmod.HONESTY)[0] if study.host else True
+    # deterministic: the same study renders byte-identical (that is what makes `ensure_campaign` idempotent)
+    assert ghmod.campaign_body(study, 'https://claude.ai/artifact/abc123') == body
+    assert 'Artifact: not published yet' in ghmod.campaign_body(study)
+
+
+@pytest.mark.parametrize('question', c.QUESTIONS)
+def test_campaign_body_every_question_passes_lint(tmp_path, question):
+    _, study = make_study(tmp_path, name='q_' + question, question=question)
+    body = ghmod.campaign_body(study)
+    assert issue_lint(body) == [] and question in body
+
+
+def test_ensure_campaign_creates_once_then_updates_only_on_change(tmp_path):
+    sd, study = make_study(tmp_path)
+    fake = FakeRunner(labels=['hindcast'])
+    g = Gh(runner=fake)
+    action, row, note = ghmod.ensure_campaign(g, sd, study, artifact_url='https://claude.ai/artifact/a1',
+                                              linter=ghmod.study_linter(study))
+    assert (action, note) == ('created', '') and row['number'] == 101
+    cmd = fake.created()[0]
+    assert cmd[cmd.index('--title') + 1] == 'Campaign: autoISF_oct'
+    assert [cmd[i + 1] for i, x in enumerate(cmd) if x == '--label'] == ['hindcast', 'campaign']
+    assert 'campaign' in fake.labels                      # the missing label was created first
+    assert fake.issues[-1]['body'] == ghmod.campaign_body(study, 'https://claude.ai/artifact/a1')
+    # same state: exists, no edit
+    action, row, _ = ghmod.ensure_campaign(Gh(runner=fake), sd, study, artifact_url='https://claude.ai/artifact/a1')
+    assert action == 'exists' and row['number'] == 101 and fake.edited() == [] and len(fake.created()) == 1
+    # the artifact link changed: the body is rewritten in place
+    action, row, _ = ghmod.ensure_campaign(Gh(runner=fake), sd, study, artifact_url='https://claude.ai/artifact/a2')
+    assert action == 'updated' and len(fake.edited()) == 1 and 'artifact/a2' in fake.issues[0]['body']
+    # --no-update leaves a differing body alone
+    action, _, _ = ghmod.ensure_campaign(Gh(runner=fake), sd, study, artifact_url='https://claude.ai/artifact/a3', update=False)
+    assert action == 'exists' and len(fake.edited()) == 1
+    # the artifact link defaults to status.json's artifact_url
+    status = st.build_status(sd)
+    status.artifact_url = 'https://claude.ai/artifact/from-status'
+    sd.write_status(status)
+    action, _, _ = ghmod.ensure_campaign(Gh(runner=fake), sd, study)
+    assert action == 'updated' and 'artifact/from-status' in fake.issues[0]['body']
+
+
+def test_ensure_campaign_dry_run_and_lint_refusal(tmp_path, capsys):
+    sd, study = make_study(tmp_path)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    action, row, _ = ghmod.ensure_campaign(Gh(runner=fake, dry_run=True), sd, study)
+    assert action == 'would-create' and row['number'] is None
+    assert fake.created() == [] and [cmd[1:3] for cmd, _ in fake.calls] == [['issue', 'list'], ['label', 'list']]
+    assert capsys.readouterr().out.count('DRY-RUN') == 1
+    refusing = lambda body: 'privacy ...' if 'Protocol' in body else None    # noqa: E731
+    action, row, note = ghmod.ensure_campaign(Gh(runner=fake), sd, study, linter=refusing)
+    assert (action, row, note) == ('refused', None, 'privacy ...') and fake.created() == []
+    # an existing issue whose refreshed body fails the lint is left as it is
+    ghmod.ensure_campaign(Gh(runner=fake), sd, study)
+    action, row, note = ghmod.ensure_campaign(Gh(runner=fake), sd, study, artifact_url='https://x', linter=refusing)
+    assert action == 'refused' and row['number'] == 101 and fake.edited() == []
+
+
+def test_round_body_words_and_sanitised_free_text(tmp_path):
+    sd, study = make_study(tmp_path)
+    rnd = make_round(sd, round_no=3, n=12, whys=['asks for more insulin in rising loops', 'SMB total +2.65 U more than base',
+                                                 'the factor would have sat on the cap'],
+                     notes=['fidelity floor held', 'Microbolusing 0.3U in the drill-down'])
+    status = st.build_status(sd)
+    linter = ghmod.study_linter(study)
+    assert linter is not None
+    body = ghmod.round_body(study, status, rnd, 3, None, linter)
+    assert issue_lint(body) == []
+    assert body.startswith(ghmod.round_marker('autoISF_oct', 3)) and '### Round 3 - phase lhs' in body
+    assert '(12 in this round)' in body and 'variants in this round: 12 (' in body
+    assert '[recommended for review]' in body and '[recommended]' not in body
+    assert 'dropped parameters (not testable on these days): `profile dura_ISF_weight` - all points inside 1.5 x floor' in body
+    assert '2.65 U' not in body and 'Microbolusing' not in body and body.count(ghmod.SEE_ARTIFACT) >= 4
+    assert 'the factor would have sat on the cap' in body and '- note: fidelity floor held' in body
+    import re
+    assert len(re.findall(r'\n  \d+\. `', body)) == ghmod.ROUND_MAX_VARIANTS and '... 2 more in the artifact' in body
+    assert 'review order (not a ranking by outcome)' in body and 'Artifact: not published yet' in body
+    for word in ('better', 'best', 'optimal', 'safer', 'U/day', 'mmol'):
+        assert word not in body
+    # every verdict word of the contract renders lint-clean
+    for verdict in c.VERDICTS:
+        assert lint.lint_findings('[%s]' % st.verdict_label(verdict), 'issue') == []
+
+
+def test_post_round_at_most_one_comment_per_round(tmp_path):
+    sd, study = make_study(tmp_path)
+    make_round(sd, round_no=1)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    linter = ghmod.study_linter(study)
+    action, row, note = ghmod.post_round(Gh(runner=fake), sd, study, artifact_url='https://claude.ai/artifact/r', linter=linter)
+    assert (action, note) == ('posted', '') and row['number'] == 101
+    assert len(fake.created()) == 1                       # the campaign issue was opened on the way
+    assert fake.issues[0]['title'] == 'Campaign: autoISF_oct' and 'artifact/r' in fake.issues[0]['body']
+    assert len(fake.commented()) == 1 and fake.comments[101][0].startswith(ghmod.round_marker('autoISF_oct', 1))
+    assert issue_lint(fake.comments[101][0]) == []
+    # the same round again: nothing is posted
+    action, row, note = ghmod.post_round(Gh(runner=fake), sd, study, artifact_url='https://claude.ai/artifact/r', linter=linter)
+    assert action == 'exists' and 'round 1' in note and len(fake.commented()) == 1 and fake.edited() == []
+    # round 2 gets its own comment, and only one
+    make_round(sd, round_no=2, phase='halving')
+    for _ in range(2):
+        action, _, _ = ghmod.post_round(Gh(runner=fake), sd, study, artifact_url='https://claude.ai/artifact/r', linter=linter)
+    assert action == 'exists' and len(fake.comments[101]) == 2
+    assert '### Round 2 - phase halving' in fake.comments[101][1]
+    # --round N names another round than round.json: the comment carries the counts only
+    action, _, _ = ghmod.post_round(Gh(runner=fake), sd, study, round_no=5, linter=linter)
+    assert action == 'posted' and 'no round.json yet' in fake.comments[101][2]
+    assert fake.comments[101][2].startswith(ghmod.round_marker('autoISF_oct', 5))
+
+
+def test_post_round_dry_run_posts_nothing(tmp_path, capsys):
+    sd, study = make_study(tmp_path)
+    make_round(sd, round_no=1)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    action, row, _ = ghmod.post_round(Gh(runner=fake, dry_run=True), sd, study, linter=ghmod.study_linter(study))
+    assert action == 'would-post' and row['number'] is None
+    assert fake.created() == [] and fake.commented() == [] and fake.comments == {}
+    out = capsys.readouterr().out
+    assert out.count('DRY-RUN') == 2 and 'issue create' in out and 'issue comment' in out
+    # with an existing campaign issue the comments are read (read-only) and the comment is still only printed
+    fake2 = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    ghmod.post_round(Gh(runner=fake2), sd, study)
+    action, row, _ = ghmod.post_round(Gh(runner=fake2, dry_run=True), sd, study, round_no=2)
+    assert action == 'would-post' and row['number'] == 101 and len(fake2.comments[101]) == 1
+    assert [cmd[1:3] for cmd, _ in fake2.calls].count(['issue', 'comment']) == 1
+
+
+def test_post_round_without_round_json(tmp_path):
+    sd, study = make_study(tmp_path)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    action, row, note = ghmod.post_round(Gh(runner=fake), sd, study)
+    assert action == 'no-round' and row is None and 'no round.json' in note and fake.created() == []
+    c.State(phase='oaat', trials_done=5, queue_len=3, pid=4711, heartbeat=c.now_iso(), round=2, exit_code=2,
+            stop_reason='guard: sentinel replay differs from base, see 2026-09-06T09:00:37Z').save(sd.state_path)
+    action, row, _ = ghmod.post_round(Gh(runner=fake), sd, study, linter=ghmod.study_linter(study))
+    assert action == 'posted'
+    body = fake.comments[101][0]
+    assert body.startswith(ghmod.round_marker('autoISF_oct', 2)) and 'phase oaat' in body
+    assert '- run: stopped, exit 2 (guard: sentinel replay differs from base' in body
+    assert issue_lint(body) == []
+
+
+def test_post_round_refused_bodies_are_not_posted(tmp_path):
+    sd, study = make_study(tmp_path)
+    make_round(sd, round_no=1)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    refuse_rounds = lambda body: 'may not say' if 'hindcast-round' in body else None       # noqa: E731
+    action, row, note = ghmod.post_round(Gh(runner=fake), sd, study, linter=refuse_rounds)
+    assert (action, row, note) == ('refused', None, 'may not say') and fake.created() == [] and fake.commented() == []
+    refuse_campaign = lambda body: 'privacy' if 'hindcast-campaign' in body else None       # noqa: E731
+    action, row, note = ghmod.post_round(Gh(runner=fake), sd, study, linter=refuse_campaign)
+    assert action == 'refused' and note.startswith('campaign body:') and fake.commented() == []
+
+
+def test_study_linter_private_repo_keeps_only_the_transcript_rules(tmp_path):
+    sd, study = make_study(tmp_path)
+    public = ghmod.study_linter(study)
+    assert public('The variant asks for 2.65 U more.') and public('Microbolusing 0.3U')
+    assert public('autoISF_max 1.3 -> 1.5, replayed over 7 days, 240 trials done') is None
+    study.private_repo = True
+    private = ghmod.study_linter(study)
+    assert private('The variant asks for 2.65 U more.') is None
+    assert private('Microbolusing 0.3U') and private('predBGs: [120, 118]') and private('This variant is better.')
+    assert ghmod.study_linter(study, no_lint=True) is None
+
+
+def test_run_campaign_and_round_cli(tmp_path, monkeypatch, capsys):
+    """run_campaign / run_round through main() with subprocess mocked: --dry-run never creates, edits or comments."""
+    sd, study = make_study(tmp_path)
+    make_round(sd, round_no=1)
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        assert cmd[1:3] in (['issue', 'list'], ['label', 'list'], ['issue', 'view']), cmd
+        if cmd[1:3] == ['label', 'list']:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps([{'name': n} for n in LABELS]), stderr='')
+        return subprocess.CompletedProcess(cmd, 0, stdout='[]', stderr='')
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    rc = ghmod.main(['campaign', 'autoISF_oct', '--studies-dir', str(tmp_path), '--dry-run', '--pause', '0',
+                     '--artifact', 'https://claude.ai/artifact/x'])
+    out = capsys.readouterr().out
+    assert rc == 0 and 'would-create' in out and 'Campaign: autoISF_oct' in out and out.count('DRY-RUN') == 1
+    rc = ghmod.main(['round', str(sd.path), '--dry-run', '--pause', '0'])
+    out = capsys.readouterr().out
+    assert rc == 0 and 'would-post' in out and out.count('DRY-RUN') == 2
+    assert all(cmd[1:3] in (['issue', 'list'], ['label', 'list'], ['issue', 'view']) for cmd in seen)
+    # no such study: exit 3, nothing touched
+    rc = ghmod.main(['campaign', 'nothere', '--studies-dir', str(tmp_path), '--dry-run'])
+    assert rc == 3 and 'refused (exit 3)' in capsys.readouterr().out
+    # the same subcommands through `hc gh ...` (cli.py picks up register())
+    from hindcast import cli
+    rc = cli.main(['gh', 'campaign', 'autoISF_oct', '--studies-dir', str(tmp_path), '--dry-run', '--pause', '0'])
+    assert rc == 0 and 'would-create' in capsys.readouterr().out
+    rc = cli.main(['gh', 'round', 'autoISF_oct', '--studies-dir', str(tmp_path), '--dry-run', '--pause', '0'])
+    assert rc == 0 and 'would-post' in capsys.readouterr().out
+    rc = cli.main(['gh', 'labels', '--dry-run'])
+    assert rc == 0 and 'existing' in capsys.readouterr().out
+    rc = cli.main(['gh', 'round', 'nothere', '--studies-dir', str(tmp_path)])
+    assert rc == 3
+
+
+def test_register_exposes_every_subcommand():
+    import argparse
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest='command')
+    ghmod.register(sub)
+    for cmd, fn in (('labels', ghmod.run_labels), ('issues', ghmod.run_issues), ('epics', ghmod.run_epics),
+                    ('campaign', ghmod.run_campaign), ('round', ghmod.run_round)):
+        argv = ['gh', cmd] + (['s1'] if cmd in ('campaign', 'round') else [])
+        args = parser.parse_args(argv + ['--dry-run'])
+        assert args.func is fn and args.dry_run and args.gh_command == cmd
+    args = parser.parse_args(['gh', 'round', 's1', '--round', '4', '--artifact', 'https://x', '--no-update'])
+    assert args.round == 4 and args.artifact == 'https://x' and args.no_update
+    with pytest.raises(SystemExit):
+        parser.parse_args(['gh'])
+
+
+def test_campaign_footer_and_question_texts_pass_lint():
+    assert issue_lint(ghmod.CAMPAIGN_FOOTER) == []
+    for text in ghmod.QUESTION_TEXT.values():
+        assert issue_lint(text) == []
+    assert issue_lint(ghmod.FOOTER) == []
+
+
 @pytest.mark.needs_gh
 def test_gh_cli_present_read_only():
     out = subprocess.run(['gh', '--version'], capture_output=True, text=True).stdout
     assert out.startswith('gh version')
+
+
+def test_campaign_notes_that_fail_the_lint_are_withheld_not_blocking(tmp_path):
+    sd, study = make_study(tmp_path, notes=['first campaign', 'the variant gave 2.65 U more', '', 'Microbolusing 0.3U'])
+    linter = ghmod.study_linter(study)
+    assert linter is not None
+    body = ghmod.campaign_body(study, None, linter)
+    assert issue_lint(body) == [] and 'Note: first campaign' in body
+    assert 'Note: 2 more note(s): %s' % ghmod.SEE_ARTIFACT in body and '2.65' not in body and 'Microbolusing' not in body
+    assert body.count('Note: ') == 2                       # the empty note is skipped, not counted
+    # without a linter the notes are verbatim (and the whole body would then be refused by the lint)
+    assert '2.65 U' in ghmod.campaign_body(study)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    action, _, note = ghmod.ensure_campaign(Gh(runner=fake), sd, study, linter=linter)
+    assert (action, note) == ('created', '') and issue_lint(fake.issues[-1]['body']) == []
+
+
+def test_round_notes_collapse_into_one_withheld_line(tmp_path):
+    sd, study = make_study(tmp_path)
+    rnd = make_round(sd, round_no=1, notes=['fidelity floor held', 'SMB total +2.65 U', 'Microbolusing 0.3U'])
+    body = ghmod.round_body(study, st.build_status(sd), rnd, 1, None, ghmod.study_linter(study))
+    assert '- note: fidelity floor held' in body and '- note: 2 more note(s): %s' % ghmod.SEE_ARTIFACT in body
+    assert body.count('- note: ') == 2 and issue_lint(body) == []
+
+
+def test_campaign_day_tags_that_fail_the_lint_are_withheld(tmp_path):
+    """User-typed day tags go into a public issue: each is linted on its own like the notes; a refused tag is
+    withheld and counted, the others stay."""
+    tags = {'2026-09-05': ['weekend', 'Microbolusing 0.3U'], '2026-09-06': ['bolus 2.65 U'], '2026-09-07': ['sport']}
+    sd, study = make_study(tmp_path, tags=tags)
+    linter = ghmod.study_linter(study)
+    assert linter is not None
+    body = ghmod.campaign_body(study, None, linter)
+    assert issue_lint(body) == []
+    assert 'Microbolusing' not in body and '2.65' not in body
+    assert 'Day tags (typed by the user): 2026-09-05: weekend; 2026-09-07: sport; 2 tags withheld (%s)' % (
+        ghmod.SEE_ARTIFACT) in body
+    assert '2026-09-06:' not in body                       # a day whose every tag was withheld is not listed
+    # all tags pass: no withheld clause; without a linter the tags are verbatim
+    _, clean = make_study(tmp_path, name='clean', tags={'2026-09-05': ['weekend', 'sport']})
+    assert 'withheld' not in ghmod.campaign_body(clean, None, linter)
+    assert 'Microbolusing 0.3U' in ghmod.campaign_body(study)
+    action, _, note = ghmod.ensure_campaign(Gh(runner=FakeRunner(labels=CAMPAIGN_LABELS_READY)), sd, study, linter=linter)
+    assert (action, note) == ('created', '')

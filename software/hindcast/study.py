@@ -9,6 +9,8 @@ study.py  -  the study directory of a Hindcast run (backlog H-301; DESIGN.md sec
     studies/<study>/STOP            a request to stop: the running trial finishes, status is written, exit code 0
     studies/<study>/status.json     <= 2 KB summary for the skill (contracts.Status), rewritten after every trial
     studies/<study>/round.json      written by the ranking step (H-502); read here only to fill status.top
+    studies/<study>/guards.json     the guards' private details (never published): whether the sentinel could be
+                                    scheduled (and why not, per day), the loop counts of an unequal-loop stop
 
 Lock rule (pid + heartbeat). A run owns the study while LOCK names its pid and STATE.json (same pid) has no
 exit_code and a heartbeat younger than LOCK_STALE_S (10 min); in the moment between creating LOCK and the first
@@ -26,8 +28,30 @@ only after its evaluation finished, so a `kill -9` loses at most the trial in fl
 skipped by contracts.read_trials. Where a key has several rows the last one counts.
 
 Exit codes (DESIGN.md section 4.5): 0 finished or stopped (STOP file, Ctrl-C), 2 stopped by a guard
-(GuardStop: three consecutive failures, disk below the minimum, and the sentinel / null / stale checks the
-orchestrator raises), 3 configuration refused (StudyError: locked key, unknown VDF key, lock held, bad study).
+(GuardStop: three consecutive failures, disk below the minimum, a sentinel / null control that differs from base,
+unequal loop counts on a day, stale_context), 3 configuration refused (StudyError: locked key, unknown VDF key,
+lock held, bad study).
+
+Guards (backlog H-302, DESIGN.md sections 5.1 and 6; details in the Runner and Guards docstrings):
+    sentinel        the phone's values of the searched parameters as explicit VDF rows (ns_settings.json with
+                    profile_history rewound to the day's start) must reproduce the day's base replay on every loop
+                    and every CSV column; after each base replay of the run, at each phase start, and every
+                    `sentinel_every` (study.json) tasks
+    null            one searched parameter at the phone's value; once per run (= round); same comparison
+    loop counts     a done row whose metrics.loops differs from its day's base row stops the run
+    stale_context   code_sha / settings_sha / freeze_sha on every row (and in the key); at the start of a run the
+                    done rows are compared with the live context: `--on-stale stop` (default) replays nothing and
+                    exits 2, `--on-stale reeval` appends a `stale` row over each old done row, replays the affected
+                    days' base first, then continues (the rest lazily, as the search asks for it); a change during
+                    a run lets the round finish, then exits 2
+Every guard stop writes its reason (for a control: the day, the first differing loop with its time and the
+differing column names) into STATE.json and status.json `stop_reason`. That reason can reach the public campaign
+issue (gh.py), so it never carries loop counts or cell values (DESIGN.md section 3, privacy): those go into the
+row's `error` (trials.jsonl) and, for loop counts, guards.json.
+A sentinel that cannot be scheduled (sentinel_params leaves out every searched parameter on a day) disables the
+sentinel and null controls for that day; that is never silent: guards.json `sentinel` names the days and the
+reason per parameter, every row of the run on such a day carries the flag `sentinel_not_schedulable`,
+RunResult.guards lists it, and `hc study status` prints it (status_text, from guards.json).
 
 What is NOT here: the search phases (search.py, H-304), the replay (replay.py, H-102), the pool (pool.py) and the
 orchestrator that strings them together (H-305). `Runner.run(tasks, evaluate)` is the loop they plug into:
@@ -62,6 +86,8 @@ from hindcast import space as spc                                               
 STUDIES_DIR = os.path.join(SOFTWARE_DIR, 'studies')
 STUDY_JSON, TRIALS_JSONL, STATE_JSON, STOP_FILE, STATUS_JSON, ROUND_JSON, LOCK_FILE = (
     'study.json', 'trials.jsonl', 'STATE.json', 'STOP', 'status.json', 'round.json', 'LOCK')
+GUARDS_JSON = 'guards.json'                          # private guard details (not part of STATE/status contracts)
+GUARDS_LOOP_COUNTS_MAX = 20                          # unequal-loop entries kept in guards.json
 LOCK_STALE_S = 600                                   # heartbeat older than this: the lock may be taken over
 LOCK_ATTEMPTS = 5                                    # acquire rounds before giving up (the lock keeps changing hands)
 LOCK_RETRY_S = 0.05                                  # pause between those rounds
@@ -69,6 +95,9 @@ TAKEOVER_STALE_S = 60                                # a takeover mutex older th
 MIN_DISK_MB = 2048                                   # DESIGN.md: < 2 GB free stops the run (exit 2)
 MAX_CONSECUTIVE_FAILURES = 3
 EXIT_OK, EXIT_GUARD, EXIT_REFUSED = 0, 2, 3
+ON_STALE = ('stop', 'reeval')                        # hc study run --on-stale (default stop)
+CONTROL_KINDS = ('sentinel', 'null')                 # the automatic controls of DESIGN.md section 5.1 (H-302)
+STOP_REASON_MAX = 400                                # characters of a stop reason in STATE.json / status.json
 _NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 _DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
@@ -272,16 +301,6 @@ def lock_holder(state, now=None, stale_s=LOCK_STALE_S, lock=None):
     return f'pid {pid or "?"}, lock taken {int(age)} s ago, STATE.json not written yet'
 
 
-@dataclass
-class RunResult:
-    exit_code: int
-    stop_reason: str
-    done: int = 0                   # rows appended by this run
-    skipped: int = 0                # tasks whose key already had a done row
-    failed: int = 0
-    blocked: int = 0
-
-
 class StudyDir:
     """Paths and file rules of one study directory. Construct with the directory (see resolve_study_dir)."""
 
@@ -295,6 +314,7 @@ class StudyDir:
         self.lock_path = os.path.join(self.path, LOCK_FILE)
         self.status_path = os.path.join(self.path, STATUS_JSON)
         self.round_path = os.path.join(self.path, ROUND_JSON)
+        self.guards_path = os.path.join(self.path, GUARDS_JSON)
         self.runs_dir = os.path.join(self.path, 'runs')
         self.report_dir = os.path.join(self.path, 'report')
 
@@ -516,6 +536,33 @@ class StudyDir:
     def is_running(self):
         return self.lock_holder() is not None
 
+    # ---- guards.json (private details of the guards; never copied into status.json or an issue)
+    def read_guards(self):
+        """The guards.json dict, {} when missing or unreadable (never an exception)."""
+        try:
+            with open(self.guards_path, encoding='utf-8') as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def update_guards(self, **sections):
+        """Merge `sections` into guards.json (atomic rename); a value None removes that section."""
+        data = self.read_guards()
+        for k, v in sections.items():
+            if v is None:
+                data.pop(k, None)
+            else:
+                data[k] = v
+        data['updated'] = now_iso()
+        contracts.write_json_atomic(self.guards_path, data)
+        return data
+
+    def add_loop_count_guard(self, entry):
+        data = self.read_guards()
+        items = list(data.get('loop_counts') or []) + [entry]
+        return self.update_guards(loop_counts=items[-GUARDS_LOOP_COUNTS_MAX:])
+
     # ---- status.json
     def read_round(self):
         try:
@@ -596,7 +643,9 @@ def new_study(name, days, space, constraints=(), phases=None, holdout=(), tags=N
 
 @dataclass
 class Task:
-    """One (variant, day) evaluation the orchestrator asks for. `params` {} with control 'base' is the base replay."""
+    """One (variant, day) evaluation the orchestrator asks for. `params` {} with control 'base' is the base replay.
+    The controls 'sentinel' and 'null' (H-302) carry `meta['instance']`, which makes every scheduled control its own
+    trial key (see Runner.key_of), and their params are the phone's values as they are, never snapped onto the grid."""
     params: dict
     day: str
     phase: str = 'grid'
@@ -614,28 +663,434 @@ def dry_evaluate(task):
             'error': 'not replayed: replay.py (H-102) / orchestrator (H-305) not built yet; day not frozen'}
 
 
-class Runner:
-    """The loop every phase runs through: lock, STATE.json, STOP, resume, exit codes, status.json.
+def is_control(task_or_row):
+    """True for the sentinel and null controls (not variants: round.py leaves them out of the ranking)."""
+    return getattr(task_or_row, 'control', None) in CONTROL_KINDS
 
-        runner = Runner(StudyDir(path))
-        result = runner.run(tasks, evaluate)        # -> RunResult(exit_code, stop_reason, ...)
+
+def is_base_task(task):
+    return getattr(task, 'control', None) == 'base' or (not task.params and not is_control(task))
+
+
+def _clip(text, n=STOP_REASON_MAX):
+    text = str(text)
+    return text if len(text) <= n else text[:n - 3] + '...'
+
+
+# ----------------------------------------------------------------------------- stale_context (H-302)
+
+def live_context(settings_path=NS_SETTINGS_PATH, software_dir=SOFTWARE_DIR, fallback_settings_sha=''):
+    """(code_sha, settings_sha) of the working tree right now: contracts.code_sha over determine_basal.py,
+    emulator_core.py and ns_*.py; contracts.settings_sha over the scrubbed ns_settings.json at `settings_path`
+    (`fallback_settings_sha` when that file does not exist)."""
+    code = contracts.code_sha(software_dir)
+    try:
+        sett = contracts.settings_sha(settings_path) if os.path.isfile(settings_path) else fallback_settings_sha
+    except (OSError, ValueError):
+        sett = fallback_settings_sha
+    return code, sett
+
+
+def find_stale(study, rows, code_sha, settings_sha, freeze_sha_of=None):
+    """-> (reasons, stale) for the rows of a study against the live context.
+
+    The reference is the context the study's results were produced under: every latest `done` row (per key) whose
+    code_sha or settings_sha differs from the live one, or whose freeze_sha differs from `freeze_sha_of(row.day)`
+    (a day re-frozen, or its meta changed), is stale. Without any done row the reference is study.json's own stamps
+    (nothing can be mixed yet, but the change is still reported). After `--on-stale reeval` the re-evaluated rows
+    carry the live context, so the next run is not stale again although study.json keeps its creation stamps.
+    `reasons` are short lines for STATE.json / status.json; `stale` is [(row, [field, ...])]."""
+    latest = StudyDir.latest_by_key(rows)
+    done = [r for r in latest.values() if r.status == 'done']
+    if not done:
+        reasons = []
+        if study.code_sha and code_sha and study.code_sha != code_sha:
+            reasons.append(f'code_sha changed since study.json: {contracts.short(study.code_sha)} -> {contracts.short(code_sha)}')
+        if study.settings_sha and settings_sha and study.settings_sha != settings_sha:
+            reasons.append(f'settings_sha changed since study.json: {contracts.short(study.settings_sha)} -> '
+                           f'{contracts.short(settings_sha)}')
+        return reasons, []
+    freeze_now = {}
+
+    def frozen(day):
+        if day not in freeze_now:
+            try:
+                freeze_now[day] = freeze_sha_of(day) if freeze_sha_of else None
+            except Exception:                                # pragma: no cover - an unreadable meta is not a guard
+                freeze_now[day] = None
+        return freeze_now[day]
+
+    counts, stale = {}, []
+    for r in sorted(done, key=lambda r: r.trial):
+        why = []
+        if code_sha and r.code_sha != code_sha:
+            why.append(('code_sha', r.code_sha, code_sha))
+        if settings_sha and r.settings_sha != settings_sha:
+            why.append(('settings_sha', r.settings_sha, settings_sha))
+        f = frozen(r.day)
+        if f is not None and r.freeze_sha != f:
+            why.append((f'freeze_sha of {r.day}', r.freeze_sha, f))
+        if why:
+            stale.append((r, [w[0] for w in why]))
+            for w in why:
+                counts[w] = counts.get(w, 0) + 1
+    reasons = [f'{name} changed: {contracts.short(old) or "none"} -> {contracts.short(new) or "none"} ({n} done rows)'
+               for (name, old, new), n in counts.items()]
+    return reasons, stale
+
+
+# ----------------------------------------------------------------------------- the controls (H-302)
+
+def day_start_ms(day):
+    d = datetime.datetime.strptime(day, '%Y-%m-%d').replace(tzinfo=datetime.timezone.utc)
+    return int(d.timestamp() * 1000)
+
+
+def sentinel_params(study, settings, day):
+    """-> (params, skipped): the phone's value of every searched parameter ns_settings.json carries, rewound through
+    `profile_history` to the start of `day` (space.phone_value with at_ms), as they are (no grid snapping), in space
+    order. `skipped` names the parameters left out, with the reason: Nightscout carries the value (the profile
+    store, not a settings section: an explicit row would not be what base reads), or profile_history changes it
+    inside the day (one explicit row cannot follow an in-day change; days.py quarantines such a day)."""
+    from hindcast import days as dy
+    at = day_start_ms(day)
+    params, skipped = {}, []
+    for name in study.space:
+        v = spc.phone_value(name, settings or {}, at_ms=at)
+        if v is None:
+            skipped.append(f'{name}: not in ns_settings.json')
+            continue
+        if dy.history_hits(settings or {}, day, [name]):
+            skipped.append(f'{name}: profile_history changes it inside {day}')
+            continue
+        params[name] = v
+    return params, skipped
+
+
+def first_loop_difference(csv_a, csv_b, decimal='.'):
+    """None when the two emulator CSVs agree on every loop row (all columns), else a dict describing the first loop
+    that differs: {'loop': index, 'time': ISO or the CSV's time cell, 'columns': [(name, a, b), ...] (up to 4),
+    'differing_loops': n, 'loops': (len a, len b)}. Unequal row counts are a difference at the first missing row."""
+    from emulator_optimize import read_result_csv
+    names_a, rows_a = read_result_csv(csv_a, decimal)
+    names_b, rows_b = read_result_csv(csv_b, decimal)
+    names = names_a or names_b
+    unix = next((n for n in names if 'UNIX' in n), None)
+    tname = names[1] if len(names) > 1 else None
+
+    def when(row):
+        try:
+            return datetime.datetime.fromtimestamp(float(row[unix]), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        except (KeyError, TypeError, ValueError, OSError):
+            return str(row.get(tname)) if tname else '?'
+
+    first, columns, differing = None, [], 0
+    for i, (ra, rb) in enumerate(zip(rows_a, rows_b)):
+        cols = [(n, ra.get(n), rb.get(n)) for n in names if ra.get(n) != rb.get(n)]
+        if cols:
+            differing += 1
+            if first is None:
+                first, columns = i, cols
+    if len(rows_a) != len(rows_b):
+        n = min(len(rows_a), len(rows_b))
+        if first is None:
+            first = n
+            row = (rows_a if len(rows_a) > n else rows_b)[n]
+            return {'loop': n, 'time': when(row), 'columns': [], 'differing_loops': differing,
+                    'loops': (len(rows_a), len(rows_b))}
+    if first is None:
+        return None
+    return {'loop': first, 'time': when(rows_a[first]), 'columns': columns[:4], 'differing_loops': differing,
+            'loops': (len(rows_a), len(rows_b))}
+
+
+def _fmt_cell(v):
+    if isinstance(v, float):
+        return f'{v:.6g}'
+    return str(v)
+
+
+def guard_text(kind, day, diff, kept=None, detail=False):
+    """The one-line guard stop reason: which control, which day, which loop and which columns differ from base.
+
+    detail=False (default): the stop reason for STATE.json / status.json, which gh.py may post into the public
+    campaign issue; it names the loop's index and time and the differing column names only (no loop counts, no
+    cell values; passes lint kind 'issue'). detail=True: the row's `error` (trials.jsonl, private), with the cell
+    values, the number of differing loops and the loop counts of both CSVs."""
+    la, lb = diff.get('loops', (None, None))
+    head = f'{kind} differs from base on {day} at loop {diff["loop"]} ({diff["time"]})'
+    cols = diff.get('columns', [])[:3]
+    if detail:
+        if la != lb and not cols:
+            body = f'{kind} has {la} loops, base {lb}'
+        else:
+            body = '; '.join(f'{n}: {_fmt_cell(a)} vs base {_fmt_cell(b)}' for n, a, b in cols)
+            body += f'; {diff.get("differing_loops", 0)} of {lb} loops differ'
+    elif la != lb and not cols:
+        body = f'the loop counts of {kind} and base differ (see the row\'s error)'
+    else:
+        body = 'columns ' + ', '.join(n for n, _, _ in cols) + ' (values in the row\'s error)'
+    text = f'{head}: {body}' + (f' (control CSV kept: {kept})' if kept else '')
+    return _clip(text + '. State leaked between in-process replays or the VDF path differs from the profile path')
+
+
+class Guards:
+    """The sentinel and null controls of DESIGN.md section 5.1 (H-302).
+
+        guards = Guards.from_context(ctx, study, settings)        # replay.ReplayContext: the real replays
+        runner = Runner(sd, study, guards=guards)
+        runner.run(tasks, ctx.evaluate)                          # controls are scheduled into the run
+
+    sentinel  the phone's values of the searched parameters as explicit VDF rows (sentinel_params: ns_settings.json
+              with profile_history at the day's start); must reproduce the day's base replay loop by loop, every
+              column of the CSV. Scheduled after every base replay the run makes (DESIGN.md section 6 step 0: base
+              + sentinel on every day), before the first task of each phase, and before the next task after
+              `sentinel_every` (study.json) tasks.
+    null      one searched parameter set to the phone's value (rotating with the round number); once per run
+              (= round), right after the first sentinel; must equal base the same way.
+
+    A mismatch is a guard stop (Runner: exit 2, the differing loop's index, time and column names in status.json's
+    stop_reason; the cell values and loop counts only in the row's error); a control that fails while its day's
+    base CSV exists is one too. A day on which sentinel_params leaves out every searched parameter gets no control;
+    schedule() records it in `not_schedulable` (day -> reasons) and the Runner reports it (guards.json, row flag
+    `sentinel_not_schedulable`, RunResult.guards, `hc study status`). A control that is blocked (day not frozen) or has no base CSV
+    to compare with is recorded with the flag `guard_unchecked: ...` and the run goes on.
+
+    `control_evaluate(task) -> dict` returns the evaluate() fields plus `csv` (the control's kept CSV);
+    `base_csv_of(day) -> path or None`. from_context() builds both from a replay.ReplayContext; tests pass their own.
+    For the pool path the orchestrator sends `control_spec(task)` through the pool and calls `verdict(task, out)`
+    itself (Runner.record does that)."""
+
+    def __init__(self, study, settings=None, settings_path=NS_SETTINGS_PATH, control_evaluate=None, base_csv_of=None,
+                 sentinel_every=None, floor_sentinel=True, null=True, keep_matching_csv=False, ctx=None,
+                 control_dir=None):
+        self.study = study
+        self.settings = settings if settings is not None else spc.load_settings(settings_path)
+        self.control_evaluate = control_evaluate
+        self.base_csv_of = base_csv_of or (lambda day: None)
+        self.sentinel_every = int(sentinel_every or getattr(study, 'sentinel_every', 25) or 25)
+        self.floor_sentinel = floor_sentinel
+        self.null = null
+        self.keep_matching_csv = keep_matching_csv
+        self.ctx = ctx
+        self.control_dir = control_dir
+        self._params = {}
+        self.not_schedulable = {}            # day -> [reason per parameter]: no sentinel / null possible that day
+
+    @classmethod
+    def from_context(cls, ctx, study, settings=None, **kw):
+        """Guards over a replay.ReplayContext: controls are replayed with run_trial in this process, their CSV is
+        kept under runs/controls/ until the comparison, the base CSV is the one the context keeps per day."""
+        control_dir = os.path.join(ctx.runs_dir or os.path.join(SOFTWARE_DIR, 'runs'), 'controls')
+        g = cls(study, settings=settings, ctx=ctx, control_dir=control_dir, **kw)
+
+        def base_csv_of(day):
+            p = ctx.base_csvs.get(day)
+            if p and os.path.isfile(p):
+                return p
+            p = ctx.base_csv_path(day)
+            return p if os.path.isfile(p) else None
+        g.base_csv_of = base_csv_of
+        g.control_evaluate = g._replay_control
+        return g
+
+    # ---- the control tasks
+    def phone_params(self, day):
+        if day not in self._params:
+            self._params[day] = sentinel_params(self.study, self.settings, day)
+        return self._params[day]
+
+    def sentinel_task(self, day, phase, round_=None, instance=''):
+        """The sentinel Task, or None when sentinel_params leaves out every searched parameter on `day`; that day is
+        then recorded in `not_schedulable` (the Runner writes it to guards.json and flags the day's rows)."""
+        params, skipped = self.phone_params(day)
+        if not params:
+            self.not_schedulable[day] = list(skipped) or ['no searched parameter']
+            return None
+        return Task(params=dict(params), day=day, phase=phase, control='sentinel', round=round_, variant='sentinel',
+                    meta={'instance': str(instance), 'skipped': list(skipped)})
+
+    def null_task(self, day, phase, round_=None, instance='', index=None):
+        params, _ = self.phone_params(day)
+        if not params:
+            return None
+        names = list(params)
+        name = names[(index if index is not None else (round_ or 0)) % len(names)]
+        return Task(params={name: params[name]}, day=day, phase=phase, control='null', round=round_, variant='null',
+                    meta={'instance': str(instance), 'parameter': name})
+
+    def schedule(self, tasks, run_tag='run'):
+        """The tasks with the controls inserted (see the class docstring). Controls already in `tasks` pass through.
+        Days on which no sentinel can be built end up in `not_schedulable` (reset per call)."""
+        out, since, phases, seq = [], 0, set(), 0
+        self.not_schedulable = {}
+        null_due = self.null
+
+        def add_sentinel(t):
+            nonlocal seq, since, null_due
+            s = self.sentinel_task(t.day, t.phase, t.round, f'{run_tag}:s{seq}')
+            if s is None:
+                return
+            seq += 1
+            since = 0
+            out.append(s)
+            if null_due:
+                n = self.null_task(t.day, t.phase, t.round, f'{run_tag}:null')
+                if n is not None:
+                    out.append(n)
+                null_due = False
+
+        for t in tasks:
+            if is_control(t):
+                out.append(t)
+                continue
+            params, skipped = self.phone_params(t.day)
+            if not params:                                   # no control can ever cover this day: say so
+                self.not_schedulable[t.day] = list(skipped) or ['no searched parameter']
+            if is_base_task(t):
+                out.append(t)
+                if self.floor_sentinel:
+                    add_sentinel(t)
+                continue
+            if t.phase not in phases:
+                phases.add(t.phase)
+                if not (out and out[-1].control in CONTROL_KINDS and out[-1].day == t.day):
+                    add_sentinel(t)
+            elif since >= self.sentinel_every:
+                add_sentinel(t)
+            out.append(t)
+            since += 1
+        return out
+
+    def guard_notes(self):
+        """One line per day without a schedulable sentinel: 'sentinel: not schedulable on <day> (<reasons>)'."""
+        return [f'sentinel: not schedulable on {d} ({"; ".join(r)})' for d, r in sorted(self.not_schedulable.items())]
+
+    # ---- evaluation
+    def control_csv_path(self, task):
+        tag = re.sub(r'[^A-Za-z0-9._-]', '_', str((task.meta or {}).get('instance', '')))[:40]
+        return os.path.join(self.control_dir or os.path.join(SOFTWARE_DIR, 'runs', 'controls'),
+                            f'{task.day}.{task.control}.{contracts.short(contracts.vhash(task.params))}.{tag}.csv')
+
+    def control_spec(self, task):
+        """The replay.TrialSpec of a control: the context's spec with the CSV kept for the comparison, no tier-2
+        files (a control is not a variant of the report) and the day's base CSV for the metrics."""
+        import dataclasses
+        if self.ctx is None:
+            raise StudyError('Guards.control_spec needs a replay context (Guards.from_context)')
+        spec = self.ctx.spec_for(task)
+        return dataclasses.replace(spec, keep_csv=self.control_csv_path(task), report_dir=None,
+                                   base_csv=self.base_csv_of(task.day))
+
+    def _replay_control(self, task):
+        from hindcast import replay
+        res = replay.run_trial(self.control_spec(task))
+        out = res.to_row()
+        out['csv'] = res.csv
+        return out
+
+    def evaluate(self, task):
+        if self.control_evaluate is None:
+            raise StudyError('Guards: no control evaluator (use Guards.from_context or pass control_evaluate)')
+        return self.control_evaluate(task) or {}
+
+    def verdict(self, task, out):
+        """-> (stop_reason or None, flags) for one control's evaluate() output."""
+        kind, day = task.control, task.day
+        status = out.get('status') or ('done' if out.get('metrics') else 'failed')
+        flags = []
+        skipped = (task.meta or {}).get('skipped') or []
+        if skipped:
+            flags.append(f'sentinel_left_out: {len(skipped)}')
+        if status == 'blocked':
+            return None, flags + ['guard_unchecked: blocked']
+        base = self.base_csv_of(day)
+        if not base:
+            return None, flags + ['guard_unchecked: no base CSV of the day']
+        csv = out.get('csv')
+        if status != 'done' or not csv or not os.path.isfile(csv):
+            err = _clip(out.get('error') or 'no CSV', 200)
+            return _clip(f'{kind} failed on {day} while the base replay of the day ran: {err}'), flags + ['guard_failed']
+        diff = first_loop_difference(csv, base)
+        if diff is None:
+            if not self.keep_matching_csv:
+                try:
+                    os.remove(csv)
+                except OSError:
+                    pass
+            return None, flags + ['equals_base']
+        kept = csv
+        root = os.path.dirname(os.path.dirname(self.control_dir)) if self.control_dir else None
+        if root and csv.startswith(root + os.sep):
+            kept = os.path.relpath(csv, root)
+        out['guard_detail'] = guard_text(kind, day, diff, kept, detail=True)    # the row's error (private)
+        return guard_text(kind, day, diff, kept), flags + ['differs_from_base']
+
+
+@dataclass
+class RunResult:
+    exit_code: int
+    stop_reason: str
+    done: int = 0                   # rows appended by this run (controls included)
+    skipped: int = 0                # tasks whose key already had a done row
+    failed: int = 0
+    blocked: int = 0
+    controls: int = 0               # sentinel / null rows appended
+    marked_stale: int = 0           # done rows superseded by a `stale` row (--on-stale reeval)
+    stale_context: list = field(default_factory=list)
+    guards: list = field(default_factory=list)          # guard notes of the run (Guards.guard_notes), [] = none
+
+
+class Runner:
+    """The loop every phase runs through: lock, STATE.json, STOP, resume, exit codes, status.json, and the guards of
+    H-302 (stale_context, equal loop counts, sentinel / null controls).
+
+        runner = Runner(StudyDir(path), guards=Guards.from_context(ctx, study, settings))
+        result = runner.run(tasks, evaluate, on_stale='stop')    # -> RunResult(exit_code, stop_reason, ...)
 
     `evaluate(task)` returns a dict with any of: status ('done' | 'failed' | 'blocked'; default 'done' when
     metrics are present else 'failed'), metrics, seconds, error, flags, feasible, files, worker. It may raise
     GuardStop(reason) (exit 2). Any other exception becomes a `failed` row; MAX_CONSECUTIVE_FAILURES in a row is a
-    guard stop. `freeze_sha_of(day)` gives the frozen day's sha for the key ('' until freeze.py exists).
-    `code_sha`/`settings_sha` default to the study's own stamps; a live mismatch is recorded in STATE.stale_context
-    (H-302 decides what to do with it)."""
+    guard stop. `freeze_sha_of(day)` gives the frozen day's sha for the key ('' until the day is frozen).
+
+    Context per row. Every row carries the code_sha / settings_sha / freeze_sha the run started with: code_sha and
+    settings_sha are the live working tree's (contracts.code_sha, the settings file at `settings_path`) when the
+    run starts, unless the constructor pins them; freeze_sha is read once per day per run. These are in the key.
+
+    stale_context. At the start of each run, find_stale() compares the done rows (or, without any, study.json's
+    stamps) with the live context. `on_stale='stop'` (default): nothing is replayed, STATE/status say why, exit 2.
+    `on_stale='reeval'`: every stale done row is superseded by a `stale` row (same key, appended, so round.py and
+    the ranking no longer read it), the base replays of the affected days are put first, then the run's tasks
+    (whose keys carry the new context) follow; the rest is re-evaluated lazily, when the search asks for it.
+    A change during the run (the code, the settings file, or a frozen day's meta) is noticed after the trial in
+    flight; the run finishes its tasks (the round) with the context it started with, then stops with exit 2 in both
+    modes: the process still holds the old code, so the rows of that round are marked stale by the next run.
+
+    Equal loop counts. A done row whose metrics.loops differs from the base row of its day (same context) is a
+    guard stop: state leaked between in-process replays, or the reconstruction changed under the run. The stop
+    reason names the day, trial and variant only; the counts go into the row's error (flag `unequal_loops`) and
+    guards.json `loop_counts`, never into stop_reason (gh.py may post it into the public issue).
+
+    Controls. With `guards` (Guards), the sentinel / null controls are scheduled into the run (Guards.schedule) and
+    evaluated through guards.evaluate; a control that differs from base stops the run with exit 2 after its row is
+    appended, the differing loop in STATE/status stop_reason (count- and value-free) and in the row's error (with
+    the values). Days without a schedulable sentinel: see Runner.note_guards."""
 
     def __init__(self, study_dir, study=None, settings=None, freeze_sha_of=None, code_sha=None, settings_sha=None,
                  worker=None, min_disk_mb=MIN_DISK_MB, max_failures=MAX_CONSECUTIVE_FAILURES, status_every=1,
-                 budget_s=None, log=None):
+                 budget_s=None, log=None, settings_path=NS_SETTINGS_PATH, on_stale='stop', guards=None,
+                 software_dir=SOFTWARE_DIR):
         self.sd = study_dir if isinstance(study_dir, StudyDir) else StudyDir(study_dir)
         self.study = study or self.sd.load_study(settings)
         self.space = spc.ParamSpace.from_study(self.study, settings=settings, check_locked=True)
         self.freeze_sha_of = freeze_sha_of or (lambda day: '')
-        self.code_sha = code_sha or self.study.code_sha
-        self.settings_sha = settings_sha or self.study.settings_sha
+        self.settings_path = settings_path
+        self.software_dir = software_dir
+        self._pinned = (code_sha, settings_sha)
+        if on_stale not in ON_STALE:
+            raise StudyError(f'--on-stale must be one of {", ".join(ON_STALE)}, not {on_stale!r}')
+        self.on_stale = on_stale
+        self.guards = guards
         self.worker = worker
         self.min_disk_mb = min_disk_mb
         self.max_failures = max_failures
@@ -644,40 +1099,98 @@ class Runner:
         self.log = log or (lambda text: None)
         self.started_at = None
         self.state = None
-        self.stale_context = self._stale_context()
+        self._freeze = {}
+        self._base_loops = {}
+        self._not_schedulable = {}                       # day -> reasons, from the guards of the current run
+        self.code_sha, self.settings_sha = self.live_context()
+        self.stale_context = []
 
-    def _stale_context(self):
+    # ---- context
+    def live_context(self):
+        """(code_sha, settings_sha) for this run: the pinned constructor values, else the working tree's."""
+        code, sett = self._pinned
+        if code and sett:
+            return code, sett
+        live_code, live_sett = live_context(self.settings_path, self.software_dir, self.study.settings_sha)
+        return code or live_code, sett or live_sett
+
+    def refresh_context(self):
+        """Re-read the context at the start of a run (a Runner may run several rounds)."""
+        self.code_sha, self.settings_sha = self.live_context()
+        self._freeze = {}
+        self._base_loops = {}
+        return self.code_sha, self.settings_sha
+
+    def freeze_sha(self, day):
+        """The frozen day's sha1 as this run first read it (the snapshot every row of the run carries)."""
+        if day not in self._freeze:
+            self._freeze[day] = self.freeze_sha_of(day) or ''
+        return self._freeze[day]
+
+    def find_stale(self, rows=None):
+        rows = self.sd.trials() if rows is None else rows
+        return find_stale(self.study, rows, self.code_sha, self.settings_sha, lambda d: self.freeze_sha_of(d) or '')
+
+    def context_drift(self):
+        """Lines naming what changed since the run started: code / settings (unless pinned), frozen metas of the
+        days this run has used. [] = nothing."""
         out = []
-        try:
-            live = contracts.code_sha()
-            if live != self.study.code_sha:
-                out.append(f'code_sha changed since study.json: {contracts.short(self.study.code_sha)} -> {contracts.short(live)}')
-        except Exception:                                    # pragma: no cover
-            pass
-        try:
-            if os.path.isfile(NS_SETTINGS_PATH):
-                live = contracts.settings_sha(NS_SETTINGS_PATH)
-                if self.study.settings_sha and live != self.study.settings_sha:
-                    out.append(f'settings_sha changed since study.json: {contracts.short(self.study.settings_sha)} -> {contracts.short(live)}')
-        except Exception:                                    # pragma: no cover
-            pass
+        code, sett = self._pinned
+        live_code, live_sett = live_context(self.settings_path, self.software_dir, self.study.settings_sha)
+        if not code and live_code != self.code_sha:
+            out.append(f'code_sha changed during the run: {contracts.short(self.code_sha)} -> {contracts.short(live_code)}')
+        if not sett and live_sett != self.settings_sha:
+            out.append(f'settings_sha changed during the run: {contracts.short(self.settings_sha)} -> '
+                       f'{contracts.short(live_sett)}')
+        for day, sha in sorted(self._freeze.items()):
+            now = self.freeze_sha_of(day) or ''
+            if now != sha:
+                out.append(f'freeze_sha of {day} changed during the run: {contracts.short(sha) or "none"} -> '
+                           f'{contracts.short(now) or "none"}')
         return out
+
+    def mark_stale(self, stale, trial_no):
+        """Append a `stale` row for each (row, fields) of find_stale (same key, so it supersedes the done row);
+        returns the next trial number."""
+        for r, fields_ in stale:
+            new = TrialRow.from_dict(r.to_dict(), strict=False)
+            new.trial, new.status, new.finished = trial_no, 'stale', now_iso()
+            new.flags = (list(r.flags) + ['stale: ' + ', '.join(fields_)])[-12:]
+            try:
+                self.sd.append(new)
+            except StudyError:                                # the line limit: keep the identity, drop the numbers
+                new.metrics, new.files = {}, {}
+                self.sd.append(new)
+            trial_no += 1
+        return trial_no
 
     # ---- identity
     def params_of(self, task):
         """task.params snapped onto the grid (ParamSpace.normalize, space order): an off-grid float such as
         1.4500000001 names the grid point 1.45, so key, vhash, variant label and the stored params agree. An unknown
-        key is a configuration error (StudyError, exit 3)."""
+        key is a configuration error (StudyError, exit 3). The controls keep the phone's values as they are (a
+        phone value between grid points must reach the VDF unchanged, or the sentinel would not be the phone)."""
         if not task.params:
             return {}
+        unknown = [n for n in task.params if n not in self.space]
+        if unknown:
+            raise StudyError(f'task {task.day}: "{unknown[0]}" is not a searched parameter')
+        if is_control(task):
+            return {n: task.params[n] for n in self.space.names if n in task.params}
         try:
             return self.space.normalize(task.params)
         except ContractError as e:
             raise StudyError(f'task {task.day}: {e}') from None
 
     def key_of(self, task):
-        return contracts.key(self.params_of(task), task.day, self.settings_sha, self.code_sha,
-                             self.freeze_sha_of(task.day), self.study.objective_version)
+        """contracts.key over params, day, settings_sha, code_sha, freeze_sha, objective_version. A control's day
+        part is '<day>#<control>#<instance>', so a control never shares a key with the variant of the same params
+        (round.py would otherwise drop that variant) and every scheduled control is a trial of its own."""
+        day = task.day
+        if is_control(task):
+            day = f'{task.day}#{task.control}#{(task.meta or {}).get("instance", "")}'
+        return contracts.key(self.params_of(task), day, self.settings_sha, self.code_sha,
+                             self.freeze_sha(task.day), self.study.objective_version)
 
     def vhash_of(self, task):
         return contracts.vhash(self.params_of(task))
@@ -685,6 +1198,8 @@ class Runner:
     def variant_of(self, task):
         if task.variant:
             return task.variant
+        if is_control(task):
+            return task.control
         params = self.params_of(task)
         return 'base' if not params else self.space.variant_name(params)
 
@@ -740,7 +1255,7 @@ class Runner:
         if self.state is None:
             return None
         self.state.exit_code = exit_code
-        self.state.stop_reason = stop_reason
+        self.state.stop_reason = _clip(stop_reason)
         self.heartbeat()
         try:
             self.sd.write_status()
@@ -753,19 +1268,138 @@ class Runner:
         mb = self.sd.disk_free_mb()
         return None if mb is None else round(mb, 1)
 
+    # ---- guards on rows
+    def base_loops(self, day):
+        """metrics.loops of the day's base row in this run's context (None when there is none yet)."""
+        if day not in self._base_loops:
+            r = self.sd.latest_by_key(self.sd.trials()).get(self.key_of(Task(params={}, day=day, control='base')))
+            loops = (r.metrics or {}).get('loops') if r is not None and r.status == 'done' else None
+            if loops is None:
+                return None
+            self._base_loops[day] = loops
+        return self._base_loops[day]
+
+    def loop_mismatch(self, task, row):
+        """(base_loops, row_loops) when a done row's loop count differs from its day's base row, else None.
+        A base row sets the day's reference."""
+        if row.status != 'done':
+            return None
+        loops = (row.metrics or {}).get('loops')
+        if loops is None:
+            return None
+        if is_base_task(task):
+            self._base_loops[task.day] = loops
+            return None
+        base = self.base_loops(task.day)
+        if base is not None and loops != base:
+            return base, loops
+        return None
+
+    @staticmethod
+    def loop_stop_reason(day, row):
+        """The public, count-free stop reason of the unequal-loop guard (passes lint kind 'issue'); the counts are in
+        the row's error and guards.json `loop_counts`."""
+        return (f'loop counts differ between variants on {day} (trial {row.trial}, {row.variant}); the counts are in '
+                f'that row\'s error and in guards.json. State leaked between in-process replays or the frozen day '
+                f'changed under the run')
+
+    def check_loops(self, task, row):
+        """GuardStop when a done row's loop count differs from its day's base row (DESIGN.md section 5.1). The
+        reason carries no loop counts (it may reach the public issue); record() keeps them in the row's error."""
+        if self.loop_mismatch(task, row) is not None:
+            raise GuardStop(self.loop_stop_reason(task.day, row))
+
+    def note_guards(self, guards, run_tag, rnd, result):
+        """Record whether the sentinel could be scheduled for every day of the run: guards.json `sentinel`
+        ({schedulable, days: {day: [reason per parameter]}, run, round}), RunResult.guards, the log; the rows of
+        an unschedulable day get the flag `sentinel_not_schedulable` (record)."""
+        self._not_schedulable = dict(getattr(guards, 'not_schedulable', {}) or {})
+        notes = guards.guard_notes() if hasattr(guards, 'guard_notes') else []
+        result.guards = list(notes)
+        entry = {'schedulable': not self._not_schedulable, 'days': self._not_schedulable, 'run': run_tag,
+                 'round': rnd, 'at': now_iso()}
+        try:
+            self.sd.update_guards(sentinel=entry)
+        except (OSError, ValueError) as e:                   # pragma: no cover
+            self.log(f'guards.json not written: {e}')
+        for n in notes:
+            self.log(f'{self.sd.name}: {n} - the sentinel and null controls do not cover that day')
+
     # ---- the loop
     def pending(self, tasks):
         """(task, key) for the tasks whose key has no done row yet, in order."""
         done = self.sd.done_keys()
         return [(t, k) for t, k in ((t, self.key_of(t)) for t in tasks) if k not in done]
 
-    def run(self, tasks, evaluate, phase=None):
+    def _reeval_order(self, todo, stale_days, rnd):
+        """Base replays first: the pending base tasks, plus a base task for every day with stale rows that is not in
+        the run (its floor must be re-measured before the variants of the day are compared with it)."""
+        base = [(t, k) for t, k in todo if is_base_task(t)]
+        rest = [(t, k) for t, k in todo if not is_base_task(t)]
+        have = {t.day for t, _ in base}
+        done = self.sd.done_keys()
+        for d in sorted(stale_days - have):
+            t = Task(params={}, day=d, phase='floor', control='base', round=rnd)
+            k = self.key_of(t)
+            if k not in done:
+                base.append((t, k))
+        return base + rest
+
+    def record(self, task, key, out, trial_no, started, t0, phase, guards=None):
+        """Build, append and check one row from evaluate()'s output (the pool path calls this per result).
+        Returns (row, stop) where stop is a guard stop reason or None; the row is appended in either case."""
+        seconds = out.get('seconds', round(time.time() - t0, 3))
+        status = out.get('status') or ('done' if out.get('metrics') else 'failed')
+        params = self.params_of(task)
+        flags = list(out.get('flags') or [])
+        error = out.get('error') or ('evaluation returned no metrics' if status == 'failed' else None)
+        stop = None
+        if guards is not None and is_control(task):
+            stop, gflags = guards.verdict(task, out)
+            flags = gflags + flags                           # the guard's verdict first (the row keeps 16 flags)
+            if stop:
+                error = out.get('guard_detail') or stop      # the detail (values, counts) stays in the private row
+        if task.day in self._not_schedulable:
+            flags = ['sentinel_not_schedulable'] + flags
+        row = TrialRow(trial=trial_no, key=key, phase=task.phase or phase, vhash=contracts.vhash(params),
+                       variant=self.variant_of(task), params=params, day=task.day, status=status,
+                       code_sha=self.code_sha, settings_sha=self.settings_sha,
+                       freeze_sha=self.freeze_sha(task.day), seconds=seconds,
+                       worker=out.get('worker', self.worker), rung=task.rung, round=task.round,
+                       started=started, finished=now_iso(), metrics=dict(out.get('metrics') or {}),
+                       feasible=out.get('feasible'), flags=flags[:16],
+                       files=dict(out.get('files') or {}), error=error, control=task.control)
+        mismatch = self.loop_mismatch(task, row) if stop is None else None
+        if mismatch is not None:
+            base, loops = mismatch
+            detail = (f'unequal loop counts on {task.day}: base {base}, {row.variant} {loops} (trial {row.trial})')
+            row.flags = (['unequal_loops'] + list(row.flags))[:16]
+            row.error = detail + (f'; {row.error}' if row.error else '')
+            stop = self.loop_stop_reason(task.day, row)
+        self.sd.append(row)
+        if mismatch is not None:
+            try:
+                self.sd.add_loop_count_guard({'day': task.day, 'trial': row.trial, 'variant': row.variant,
+                                              'base': mismatch[0], 'loops': mismatch[1], 'at': now_iso()})
+            except (OSError, ValueError) as e:               # pragma: no cover - the row has the counts anyway
+                self.log(f'guards.json not written: {e}')
+        return row, stop
+
+    def run(self, tasks, evaluate, phase=None, on_stale=None, guards=None):
         """Evaluate `tasks` in order; see the class docstring. Returns RunResult; never raises for lock/guard
         conditions (they are the exit codes), only for a broken study (StudyError, exit 3) before the lock."""
+        on_stale = on_stale or self.on_stale
+        if on_stale not in ON_STALE:
+            raise StudyError(f'--on-stale must be one of {", ".join(ON_STALE)}, not {on_stale!r}')
+        guards = guards if guards is not None else self.guards
         tasks = list(tasks)
         phase = phase or (tasks[0].phase if tasks else 'idle')
+        self.refresh_context()
+        reasons, stale = self.find_stale()
+        self.stale_context = list(reasons)
         todo = self.pending(tasks)
-        result = RunResult(exit_code=EXIT_OK, stop_reason='finished', skipped=len(tasks) - len(todo))
+        result = RunResult(exit_code=EXIT_OK, stop_reason='finished', skipped=len(tasks) - len(todo),
+                           stale_context=list(reasons))
         try:
             self.acquire(phase, queue_len=len(todo))
         except LockHeld as e:
@@ -773,7 +1407,28 @@ class Runner:
             return RunResult(exit_code=EXIT_REFUSED, stop_reason=str(e), skipped=result.skipped)
         trial_no = self.sd.next_trial_number()
         failures = 0
+        drift = []
+        rnd = next((t.round for t in tasks if t.round is not None), None)
+        self._not_schedulable = {}
         try:
+            if reasons:
+                if on_stale == 'stop':
+                    raise GuardStop('stale_context: ' + '; '.join(reasons) + '. Nothing was replayed; the rows of '
+                                    'this study were made with another context. Re-run with --on-stale reeval to '
+                                    'mark them stale and re-evaluate (base first), or start a new study')
+                trial_no = self.mark_stale(stale, trial_no)
+                result.marked_stale = len(stale)
+                self.state.stale_context = list(reasons) + [f're-evaluating: {len(stale)} rows marked stale, base first']
+                todo = self._reeval_order(todo, {r.day for r, _ in stale}, rnd)
+                self.log(f'{self.sd.name}: stale context ({"; ".join(reasons)}); {len(stale)} rows marked stale, '
+                         f'base replays first')
+            if guards is not None:
+                run_tag = f'r{rnd}' if rnd is not None else f'run{trial_no}'
+                sched = guards.schedule([t for t, _ in todo], run_tag)
+                keys = {id(t): k for t, k in todo}
+                todo = [(t, keys.get(id(t)) or self.key_of(t)) for t in sched]
+                self.note_guards(guards, run_tag, rnd, result)
+                self.heartbeat(queue_len=len(todo))
             for i, (task, key) in enumerate(todo):
                 if self.sd.stop_requested():
                     result.stop_reason = 'STOP file'
@@ -787,30 +1442,20 @@ class Runner:
                 self.heartbeat(phase=task.phase or phase, queue_len=len(todo) - i, last_key=key)
                 started = now_iso()
                 t0 = time.time()
+                control = is_control(task) and guards is not None
                 try:
-                    out = evaluate(task) or {}
+                    out = (guards.evaluate(task) if control else evaluate(task)) or {}
                 except GuardStop:
                     raise
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:                       # a broken evaluation is a failed trial, not a crash
                     out = {'status': 'failed', 'error': f'{type(e).__name__}: {e}'[:1000]}
-                seconds = out.get('seconds', round(time.time() - t0, 3))
-                status = out.get('status') or ('done' if out.get('metrics') else 'failed')
-                params = self.params_of(task)
-                row = TrialRow(trial=trial_no, key=key, phase=task.phase or phase, vhash=contracts.vhash(params),
-                               variant=self.variant_of(task), params=params, day=task.day, status=status,
-                               code_sha=self.code_sha, settings_sha=self.settings_sha,
-                               freeze_sha=self.freeze_sha_of(task.day), seconds=seconds,
-                               worker=out.get('worker', self.worker), rung=task.rung, round=task.round,
-                               started=started, finished=now_iso(), metrics=dict(out.get('metrics') or {}),
-                               feasible=out.get('feasible'), flags=list(out.get('flags') or []),
-                               files=dict(out.get('files') or {}),
-                               error=out.get('error') or ('evaluation returned no metrics' if status == 'failed' else None),
-                               control=task.control)
-                self.sd.append(row)
+                row, stop = self.record(task, key, out, trial_no, started, t0, phase, guards if control else None)
+                status = row.status
                 trial_no += 1
                 result.done += 1
+                result.controls += 1 if is_control(task) else 0
                 if status == 'failed':
                     result.failed += 1
                     failures += 1
@@ -820,26 +1465,37 @@ class Runner:
                 else:
                     failures = 0
                 self.state.trials_done += 1 if status == 'done' else 0
+                new_drift = [d for d in self.context_drift() if d not in drift]
+                if new_drift:
+                    drift += new_drift
+                    self.state.stale_context = list(self.state.stale_context) + new_drift
+                    self.log(f'{self.sd.name}: ' + '; '.join(new_drift) + ' - finishing the round, then stopping')
                 self.heartbeat(queue_len=len(todo) - i - 1, last_key=key)
                 if self.status_every and result.done % self.status_every == 0:
                     try:
                         self.sd.write_status()
                     except Exception as e:                   # pragma: no cover
                         self.log(f'status.json not written: {e}')
+                if stop:
+                    raise GuardStop(stop)
                 if failures >= self.max_failures:
                     raise GuardStop(f'{failures} consecutive failed trials (last: {row.error})')
+            if drift and result.stop_reason == 'finished':
+                raise GuardStop('stale_context: ' + '; '.join(drift) + '. The round was finished with the context it '
+                                'started with; the next run reports its rows as stale (--on-stale stop) or '
+                                're-evaluates them (--on-stale reeval)')
         except GuardStop as e:
-            result.exit_code, result.stop_reason = EXIT_GUARD, f'guard: {e.reason}'
+            result.exit_code, result.stop_reason = EXIT_GUARD, _clip(f'guard: {e.reason}')
         except KeyboardInterrupt:
             result.exit_code, result.stop_reason = EXIT_OK, 'interrupted (Ctrl-C); the trial in flight is lost, re-run resumes'
         finally:
+            result.stale_context = list(self.state.stale_context) if self.state else result.stale_context
             self.release(result.exit_code, result.stop_reason)
             if result.stop_reason == 'STOP file':
                 self.sd.clear_stop()
         self.log(f'{self.sd.name}: {result.stop_reason}; {result.done} rows appended, {result.skipped} already done, '
                  f'{result.failed} failed, {result.blocked} blocked; exit {result.exit_code}')
         return result
-
 
 # ----------------------------------------------------------------------------- the dry queue (until H-304/H-305)
 
@@ -904,6 +1560,17 @@ def aggregate_floor(rows):
     return {k: _round3(v) for k, v in agg.items()}
 
 
+def guard_lines(study_dir):
+    """The guard notes of guards.json for `hc study status`: one line per day without a schedulable sentinel
+    ('sentinel: not schedulable on <day> (<reason per parameter>)'). [] when the last run could schedule it."""
+    sd = study_dir if isinstance(study_dir, StudyDir) else StudyDir(study_dir)
+    sent = sd.read_guards().get('sentinel') or {}
+    if sent.get('schedulable', True):
+        return []
+    days = sent.get('days') or {}
+    return [f'sentinel: not schedulable on {d} ({"; ".join(map(str, r))})' for d, r in sorted(days.items())]
+
+
 def build_status(study_dir, now=None):
     """Status (<= 2 KB) from study.json, STATE.json, trials.jsonl and, when present, round.json."""
     sd = study_dir if isinstance(study_dir, StudyDir) else StudyDir(study_dir)
@@ -946,6 +1613,7 @@ def build_status(study_dir, now=None):
             status.top.append(TopItem(vhash=contracts.short(c.vhash), variant=c.variant, verdict=c.verdict,
                                       why=(c.why or c.verdict)[:120], rank=c.rank,
                                       effect={k: _round3(v) for k, v in effect.items()}))
+    status.guards = guard_lines(sd)                          # not a Status field (contract): status_text only
     for _ in range(8):                                       # fit the 2 KB limit: shorten, then drop, the top items
         if len(status.to_compact_json().encode('utf-8')) <= STATUS_MAX_BYTES:
             break
@@ -981,6 +1649,8 @@ def status_text(status, study=None):
         lines.append(f'last run: exit {status.exit_code} ({status.stop_reason})')
     if status.stale_context:
         lines.append('stale context: ' + '; '.join(status.stale_context))
+    for g in getattr(status, 'guards', None) or []:
+        lines.append(f'guards: {g} - the sentinel and null controls did not run on that day')
     lines.append('days: ' + ', '.join(f'{d} ({role})' for d, role in status.days.items()))
     if status.floor:
         lines.append('floor (base vs phone, worst day): ' + ', '.join(f'{k} {v}' for k, v in status.floor.items()))

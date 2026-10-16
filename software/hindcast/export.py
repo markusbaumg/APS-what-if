@@ -558,10 +558,16 @@ def validate_series(doc):
     return problems
 
 
+_SCRIPT_OPENERS = re.compile(r'<(?=!--|script)', re.IGNORECASE)
+
+
 def embed_json(obj):
-    """Compact JSON safe inside <script type="application/json">: allow_nan=False, '</' escaped."""
+    """Compact JSON safe inside <script type="application/json">: allow_nan=False, '</' escaped as '<\\/', and
+    '<!--' and '<script' (any case) escaped as '\\u003c!--' / '\\u003cscript', because '<!--' followed by '<script'
+    puts the HTML parser into the double-escaped state where '</script>' no longer closes the element. A '<' can
+    only occur inside a JSON string, where both escapes are plain JSON, so JSON.parse reads the value back."""
     text = json.dumps(obj, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
-    return text.replace('</', '<\\/')
+    return _SCRIPT_OPENERS.sub(r'\\u003c', text.replace('</', '<\\/'))
 
 
 def script_tag(element_id, obj):

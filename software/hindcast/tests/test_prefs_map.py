@@ -195,3 +195,12 @@ def test_map_is_json_with_no_duplicate_keys():
         return dict(pairs)
     json.loads(text, object_pairs_hook=hook)
     assert seen == []
+
+
+def test_normal_target_is_a_constant_not_a_preference(prefs_map, settings):
+    """flags.normal_target (99) is AAPS's Constants.NORMAL_TARGET_MGDL, not an exported preference: mapped with no
+    pref_key and no title, so a card prints the VDF key instead of a guessed preference wording."""
+    e = prefs_map['keys']['normal_target']
+    assert settings['flags']['normal_target'] == 99
+    assert e['settings_section'] == 'flags' and e['pref_key'] is None and e['title'] is None
+    assert 'NORMAL_TARGET_MGDL' in e['note'] and e['unit'] == 'mg/dl'

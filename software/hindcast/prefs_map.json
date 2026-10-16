@@ -414,15 +414,6 @@
       "unit": "on/off",
       "note": "not read by determine_basal.py; title not verified"
     },
-    "activity_ratio": {
-      "vdf": "profile activity_ratio",
-      "settings_section": "activity_monitor",
-      "pref_key": "activity_ratio",
-      "screen": "autoISF activity monitor",
-      "title": null,
-      "unit": "ratio",
-      "note": "not read by determine_basal.py; title not verified"
-    },
     "exercise_mode": {
       "vdf": "profile exercise_mode",
       "settings_section": "flags",
@@ -545,6 +536,15 @@
       "title": null,
       "unit": "factor",
       "note": "key present in the export; not read by determine_basal.py; title not verified"
+    },
+    "normal_target": {
+      "vdf": "profile normal_target",
+      "settings_section": "flags",
+      "pref_key": null,
+      "screen": null,
+      "title": null,
+      "unit": "mg/dl",
+      "note": "not a preference: hard-coded 99 = Constants.NORMAL_TARGET_MGDL in AAPS >= 3.4.2.1, no key in the export; the phone compares temp targets against it for exercise / resistance mode (low_temptarget_lowers_sensitivity, high_temptarget_raises_sensitivity)"
     },
     "max_iob": {
       "vdf": "profile max_iob",

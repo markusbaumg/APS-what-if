@@ -18,6 +18,20 @@ Layers
     rank_variants(...)         feasibility, ties, Pareto front / review order / scalar, recommended_for_review,
                                and the printed ranking-rule text (section 5.3).
 
+Change counts (per (variant, day); a loop "changes" when SMB, insulinReq (0.05 U) or the rate (0.05 U/h) differ,
+`changed_flags()`); the two *_vs_base counts are different quantities and both names are part of the contract:
+    changed_loops              loops where this replay's emulated decision differs from the phone's.
+    changed_loops_base         the same count for the base replay of the day (its value is the floor `floor_loops`).
+    changed_vs_base            changed_loops - changed_loops_base: a NET difference of two "differs from the phone"
+                               counts, signed, 0 for base. It is the effect component with the floor `floor_loops`
+                               (FLOOR_COMPONENTS), aggregated into the variant mean and the candidate `effect`, and
+                               what a card prints as "Loops differing from the phone: +N per day vs base". A variant
+                               that moves 10 loops while restoring 10 others to the phone's decision has 0 here.
+    changed_vs_base_loops      loops where the variant's emulated decision differs from the base replay's emulated
+                               decision (changed_flags(s, base)), unsigned, 0 for base: the per-loop size of the
+                               variant's footprint. Stored in the trial metrics only; no ranking rule, round, card or
+                               page reads it (the fixture-study tests use it as the no-state-leak check).
+
 Units: insulin in U, rates in U/h, glucose in mg/dl inside this module (the CSV is mg/dl); the thresholds
 are defined in mmol/l where the design states them and converted once (MMOL_TO_MGDL = 18.0, as ns_profile).
 
@@ -406,10 +420,12 @@ def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_g
     rise_mask = _rise_mask(s)
     m.update(agreement(s))
     changed_phone = changed_flags(s)
-    m['changed_loops'] = sum(changed_phone)
-    m['changed_loops_base'] = sum(changed_flags(ref))
-    m['changed_vs_base'] = m['changed_loops'] - m['changed_loops_base']
-    m['changed_vs_base_loops'] = 0 if is_base else sum(changed_flags(s, ref))     # loops where variant and base differ
+    # the change counts, see "Change counts" in the module docstring: changed_vs_base is the signed net difference
+    # of the two vs-phone counts, changed_vs_base_loops the unsigned number of loops where variant and base differ
+    m['changed_loops'] = sum(changed_phone)                                         # variant vs phone
+    m['changed_loops_base'] = sum(changed_flags(ref))                               # base vs phone
+    m['changed_vs_base'] = m['changed_loops'] - m['changed_loops_base']             # net, signed (floor_loops)
+    m['changed_vs_base_loops'] = 0 if is_base else sum(changed_flags(s, ref))     # per loop: variant vs base
     m['smb_vs_base_U'] = sum(s.smb_emul) - sum(ref.smb_emul)
     m['tbr_vs_base_U'] = sum(r * d for r, d in zip(s.rate_emul, s.dt_h)) - sum(r * d for r, d in zip(ref.rate_emul, ref.dt_h))
     m['delta_vs_base_U'] = sum(give_e) - sum(give_b)
