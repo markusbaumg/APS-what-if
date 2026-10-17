@@ -12,6 +12,7 @@ p,li{max-width:70ch}
 .sub{color:var(--mute);margin:0 0 18px}
 .box{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}
 .box.goal{border-left:4px solid var(--acc)}
+.box.step{border-left:4px solid var(--ok)}
 .box.stop{border-left:4px solid var(--warn)}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
@@ -27,15 +28,47 @@ td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
 .tag.ok{color:var(--ok);border-color:var(--ok)}
 .tag.warn{color:var(--warn);border-color:var(--warn)}
 a{color:var(--acc)}
-ul{padding-left:1.2em}
+ul,ol{padding-left:1.2em}
 .foot{color:var(--mute);font-size:.84rem;margin-top:26px;border-top:1px solid var(--line);padding-top:12px}
 code{font-size:.88em;background:var(--soft);padding:0 4px;border-radius:3px}
 </style>
 <main>
 <h1>Hindcast iteration 2</h1>
-<p class="sub">17 October 2026, late morning. Seven studies re-judged on the cleaned day set, two of them new. Nothing applied, nothing on GitHub.</p>
+<p class="sub">17 October 2026, afternoon. The pre-hypo rule changed on your decision, eight studies re-judged, one new study that only moves upward. Nothing applied, nothing on GitHub.</p>
 
 <div class="box goal"><p><strong>End goal</strong> (yours, this morning): a more aggressive and quicker loop, fully closed without manual boluses, with glucose between 3.9 and 10 mmol/l more than 90 % of the time. Hindcast can rank what the loop would have asked for; the time in that range is observed on the phone only, never computed here.</p></div>
+
+<h2>Step 1, proposed</h2>
+<div class="box step">
+<p><strong>bgAccel_ISF_weight 0.09 → 0.11.</strong> On every one of the 8 clean October days it asks for more insulin on rises (+0.55 U/day, 2.2× the noise floor), with almost nothing extra elsewhere (+0.01 U/day), no low-side flags, no extra insulin before a loop-only low, and at most 0.32 U difference in any 3 h window. On the 14 September hold-out days the direction holds on all 14 (+0.25 to +1.29 U/day); one of them, Sep 19, fails the pre-hypo check by 0.13 U before the 19:03 low (loop-only, peak 8.8 before). Because of that one day the formal rule does not call it "recommended for review"; it is a candidate. 0.10 is the smaller move and a tie (+0.28 U/day, inside the floor). Card: <code>software/studies/oct_push/cards/2.md</code>.</p>
+<p>The larger step, <strong>autoISF_max 1.5 → 1.6</strong> (+0.92 U/day on rises), is also feasible on all 8 October days, but on three September days it moves more than the replay can judge (1.1 to 1.4 U in 3 h) and on two it adds insulin before a loop-only low.</p>
+</div>
+
+<h2>What changed in the method</h2>
+<ul>
+<li><strong>Pre-hypo rule.</strong> A low that starts within 4 h after one of your manual boluses no longer counts against a variant. Lows the loop produced on its own keep the old limit. On the 8 search days this leaves out 6 of 18 low episodes (Oct 4 16:24, 17:41, 18:52 after your 2 U + 1.5 U; Oct 10 16:14 and two re-entries after your 3 U). Still counted: Oct 4 09:15 (no rise, no bolus), Oct 6 13:29 and 15:19, Oct 7 11:21, Oct 8 01:03 and 03:52, Oct 10 08:10 and 18:33. The rule is printed on every page and card.</li>
+<li><strong>Partial days are not scored.</strong> A day the phone looped less than 16 h is listed but left out of every verdict; 10 of 42 days. The search set is 8 days: Oct 4, 6, 7, 8, 10, 11, 12, 13.</li>
+<li><strong>Envelope-limited is its own verdict</strong>, with the days listed; an "earlier" step must beat the noise floor on rises.</li>
+<li>All seven earlier studies were re-replayed under the new rule (5 500 trial rows, 75 min).</li>
+</ul>
+
+<h2>The upward search (<a href="https://claude.ai/artifact/D2U5LGTKcN3KshdrupHWMk">oct_push</a>, 73 variants)</h2>
+<div class="tbl"><table>
+<thead><tr><th>Lever</th><th>Phone</th><th>Tried</th><th>Result on the 8 October days</th></tr></thead>
+<tbody>
+<tr><td>bgAccel_ISF_weight</td><td class="num">0.09</td><td class="num">0.10 to 0.13</td><td><span class="tag ok">0.11 step</span> 0.10 tie (inside floor); 0.12 and 0.13 fail the pre-hypo check by one pump step on Oct 6 (0.05 vs 0.05 U) and by 0.05 / 0.25 U on Oct 8.</td></tr>
+<tr><td>autoISF_max</td><td class="num">1.5</td><td class="num">1.6, 1.7</td><td><span class="tag ok">1.6 step</span> 1.7 beyond the envelope on Oct 6 and 7 (1.6 U in 3 h) and 0.10 U before the Oct 7 low.</td></tr>
+<tr><td>smb_delivery_ratio</td><td class="num">0.2</td><td class="num">0.25 to 0.35</td><td>0.25 fails on Oct 4 by 0.08 U before the 09:15 low; larger values more so.</td></tr>
+<tr><td>smb_delivery_ratio_min</td><td class="num">0.1</td><td class="num">0.15, 0.2</td><td>0.15 tie (+0.18 U/day); 0.2 fails on Oct 4.</td></tr>
+<tr><td>smb_delivery_ratio_max</td><td class="num">0.5</td><td class="num">0.6, 0.7</td><td>Beyond the envelope (1.65 U in 3 h on Oct 4).</td></tr>
+<tr><td>higher_ISFrange_weight</td><td class="num">0.4</td><td class="num">0.45 to 0.55</td><td>0.45 fails on Oct 6 (0.15 U) and Oct 10 (0.19 U) before loop-only lows.</td></tr>
+<tr><td>pp_ISF_weight</td><td class="num">0.018</td><td class="num">0.022, 0.026</td><td>Fails on Oct 4 (0.05 U) and Oct 6 (0.20 U).</td></tr>
+<tr><td>dura_ISF_weight</td><td class="num">0.7</td><td class="num">0.8, 0.9</td><td>0.8 envelope-limited (+1.2 U in 3 h on Oct 13, +1.0 on Oct 11); 0.9 fails on Oct 7 and leaves the envelope.</td></tr>
+<tr><td>smb_max_range_extension</td><td class="num">1.8</td><td class="num">2.0</td><td>SMBs above the phone's maxBolus on Oct 4 and 6.</td></tr>
+<tr><td>iob_threshold_percent</td><td class="num">80</td><td class="num">85 to 95</td><td>No effect on these days (dead).</td></tr>
+<tr><td>48 combinations of small upward moves</td><td></td><td></td><td>All fail on Oct 4: stacked, they add 0.15 to 0.75 U before the 09:15 low.</td></tr>
+</tbody></table></div>
+<p>The pattern: one small step on one lever fits inside the loop-only lows of Oct 4 (morning), 6, 7 and 8; two steps at once do not. "Quicker" (SMB interval 2, 3 or 5 min) stays beyond what a replay can judge: 3 to 7 U more in a 3 h window.</p>
 
 <h2>Where the loop stands (observed, 42 days)</h2>
 <div class="cards">
@@ -46,49 +79,26 @@ code{font-size:.88em;background:var(--soft);padding:0 4px;border-radius:3px}
 <div class="card"><div class="k">SMB insulin</div><div class="v">18 U / day</div><div class="n">median</div></div>
 <div class="card"><div class="k">Loop hours</div><div class="v">20 h / day</div><div class="n">median; 10 days under 16 h</div></div>
 </div>
-<p>Full per-day table: <a href="https://claude.ai/artifact/NR5CVNZpsHwhvBnoX3sPba">observed baseline</a>.</p>
+<p>Per-day table: <a href="https://claude.ai/artifact/NR5CVNZpsHwhvBnoX3sPba">observed baseline</a>.</p>
 
-<h2>What changed in the method this morning</h2>
-<ul>
-<li><strong>Partial days are not scored.</strong> Oct 3 (the phone looped 3.5 h, TDD 7.6 U) alone had made 68 of 96 aggressive variants infeasible through the 15 %-of-TDD rule. A day the phone looped less than 16 h is now listed with its values but left out of every verdict. That removes 10 of 42 days (Sep 10, 20, 24, 25; Oct 3, 5, 9, 14, 15, 16). The search set is now 8 days: Oct 4, 6, 7, 8, 10, 11, 12, 13.</li>
-<li><strong>Envelope-limited is its own verdict.</strong> A variant that passes every safety check but moves more than 1 U in a 3 h window on some days is listed with those days instead of being hidden among the infeasible ones.</li>
-<li><strong>An "earlier" step must beat the noise floor</strong> on rises; otherwise it is a tie. No negative step is ever printed as a step.</li>
-</ul>
-
-<h2>Toward the goal: no step up is feasible on these days</h2>
-<div class="box stop">
-<p>Every variant that asks for more insulin on rises also adds insulin in the two hours before one of the recorded lows of Oct 4, 6, 7 or 8, where your own settings had already dosed. The pre-hypo rule allows at most the base replay's own noise there (0.05 to 0.11 U), so all of them fail. Levers that act only far above target fail the same way: higher_ISFrange_weight 0.5 adds 0.71 U before the Oct 4 low, smb_delivery_ratio_max 0.6 adds 0.70 U, dura_ISF_weight 1.1 adds 0.35 U before the Oct 7 low.</p>
-</div>
+<h2>The other studies, re-judged under the new rule</h2>
 <div class="tbl"><table>
-<thead><tr><th>Study</th><th>Variants</th><th>Result</th><th>Page</th></tr></thead>
+<thead><tr><th>Study</th><th>Result</th></tr></thead>
 <tbody>
-<tr><td><code>oct_earlier</code><br><span class="tag">question earlier, 7 levers</span></td><td class="num">92</td><td>0 steps. 17 feasible, all inside the rise floor of 0.31 U/day (largest +0.20 U/day: smb_delivery_ratio 0.25). 12 envelope-limited, every one asking less on rises. 62 infeasible: 48 before a recorded low, 47 beyond the envelope.</td><td><a href="https://claude.ai/artifact/8Xqz8pEAU8brgoWA7nifJw">open</a></td></tr>
-<tr><td><code>oct_aggressive</code><br><span class="tag">larger steps, 8 levers</span></td><td class="num">97</td><td>88 infeasible, all of them before a recorded low on Oct 4 and/or Oct 6, most also 1.2 to 6.7 U beyond the envelope in 3 h. 2 ties and 2 envelope-limited, all asking less.</td><td><a href="https://claude.ai/artifact/BJc8D3joL7iW3SjyiTp8zh">open</a></td></tr>
+<tr><td><a href="https://claude.ai/artifact/8Xqz8pEAU8brgoWA7nifJw">oct_earlier</a> (7 levers, both directions)</td><td>Still 0 steps: 64 infeasible, 10 envelope-limited, 17 ties. Its upward points were larger than oct_push's.</td></tr>
+<tr><td><a href="https://claude.ai/artifact/BJc8D3joL7iW3SjyiTp8zh">oct_aggressive</a> (large steps)</td><td>88 of 97 infeasible: 1.2 to 6.7 U in 3 h beyond the envelope and insulin before the loop-only lows.</td></tr>
+<tr><td><a href="https://claude.ai/artifact/RxYnSWrvAQ3sznvAKMzGB1">tier A</a>, <a href="https://claude.ai/artifact/FwjnFqDXfPrRqizB1qHMRw">tier B</a>, <a href="https://claude.ai/artifact/W6Q8Fao1bbuZNgvTiMdES1">combined</a>, <a href="https://claude.ai/artifact/82dR3x7qDFLXTuXo9VG87C">profile</a>, <a href="https://claude.ai/artifact/LxY1xgwKNsFApt5pErSwXR">caps</a></td><td>The gentler survivors are unchanged (bgAccel 0.08, activity_scale_factor 1.25, pp_ISF_weight 0.0, carb_ratio ×1.15, the 7-lever point). They ask for less on rises and are not steps toward the goal; they stay listed as what they are.</td></tr>
 </tbody></table></div>
-<p>"Quicker" (SMB interval 2, 3 or 5 min) is beyond what a replay can judge: 3 to 7 U more in a 3 h window on Oct 4 and 6. Only a real, staged application could tell.</p>
 
-<h2>What the data does support (campaign-1 studies, re-judged)</h2>
-<div class="tbl"><table>
-<thead><tr><th>Lever</th><th>Phone</th><th>Proposed</th><th>Verdict</th><th>On rises, 8 search days</th><th>Hold-out</th></tr></thead>
-<tbody>
-<tr><td>bgAccel_ISF_weight <a href="https://claude.ai/artifact/RxYnSWrvAQ3sznvAKMzGB1">tier A</a></td><td class="num">0.09</td><td class="num">0.08</td><td><span class="tag ok">recommended for review</span></td><td class="num">−0.38 U/day, 2.0× floor</td><td>14/14 days, top-3 on 100 % of folds</td></tr>
-<tr><td>activity_scale_factor <a href="https://claude.ai/artifact/FwjnFqDXfPrRqizB1qHMRw">tier B</a></td><td class="num">1.1</td><td class="num">1.25</td><td><span class="tag ok">recommended for review</span></td><td class="num">−0.62 U/day, 3.6× floor</td><td>14/14 days, 96 % of folds</td></tr>
-<tr><td>pp_ISF_weight <a href="https://claude.ai/artifact/FwjnFqDXfPrRqizB1qHMRw">tier B</a></td><td class="num">0.018</td><td class="num">0.012</td><td><span class="tag warn">candidate only (was recommended for review)</span></td><td class="num">−0.38 U/day, 2.6× floor</td><td>top-3 on 64 % of folds, needs 80 %</td></tr>
-<tr><td>carb_ratio scale <a href="https://claude.ai/artifact/82dR3x7qDFLXTuXo9VG87C">profile, weak evidence</a></td><td class="num">1.0</td><td class="num">1.15</td><td><span class="tag ok">recommended for review</span></td><td class="num">−0.09 U/day, 0.5× floor: tiny</td><td>12/14 days, 91 % of folds</td></tr>
-<tr><td>7-lever point <a href="https://claude.ai/artifact/W6Q8Fao1bbuZNgvTiMdES1">combined</a></td><td colspan="2">smb_delivery_ratio 0.2→0.15, _min 0.1→0.05, bgAccel 0.09→0.08, autoISF_min 0.3→0.6, maxSMBBasalMinutes 240→90, lower_ISFrange_weight 0→0.5</td><td><span class="tag ok">recommended for review</span> (was unstable with the partial days in)</td><td class="num">−0.77 U/day rises, −0.14 U/day other loops, 43 fewer zero temps over 8 days</td><td>22/22 days, 97 % of 30 folds</td></tr>
-</tbody></table></div>
-<p>All of these ask for <em>less</em> insulin on rises, with no extra insulin before a recorded low and no envelope breach. The 7-lever point is not simply gentler: autoISF_min 0.3→0.6 lets the ISF factor fall less, so less insulin reduction when glucose is low or falling, and it sets fewer zero temps. What glucose would have done under any of them the replay cannot say. The caps study (<a href="https://claude.ai/artifact/LxY1xgwKNsFApt5pErSwXR">max_iob, max_basal</a>) found nothing that binds.</p>
-
-<h2>Step 1: your call</h2>
+<h2>Your decision</h2>
 <ol>
-<li><strong>Apply one gentler lever</strong> (bgAccel_ISF_weight 0.08 is the smallest and most consistent; activity_scale_factor 1.25 the largest single change; the 7-lever point the largest change) and observe a week. If the new days show rises without a low in the following two hours, the pre-hypo rule stops binding and the next search can take a step up from the new base.</li>
-<li><strong>Apply nothing and let more days accumulate.</strong> The blocking days are 3 of 8; the days that get frozen after them decide on their own whether a step up becomes feasible.</li>
+<li><strong>Apply bgAccel_ISF_weight 0.11</strong> (or 0.10 as the smaller, tie-level move) and tell me the date and time, so it goes into the profile history. After a week of observed days the search re-runs from the new base.</li>
+<li>Or apply nothing and let more days accumulate.</li>
 </ol>
-<p>Either way: tell me the date and time if you change a setting, so it goes into the profile history and the replay keeps its base right.</p>
 
 <h2>Open</h2>
 <ul>
-<li>Manual-bolus coverage (how much of each manual bolus the loop would already have given as SMBs) exists since this morning but only the newest trial rows carry it, so no number yet. 15 manual boluses on the 8 search days, observed.</li>
+<li>Manual-bolus coverage (how much of each manual bolus the loop would already have given as SMBs) is computed in the newest rows; a summary across variants comes with the next page build.</li>
 <li>Oct 17 is frozen once the day is final.</li>
 </ul>
 

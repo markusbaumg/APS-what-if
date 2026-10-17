@@ -62,9 +62,17 @@ already dosed. Levers that act only far above target fail the same way. What the
 single levers (bgAccel_ISF_weight 0.09 -> 0.08, activity_scale_factor 1.1 -> 1.25) and one 7-lever point, all
 asking for less on rises with nothing extra before a low.
 
-**Step 1 (proposed, not applied):** either apply one of the gentler levers and observe a week, so that days
-without a low after a rise unlock a step up from the new base; or apply nothing and freeze more days, since the
-blocking days are 3 of the 8. Markus decides; the method waits for observed days either way.
+**Revised the same day (iteration 2b):** the pre-hypo rule had charged upward variants for lows that followed
+Markus' own manual boluses. Since then a low within 4 h after a manual bolus is not counted; loop-only lows keep
+the limit. Under that rule, study `oct_push` (ten levers, upward only, fine steps) finds two steps that ask for
+more on rises on every clean October day with nothing extra before a loop-only low: bgAccel_ISF_weight 0.09 ->
+0.11 (+0.55 U/day on rises, direction holds on all 14 September hold-out days, one September day fails P by
+0.13 U) and autoISF_max 1.5 -> 1.6 (+0.92 U/day, beyond the envelope on three September days). Everything
+larger, and every combination of upward moves, adds insulin before the loop-only lows of Oct 4 (09:15), Oct 6,
+Oct 7 or Oct 8.
+
+**Step 1 (proposed, not applied):** bgAccel_ISF_weight 0.09 -> 0.11. Markus decides; after a week of observed
+days the grow loop re-runs the search from the new base.
 
 ## Non-goals
 
