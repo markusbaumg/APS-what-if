@@ -169,6 +169,12 @@
      "additionalProperties": {
       "type": "number"
      }
+    },
+    "prehypo": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "number"
+     }
     }
    },
    "additionalProperties": false,

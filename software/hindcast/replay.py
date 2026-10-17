@@ -134,6 +134,9 @@ class TrialSpec:
     source         'frozen' (default) | 'live-day' (whole-day live reconstruction filtered to the window) | 'live'
     require_final  blocked unless the frozen day is from a final cache (H-104)
     tdd_phone_U    the phone's TDD of the day (None = frozen meta character.tdd_U when the window is the whole day)
+    prehypo_exclude_h  the pre-hypo rule's hours (study.json objective.prehypo.exclude_after_manual_h; None = the
+                   metrics default 3.0, 0 = every low counts): a low starting that long after a manual bolus opens no
+                   P window (metrics.manual_attributed_lows)
     """
     day: str
     params: dict = field(default_factory=dict)
@@ -157,6 +160,7 @@ class TrialSpec:
     source: str = 'frozen'
     require_final: bool = True
     tdd_phone_U: Optional[float] = None
+    prehypo_exclude_h: Optional[float] = None
     files_root: Optional[str] = None                 # `files` paths are relative to this (default: parent of report_dir)
     instance: Optional[str] = None                   # a control's instance (task.meta['instance']); part of run_name()
     blocked: Optional[str] = None                    # set by ReplayContext when the day's base failed in this run:
@@ -244,7 +248,8 @@ class TrialResult:
     def to_row(self):
         """The evaluate() contract of study.Runner: status, metrics, seconds, error, flags, feasible, files, worker."""
         return {'status': self.status, 'metrics': dict(self.metrics), 'seconds': self.seconds, 'error': self.error,
-                'flags': list(self.flags), 'feasible': None, 'files': dict(self.files), 'worker': self.worker}
+                'flags': list(self.flags), 'feasible': None, 'files': dict(self.files), 'worker': self.worker,
+                'metrics_version': hm.METRICS_VERSION}
 
     def to_dict(self):
         return asdict(self)
@@ -443,15 +448,18 @@ def is_manual_bolus(t):
             and isinstance(ins, (int, float)) and not isinstance(ins, bool) and ins > 0)
 
 
-def manual_boluses(day, window=None, url='ns:', settings=None, cache_root=None):
+def manual_boluses(day, window=None, url='ns:', settings=None, cache_root=None, lookback_s=0.0):
     """[(unix seconds, units)] of the manual boluses inside the replay window (default: the UTC day), read offline
     from the Nightscout cache's treatments day files (<cache>/treatments/<day>.json; the same files the frozen day was
     reconstructed from). Duplicates (same time and units) count once. None when the cache cannot be read (no
     settings / url, a missing day file): the metrics then leave the coverage keys out and the row carries the flag
-    `manual_boluses_unknown`."""
+    `manual_boluses_unknown`. `lookback_s` also returns the boluses up to that long before the window (the pre-hypo
+    rule's manual window reaching back into the previous UTC day; metrics.manual_bolus_coverage counts only boluses
+    from the first loop of the series on, so the look-back does not inflate the coverage keys)."""
     start_iso, end_iso = window or days.day_window(day)
     try:
         start, end = parse_iso(start_iso), parse_iso(end_iso)
+        start -= max(0.0, float(lookback_s or 0.0)) * 1000.0
         root = cache_root or days.cache_dir(url, settings)
     except (ValueError, OSError, TypeError):
         return None
@@ -635,7 +643,9 @@ def run_trial(spec, worker=None):
         if tdd is None and meta and spec.whole_day():
             tdd = ((meta.get('character') or {}).get('tdd_U'))
         mg = min_guard_list(pred, rows) if pred else None
-        mb = manual_boluses(spec.day, spec.resolved_window(), spec.url, settings) if settings else None
+        look_h = hm.prehypo_exclude_hours({'prehypo': {'exclude_after_manual_h': spec.prehypo_exclude_h}}) \
+            if spec.prehypo_exclude_h is not None else hm.PREHYPO_EXCLUDE_AFTER_MANUAL_H
+        mb = manual_boluses(spec.day, spec.resolved_window(), spec.url, settings, lookback_s=look_h * 3600.0) if settings else None
         if mb is None:
             res.flags.append('manual_boluses_unknown')
         base = spec.base_csv if (spec.base_csv and os.path.isfile(spec.base_csv)) else None
@@ -643,14 +653,14 @@ def run_trial(spec, worker=None):
             res.flags.append('no_base_csv')
         try:
             m = hm.trial_metrics(paths['csv'], base=base, autoisf_max=cap_max, autoisf_min=cap_min, min_guard=mg,
-                                 tdd_phone_U=tdd, manual_boluses=mb)
+                                 tdd_phone_U=tdd, manual_boluses=mb, prehypo_exclude_h=spec.prehypo_exclude_h)
         except ValueError as e:                      # loop counts differ from the base: compare with itself, say so
             if base is None:
                 raise
             nb = len(read_result_csv(base)[1])
             res.flags.append(f'base_loop_mismatch:{len(rows)}/{nb}')
             m = hm.trial_metrics(paths['csv'], base=None, autoisf_max=cap_max, autoisf_min=cap_min, min_guard=mg,
-                                 tdd_phone_U=tdd, manual_boluses=mb)
+                                 tdd_phone_U=tdd, manual_boluses=mb, prehypo_exclude_h=spec.prehypo_exclude_h)
             m['base_loop_mismatch'] = str(e)[:200]
         for f in m.pop('flags', []) or []:
             if f not in res.flags:
@@ -663,7 +673,8 @@ def run_trial(spec, worker=None):
             root = spec.files_root or os.path.dirname(os.path.abspath(spec.report_dir))
             window = spec.resolved_window()
             emul, orig = export.series_from_rows(names, rows, day=spec.day, vhash=spec.vhash, variant=spec.variant,
-                                                 pred=pred, window=window)
+                                                 pred=pred, window=window, manual_boluses=mb,
+                                                 prehypo_exclude_h=spec.prehypo_exclude_h)
             path, _ = export.write_tier2(spec.report_dir, emul)
             res.files['series'] = _rel(path, root)
             path, _ = export.write_tier2(spec.report_dir, orig, overwrite=False)
@@ -744,6 +755,7 @@ class ReplayContext:
     window: Optional[tuple] = None
     files_root: Optional[str] = None
     key_of: Any = None                              # callable(task) -> key (study.Runner.key_of); optional
+    prehypo_exclude_h: Optional[float] = None       # study.json objective.prehypo.exclude_after_manual_h
     base_csvs: dict = field(default_factory=dict)   # day -> path (filled by absorb(); pre-filled from runs/base/)
     base_failed: dict = field(default_factory=dict)  # day -> why the base replay of the day failed in this run
 
@@ -753,6 +765,9 @@ class ReplayContext:
         path = getattr(study_dir, 'path', study_dir)
         runs = kw.pop('runs_dir', os.path.join(path, 'runs'))
         report = kw.pop('report_dir', os.path.join(path, 'report'))
+        obj = getattr(study, 'objective', None)
+        obj = obj.to_dict() if hasattr(obj, 'to_dict') else dict(obj or {})
+        kw.setdefault('prehypo_exclude_h', hm.prehypo_exclude_hours(obj))
         ctx = cls(base_lines=list(study.base_vdf_lines), outputs=study.outputs or DEFAULT_OUTPUTS,
                   names=list(study.space), report_dir=report, runs_dir=runs, url=study.source or 'ns:',
                   files_root=path, **kw)
@@ -793,7 +808,7 @@ class ReplayContext:
                          keep_csv=self.base_csv_path(task.day) if base else None,
                          url=self.url, settings_path=self.settings_path, frozen_dir=self.frozen_dir,
                          source=self.source, require_final=self.require_final, files_root=self.files_root,
-                         instance=meta.get('instance'), blocked=blocked)
+                         instance=meta.get('instance'), blocked=blocked, prehypo_exclude_h=self.prehypo_exclude_h)
 
     def absorb(self, result):
         """Remember a finished base replay's CSV for the variants of that day; a base that did not finish

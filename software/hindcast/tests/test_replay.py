@@ -94,7 +94,8 @@ def test_unfrozen_day_is_blocked_without_touching_the_core(tmp_path):
     res = replay.run_trial(replay.TrialSpec(day=DAY, frozen_dir=str(tmp_path)))
     assert res.status == 'blocked' and 'not frozen' in res.error
     row = res.to_row()
-    assert set(row) == {'status', 'metrics', 'seconds', 'error', 'flags', 'feasible', 'files', 'worker'}
+    assert set(row) == {'status', 'metrics', 'seconds', 'error', 'flags', 'feasible', 'files', 'worker', 'metrics_version'}
+    assert row['metrics_version'] == replay.hm.METRICS_VERSION
     assert row['status'] == 'blocked' and row['metrics'] == {}
 
 

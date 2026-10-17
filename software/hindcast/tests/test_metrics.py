@@ -172,6 +172,95 @@ def test_prehypo_P_backlog_example():
     assert M.prehypo_extra_U(s.t, [120.0] * n, s.give_emul, base.give_emul) == 0   # no recorded low: P is 0
 
 
+def _two_lows(n=600):
+    """1-min loops over 10 h: a low episode at minutes 200-205 and one at 500 (consecutive low readings = one)"""
+    bg = [120.0] * n
+    for i in range(200, 206):
+        bg[i] = 65.0
+    bg[500] = 60.0
+    return bg
+
+
+def test_prehypo_rule_excludes_a_low_after_a_manual_bolus():
+    """a low whose first reading comes within 3 h after a manual bolus opens no P window; loop-only lows keep it"""
+    n = 600
+    bg = _two_lows(n)
+    smb_e = [0.0] * n
+    smb_e[150] = 0.5                                                  # 50 min before the first low (manual-attributed)
+    smb_e[450] = 0.3                                                  # 50 min before the second low (loop-only)
+    s = series(n, bg=bg, smb_emul=smb_e)
+    base = series(n, bg=bg)
+    manual = [(60 * MIN, 2.0), (10 * MIN, 1.0)]                       # 140 and 190 min before the first low
+    # without manual boluses every low counts, exactly as before
+    assert M.prehypo_extra_U(s.t, s.bg, s.give_emul, base.give_emul) == pytest.approx(0.8)
+    assert M.prehypo_extra_U(s.t, s.bg, s.give_emul, base.give_emul, manual) == pytest.approx(0.3)
+    assert M.prehypo_extra_U(s.t, s.bg, s.give_emul, base.give_emul, manual, 0) == pytest.approx(0.8)   # 0 = off
+    split = M.manual_attributed_lows(s.t, s.bg, manual, 3.0)
+    assert split['episodes'] == [(200, 205), (500, 500)] and split['manual'] == [True, False]
+    assert split['manual_U'] == pytest.approx(2.0)                    # the 1 U bolus is 190 min before: outside 3 h
+    assert M.manual_attributed_lows(s.t, s.bg, manual, 3.5)['manual_U'] == pytest.approx(3.0)
+    m = M.trial_metrics(None, base, series=s, manual_boluses=manual, prehypo_exclude_h=3.0)
+    assert m['prehypo_extra_U'] == pytest.approx(0.3) and m['prehypo_lows'] == 2 and m['prehypo_lows_manual'] == 1
+    assert m['prehypo_manual_U'] == pytest.approx(2.0) and m['prehypo_exclude_h'] == 3.0
+    assert M.trial_metrics(None, base, series=s, manual_boluses=manual)['prehypo_exclude_h'] == 4.0   # the default
+    assert m['prehypo_loops'] == 120 and m['lows_recorded'] == 7
+    mb = M.trial_metrics(None, None, series=base, manual_boluses=manual)
+    assert mb['prehypo_lows_manual'] == 1 and 'prehypo_manual_unknown' not in mb['flags']
+    unknown = M.trial_metrics(None, base, series=s)                   # boluses unknown: nothing excluded, flagged
+    assert unknown['prehypo_extra_U'] == pytest.approx(0.8) and unknown['prehypo_lows_manual'] is None
+    assert 'prehypo_manual_unknown' in unknown['flags']
+    # a bolus AFTER the first reading of the episode does not attribute it
+    assert M.manual_attributed_lows(s.t, s.bg, [(201 * MIN, 2.0)], 3.0)['manual'] == [False, False]
+
+
+def test_prehypo_covariates_keep_every_low_for_shading():
+    n = 600
+    bg = _two_lows(n)
+    t = [i * MIN for i in range(n)]
+    cov = M.hindsight_covariates(t, bg, [(60 * MIN, 2.0)], 3.0)
+    assert cov['before_low_2h'][150] == 1 and cov['before_low_2h'][450] == 1      # every low shades
+    assert cov['before_manual_low_2h'][150] == 1 and cov['before_manual_low_2h'][450] == 0
+    assert cov['prehypo_window'][150] == 0 and cov['prehypo_window'][450] == 1
+    plain = M.hindsight_covariates(t, bg)
+    assert plain['prehypo_window'] == plain['before_low_2h'] and sum(plain['before_manual_low_2h']) == 0
+
+
+def test_prehypo_texts_say_the_rule_and_pass_the_lint():
+    from hindcast import lint
+    per_day = {'2026-10-04': {'prehypo_lows': 4, 'prehypo_lows_manual': 2},
+               '2026-10-06': {'prehypo_lows': 2, 'prehypo_lows_manual': 0},
+               '2026-10-11': {'prehypo_lows': 0, 'prehypo_lows_manual': 0}}
+    counts = M.prehypo_counts(per_day)
+    assert counts['lows'] == 6 and counts['manual'] == 2 and counts['manual_days'] == {'2026-10-04': 2}
+    label = M.prehypo_label(counts, 3.0)
+    assert label == ('P (insulin before a recorded low; lows within 3 h after a manual bolus are not counted: '
+                     '2 of 6 recorded low episodes on these days)')
+    note = M.prehypo_note(counts, 3.0)
+    assert note == ('pre-hypo constraint P: lows within 3 h after a manual bolus are not counted; 2 of 6 recorded '
+                    'low episodes on the search days excluded (2026-10-04: 2)')
+    old = M.prehypo_counts({'2026-10-04': {'prehypo_extra_U': 0.0}})
+    texts = [label, note, M.prehypo_label(old, 3.0), M.prehypo_note(old, 3.0), M.prehypo_label(counts, 0),
+             M.prehypo_note(counts, 0), M.ranking_rule_text('earlier')]
+    for text in texts:
+        assert not lint.lint_findings(text, 'line'), text
+    assert not lint.lint_findings(note, 'issue'), note
+    assert 'lows within 4 h after a manual bolus are not counted' in M.ranking_rule_text('earlier')
+    assert 'lows within 1.5 h' in M.ranking_rule_text('earlier', {'prehypo': {'exclude_after_manual_h': 1.5}})
+
+
+def test_feasibility_reason_names_the_rule():
+    n = 600
+    bg = _two_lows(n)
+    smb_e = [0.0] * n
+    smb_e[450] = 0.3
+    s, base = series(n, bg=bg, smb_emul=smb_e), series(n, bg=bg)
+    mb = M.trial_metrics(None, None, series=base, manual_boluses=[(60 * MIN, 2.0)])
+    m = M.trial_metrics(None, base, series=s, manual_boluses=[(60 * MIN, 2.0)])
+    reasons = M.feasibility_day(m, mb, M.floors_from_base(mb))
+    assert any('before a recorded low' in r and 'lows within 4 h after a manual bolus are not counted' in r
+               for r in reasons), reasons
+
+
 def test_prehypo_uses_tbr_give_too():
     n = 121
     bg = [120.0] * n

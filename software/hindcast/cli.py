@@ -340,8 +340,13 @@ def cmd_study_run(args):
              f'is run through the dry evaluator: every (variant, day) is recorded as blocked, the lock, STATE.json, '
              f'STOP and resume rules are exercised, and a later real run re-evaluates the blocked rows.')
     tasks = st.study_tasks(study, settings)
-    runner = st.Runner(sd, study, settings=settings, budget_s=budget_seconds(args, study), log=_out)
+    runner = st.Runner(sd, study, settings=settings, budget_s=budget_seconds(args, study), log=_out,
+                       on_stale=getattr(args, 'on_stale', None) or 'stop')
     result = runner.run(tasks, st.dry_evaluate)
+    if result.marked_stale:
+        _out(f'{sd.name}: {result.marked_stale} done row(s) marked stale (--on-stale reeval)')
+    if result.exit_code != EXIT_OK:
+        _out(f'{sd.name}: exit {result.exit_code} ({result.stop_reason})')
     if result.exit_code == EXIT_REFUSED:
         _err('refused: ' + result.stop_reason)
     _out('')

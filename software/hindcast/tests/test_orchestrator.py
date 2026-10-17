@@ -652,3 +652,41 @@ def test_every_finished_round_writes_the_cards_through_write_cards(tmp_path, fak
     assert sorted(os.listdir(by_hand)) == on_disk
     for name in on_disk:
         assert open(os.path.join(out, name), encoding='utf-8').read() == open(os.path.join(by_hand, name), encoding='utf-8').read()
+
+
+# ----------------------------------------------------------------------------- metrics_version (stale under the same key)
+
+def test_metrics_version_change_is_stale_stop_then_reeval(tmp_path, fake, monkeypatch):
+    from hindcast import metrics as hm
+    sd = new_study(tmp_path)
+    o, _ = orch(sd)
+    assert o.run() == 0
+    done0 = [r for r in st.StudyDir.latest_by_key(sd.trials()).values() if r.status == 'done']
+    assert done0 and all(r.metrics_version == hm.METRICS_VERSION for r in done0)
+    keys0 = {r.key for r in done0}
+    monkeypatch.setattr(hm, 'METRICS_VERSION', hm.METRICS_VERSION + 1)
+    status = st.build_status(sd)
+    assert status.trials_stale == len(done0) and f'{len(done0)} stale' in st.status_text(status)
+
+    n = len(fake.calls)                                         # --on-stale stop: nothing replayed, exit 2, count named
+    o2, lines2 = orch(sd)
+    assert o2.run() == 2 and len(fake.calls) == n
+    s = _status_json(sd)
+    assert f'metrics_version changed: {hm.METRICS_VERSION - 1} -> {hm.METRICS_VERSION} ({len(done0)} done rows)' \
+        in s['stop_reason']
+    assert not lint.lint_findings(s['stop_reason'], 'line')
+
+    o3, lines3 = orch(sd, on_stale='reeval')                    # reeval: same keys replayed again, base first
+    assert o3.run() == 0
+    new_calls = fake.calls[n:]
+    assert not new_calls[0].params                              # the base replay of the day first
+    latest = st.StudyDir.latest_by_key(sd.trials())
+    assert keys0 <= set(latest) and all(latest[k].status == 'done' and latest[k].metrics_version == hm.METRICS_VERSION
+                                        for k in keys0)
+    assert st.build_status(sd).trials_stale == 0
+    rnd = sd.read_round()
+    assert rnd is not None and rnd.trials >= len(done0)         # the round was rebuilt from the new rows
+    assert json.load(open(sd.study_json))['phases'][0]['state'] == 'done'
+    n2 = len(fake.calls)                                        # and the next run has nothing to do
+    o4, _ = orch(sd)
+    assert o4.run() == 0 and len(fake.calls) == n2

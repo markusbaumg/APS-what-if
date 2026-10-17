@@ -639,6 +639,14 @@ class Objective(Document):
     envelope: dict[str, float] = field(default_factory=lambda: {'max_3h_U': 1.0, 'max_day_pct_tdd': 15.0})
     feasible: dict[str, float] = field(default_factory=lambda: {'cap_binding_max_pct': 50.0})
     quarantine: dict[str, float] = field(default_factory=lambda: {'agreement_pct_min': 94.0, 'cgm_gap_max_min': 120.0, 'loop_hours_min': 16.0})
+    # pre-hypo constraint P (metrics.manual_attributed_lows): a recorded low episode whose first reading comes within
+    # exclude_after_manual_h hours after a manual bolus opens no P window; 0 = every low counts
+    prehypo: dict[str, float] = field(default_factory=lambda: {'exclude_after_manual_h': 4.0})
+
+    def _check(self, problems):
+        h = (self.prehypo or {}).get('exclude_after_manual_h', 4.0)
+        if isinstance(h, bool) or not isinstance(h, (int, float)) or h < 0:
+            problems.append('objective.prehypo.exclude_after_manual_h must be a number >= 0 (hours; 0 = off)')
 
 
 @dataclass
@@ -749,6 +757,7 @@ class Study(Document):
         for ph in self.phases:
             ph._check(problems)
         self.budget._check(problems)
+        self.objective._check(problems)
         for line in self.base_vdf_lines:
             if vdf_row_name(line) in self.space:
                 problems.append(f'base VDF line "{line.strip()}" sets a searched parameter')
@@ -807,6 +816,9 @@ class TrialRow(Document):
     files: dict[str, str] = field(default_factory=dict)
     error: Optional[str] = None
     control: Optional[Literal['base', 'sentinel', 'null']] = None      # the automatic controls of section 5.1
+    metrics_version: int = 1                                           # metrics.METRICS_VERSION the metrics were
+                                                                       # made with (missing = 1); a done row of
+                                                                       # another version is stale (study.find_stale)
 
     def _check(self, problems):
         if self.trial < 0:
@@ -962,6 +974,9 @@ class Status(Document):
     heartbeat: str
     trials_failed: int = 0
     trials_blocked: int = 0
+    trials_stale: int = 0                                # keys a reeval would replay under the same key: variant and
+                                                         # base rows of the search / hold-out days that are done with
+                                                         # another metrics_version, or `stale` for that reason
     pid: Optional[int] = None
     round: Optional[int] = None
     stale_context: list[str] = field(default_factory=list)

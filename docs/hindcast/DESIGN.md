@@ -76,7 +76,9 @@ setting" without the qualifier "for review".
 
 **Never computed**: virtual glucose, counterfactual IOB, outcome scores built from realised glucose. The
 realised glucose after a loop is used in exactly two places and both are *positional*: (a) to locate the
-two hours before a recorded low for the pre-hypo constraint P, (b) to shade the BG trace in the drill-down
+two hours before a recorded low for the pre-hypo constraint P (a low that starts within
+`objective.prehypo.exclude_after_manual_h`, default 4 h, after a manual bolus opens no P window, section 5.2),
+(b) to shade the BG trace in the drill-down
 ("a low followed here"). It is never multiplied into a score (the judges' unanimous objection to the
 ShadowLoop hindsight label H).
 
@@ -311,7 +313,7 @@ min (the optimizer's convention). Added:
 | `changed_vs_base` | `changed_loops − changed_loops(base)` | effect credibility |
 | `rise_vs_base_U`, `rest_vs_base_U` | `rise_emul − rise_base`, `rest_emul − rest_base` | when the extra/missing insulin comes |
 | `lowside_flags` | loops with `smb_emul > smb_phone` while emulated `minGuardBG < 3.9 mmol` (from `Pred[...]['Levels']`) or recorded BG < 5.0 mmol and falling | the honest low-side proxy, from emulated predictions and recorded glucose only |
-| `prehypo_extra_U` (**P**) | Σ over loops in the 120 min before a recorded BG < 3.9 mmol of `max(give_emul − give_base, 0)` | hard constraint: `P ≤ P_base + floor`; "any additional insulin before a low that actually happened" |
+| `prehypo_extra_U` (**P**) | Σ over loops in the 120 min before a *counted* recorded BG < 3.9 mmol of `max(give_emul − give_base, 0)`; a low episode (consecutive loops below 3.9 mmol) whose first reading comes within `objective.prehypo.exclude_after_manual_h` hours (default 3.0, 0 = off) after a manual bolus is *manual-attributed* and not counted; `prehypo_lows`, `prehypo_lows_manual`, `prehypo_manual_U` (the manual units in the hours before the excluded episodes) per day | hard constraint: `P ≤ P_base + floor`; "any additional insulin before a low that actually happened and that no manual bolus preceded" |
 | `env_3h_max_U`, `env_day_pct_tdd` (**E**) | max over sliding 3 h windows of Σ(give_emul − give_base); `|Σ_day| / TDD_phone × 100` | validity envelope: beyond `max_3h_U` (default 1.0) or `max_day_pct_tdd` (default 15) the "inputs unchanged" assumption is broken; shown greyed "out of envelope", never ranked |
 | `zero_temp_vs_base` | loops with an emulated 0 U/h temp where base had none, minus the reverse | high-side caution proxy |
 | `cap_binding_pct` (**S**) | `at_autoISF_max_pct` + `at_autoISF_min_pct`; also `iob_over_TH_pct` | a setting at its cap was not really tested; > 50 % = infeasible for ranking, and a reason to vary the cap |
@@ -321,11 +323,28 @@ min (the optimizer's convention). Added:
 
 Per day-variant; aggregated over days as mean, range and sign fraction. Hindsight markers ("a low followed
 within 2 h", "a high followed") are stored as positional covariates per loop for shading and filtering in
-the drill-down; they are **not** a metric.
+the drill-down; they are **not** a metric. `before_low_2h` keeps every low (shading); `before_manual_low_2h`
+marks the loops before a manual-attributed low, whose drill-down badge reads "a low followed (after a manual
+bolus, not counted for P)".
+
+**Why the manual-bolus exclusion (2026-10-17).** With every low counted, P charged the variants that ask for
+more insulin on rises for lows that followed the user's own manual boluses (2026-10-04 after 2 U + 1.5 U,
+2026-10-10 after 3 U): the replay keeps those boluses as recorded, so the low after them is not a test of
+what the loop asked for, and no step toward more insulin on rises was ever feasible on those days. Loop-only
+lows keep the rule unchanged (limit `P_base + floor_P`). Every surface that names P says the rule and how many
+low episodes it excluded: the round notes per study and day, the card's "P (...)" line, the feasibility
+reason, the ranking-rule text and the page's day cards.
+
+**Metrics version.** `metrics.METRICS_VERSION` (now 2) is written into every trials.jsonl row as
+`metrics_version` (missing = 1). It is not part of the key: a done row of another version is stale exactly
+like a `code_sha` mismatch, `hc study run --on-stale reeval` re-replays it under the same key (base first,
+floor and control rows included, round.json rebuilt from the new rows), `--on-stale stop` names the count
+and stops, and `hc study status` prints the stale count.
 
 ### 5.3 Ranking rule (printed next to the leaderboard; no hidden scalar)
 
-1. **Feasible** = `P ≤ P_base + floor` on every day, inside the envelope E on every day,
+1. **Feasible** = `P ≤ P_base + floor` on every day (lows within the study's hours after a manual bolus not
+   counted), inside the envelope E on every day,
    `max_single_smb_U ≤ phone maxBolus`, `cap_binding_pct < 50 %`, loop count equal to base. Infeasible
    variants are shown greyed with the reason, never ranked.
 2. **`question: explore`** (default): no ranking. The table is in *review order* = `|effect| / floor`

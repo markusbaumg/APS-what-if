@@ -39,7 +39,10 @@ zero).
 - **Envelope E.** The largest 3 h sum and the day share of the change vs base. Beyond the limits
   (default 1 U per 3 h, 15 % of the day's total) the assumption "inputs unchanged" no longer holds:
   the variant is shown as "out of envelope" and not ranked.
-- **P, the pre-low constraint.** Extra insulin vs base asked for in the two hours before a recorded low.
+- **P, the pre-low constraint.** Extra insulin vs base asked for in the two hours before a recorded low. A
+  low that starts within the study's `objective.prehypo.exclude_after_manual_h` (default 3 h) after a
+  manual bolus is not counted; the round notes and the card's P line say how many low episodes that
+  excluded, and the drill-down badge reads 'a low followed (after a manual bolus, not counted for P)'.
   It is positional: it locates the two hours before a low that actually happened. It is a hard limit
   (`P <= P_base + floor`), never a score. Say "asks for more insulin in the two hours before a recorded
   low", never anything about the low itself.

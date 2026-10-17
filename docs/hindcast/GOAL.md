@@ -15,7 +15,7 @@ unchanged.
 |---|---|---|
 | Time in range 3.9–10 mmol/l above 90 % | only on the phone / Nightscout CGM, after a setting ran for real | report the observed TIR per day as the baseline and track it as settings change; it can **never** compute a counterfactual TIR |
 | No manual bolusing | Nightscout treatments (boluses the user entered vs SMBs) | report the baseline; for each manual bolus, say how much of it the loop under a variant would already have delivered as SMBs before the user acted (decision-level coverage) |
-| More aggressive and quicker on rises | the replay | rank variants by how much earlier and how much more insulin the loop would have asked for in rising loops, under the pre-hypo constraint (no extra insulin before a recorded low) and the validity envelope |
+| More aggressive and quicker on rises | the replay | rank variants by how much earlier and how much more insulin the loop would have asked for in rising loops, under the pre-hypo constraint (no extra insulin before a recorded low; since 2026-10-17 a low that starts within 4 h after a manual bolus is not counted, because the replay keeps that bolus as given) and the validity envelope |
 
 ## How the method reaches it: staged steps
 

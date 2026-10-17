@@ -122,6 +122,10 @@
      "type": "null"
     }
    ]
+  },
+  "metrics_version": {
+   "type": "integer",
+   "default": 1
   }
  },
  "additionalProperties": false,

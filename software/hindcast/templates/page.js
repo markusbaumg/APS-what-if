@@ -393,6 +393,9 @@
         row('base vs phone', fmt.pct(m.agreement_pct) + ' agree, SMB ' + fmt.signed(m.smb_emul_U - m.smb_orig_U, 2) + ' U');
         row('floor', 'rise ' + fmt.num(o.floor_rise_U, 2) + ' U, rest ' + fmt.num(o.floor_rest_U, 2) + ' U, ' + fmt.int(o.floor_loops) + ' loops');
         if (m.lows_recorded !== undefined) row('recorded lows', fmt.int(m.lows_recorded) + ' (positional marker only)');
+        if (m.prehypo_lows !== undefined) row('low episodes for P', fmt.int(m.prehypo_lows) + (typeof m.prehypo_lows_manual === 'number' ?
+          ', ' + fmt.int(m.prehypo_lows_manual) + ' within ' + fmt.num(m.prehypo_exclude_h, 1) + ' h after a manual bolus (not counted for P)' :
+          ', manual boluses unknown (every low counted)'));
       }
       if (fm.character) {
         row('whole UTC day', fmt.int(fm.loops) + ' loops, insulin ' + fmt.num(ch.tdd_U, 1) + ' U, ' + fmt.num(ch.carbs_g, 0) + ' g carbs' +

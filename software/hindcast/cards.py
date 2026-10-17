@@ -351,14 +351,21 @@ def _constraint_lines(report, analysis):
             continue
         if p_worst is None or p > p_worst:
             p_worst, limit_worst = p, M.effective_floor(analysis.floors[d].get('floor_P_U'))
+    base = analysis.base
+    counts = M.prehypo_counts(base.per_day, days) if base is not None else None
+    head = '- ' + M.prehypo_label(counts, analysis.prehypo_hours) + ': '
     p_reasons = [r for rs in report.infeasible_reasons.values() for r in rs if 'recorded low' in r]
     if p_reasons:
-        out.append('- P (insulin before a recorded low): ' + '; '.join(p_reasons) + '.')
+        out.append(head + '; '.join(p_reasons) + '.')
     elif p_worst is not None:
-        out.append(f'- P (insulin before a recorded low): within the limit on every day; at most {_u(p_worst)} more than base '
-                   f'in the two hours before a recorded low' + (f' (limit {_u(limit_worst)})' if limit_worst is not None else '') + '.')
+        out.append(head + f'within the limit on every day; at most {_u(p_worst)} more than base '
+                   f'in the two hours before a counted low' + (f' (limit {_u(limit_worst)})' if limit_worst is not None else '') + '.')
+    elif counts is not None and counts['lows'] and counts['manual'] == counts['lows'] and not counts['unknown']:
+        out.append(head + 'every recorded low on these days follows a manual bolus; not testable here.')
+    elif counts is not None and counts['lows']:
+        out.append(head + 'no counted low with a before-window on these days; not testable here.')
     else:
-        out.append('- P (insulin before a recorded low): no recorded low on these days; not testable here.')
+        out.append(head + 'no recorded low on these days; not testable here.')
     e_reasons = [r for rs in report.infeasible_reasons.values() for r in rs if 'envelope' in r]
     env3, envd = _max(report, 'env_3h_max_U', days), _max(report, 'env_day_pct_tdd', days)
     if getattr(report, 'envelope_limited', False):

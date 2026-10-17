@@ -396,3 +396,16 @@ def test_honesty_statement_and_vocabulary_constants():
     for banned in ('better', 'safer', 'optimal', 'fewer lows'):
         assert banned not in c.HONESTY_STATEMENT.lower().replace('overstate', '')
     assert 'carb ratio' in c.NOT_TESTABLE and 'basal rates' in c.NOT_TESTABLE
+
+
+def test_objective_prehypo_default_and_check():
+    o = c.Objective()
+    assert o.prehypo == {'exclude_after_manual_h': 4.0} and not o.problems()
+    assert c.Objective(prehypo={'exclude_after_manual_h': 0}).problems() == []
+    assert c.Objective(prehypo={'exclude_after_manual_h': -1}).problems()
+    old = c.Objective.from_dict({'scalar_weights': {'rest': 2.0}}, strict=False)      # a study.json from before
+    assert old.prehypo == {'exclude_after_manual_h': 4.0}
+    row = c.TrialRow.from_dict({'trial': 0, 'key': 'a' * 40, 'phase': 'floor', 'vhash': c.vhash({}), 'variant': 'base',
+                                'params': {}, 'day': '2026-10-04', 'status': 'done', 'code_sha': 'c',
+                                'settings_sha': 's', 'freeze_sha': '', 'metrics': {'loops': 1}}, strict=False)
+    assert row.metrics_version == 1

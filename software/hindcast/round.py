@@ -266,6 +266,20 @@ class Analysis:
     def base(self):
         return self.reports.get(BASE_VHASH)
 
+    @property
+    def prehypo_hours(self):
+        """objective.prehypo.exclude_after_manual_h of the study (metrics.prehypo_exclude_hours)"""
+        obj = self.study.objective.to_dict() if hasattr(self.study.objective, 'to_dict') else {}
+        return M.prehypo_exclude_hours(obj)
+
+    def prehypo_counts(self, days=None):
+        """metrics.prehypo_counts over the base rows of `days` (default: the search days): the low episodes and the
+        ones the pre-hypo rule does not count; None without a base report"""
+        base = self.base
+        if base is None:
+            return None
+        return M.prehypo_counts(base.per_day, list(self.days if days is None else days))
+
     def ordered(self, include_base=False):
         """Reports in the order round.json lists them: base, order, envelope-limited, infeasible, pending."""
         rest = [vh for vh in self.reports if vh != BASE_VHASH and vh not in self.order]
@@ -726,6 +740,13 @@ def build_round(study_dir, round_no=None, phase=None, settings=None, now=None, s
         top_note = M.validate_top_note(rk, ph.top) if ph is not None else None
         if top_note:
             notes.insert(1, top_note)
+    counts = analysis.prehypo_counts()
+    if counts is not None and counts['days']:
+        notes.insert(1 if notes else 0, M.prehypo_note(counts, analysis.prehypo_hours))
+        if analysis.holdout_days:
+            hc = analysis.prehypo_counts(analysis.holdout_days)
+            if hc is not None and hc['days']:
+                notes.append(M.prehypo_note(hc, analysis.prehypo_hours, where='the hold-out days'))
     n_env = len(analysis.ranking.envelope_limited)
     if n_env:
         notes.append(f'{n_env} envelope-limited variant(s): every hard check passes on every day, beyond the validity '

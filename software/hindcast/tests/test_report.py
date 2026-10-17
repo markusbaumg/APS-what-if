@@ -763,6 +763,8 @@ const colours = [...new Set(opt.series.map(s => s.lineStyle.color))];
 const low = D.lowAfter({ t: [0, 60, 120, 9000], bg: [100, 90, 69, 60], events: [] }, 0, 70.2, 7200);
 const lowEv = D.lowAfter({ t: [0, 60], bg: [100, 90], events: [{ kind: 'low', t: 3000, value: 66 }] }, 0, 70.2, 7200);
 const none = D.lowAfter({ t: [0, 60, 8000], bg: [100, 90, 60], events: [] }, 0, 70.2, 7200);
+const lowMan = D.lowAfter({ t: [0, 60], bg: [100, 90], events: [{ kind: 'low', t: 3000, value: 66, manual: true }] }, 0, 70.2, 7200);
+const lowManBg = D.lowAfter({ t: [0, 60, 120], bg: [100, 90, 69], manual_low_ahead: [1, 1, 0], events: [] }, 0, 70.2, 7200);
 const wd = D.wordDiff('insulinReq 0.12; setting 60m low temp', 'insulinReq 0.13; setting 120m low temp');
 const ld = D.lineDiff(['ISF unchanged: 5.1', 'CR: 13.0', 'only phone'], ['ISF unchanged: 91.8', 'CR: 13.0', 'only variant']);
 console.log(JSON.stringify({
@@ -770,7 +772,7 @@ console.log(JSON.stringify({
   fans: [!!m.fans.phone, !!m.fans.variant, m.fans.phone && m.fans.phone.iob.length],
   reason: !!m.reason.diff, consoleRuns: m.console.diff.length, x: Array.isArray(opt.xAxis), y: Array.isArray(opt.yAxis),
   guards: opt.series[0].markLine.data.map(d => d.yAxis), colours, dashes: opt.series.map(s => s.lineStyle.type),
-  names: opt.series.map(s => s.name), low, lowEv, none,
+  names: opt.series.map(s => s.name), low, lowEv, none, lowMan, lowManBg,
   wd: wd.map(r => r.op + (r.a || r.b)), ld: ld.map(r => r.op),
   parsed: D.parseReason('COB: 0, minPredBG 6.1, minGuardBG 7.4, IOBpredBG 4.7; Eventual BG 7.7 >= 5.6', 'mmol'),
   parsedMg: D.parseReason('minGuardBG 16, minPredBG: 111', 'mg/dl')
@@ -801,8 +803,11 @@ def test_drilldown_model_and_fans_on_the_pred_fixture(tmp_path):
     assert set(o['colours']) == {'<phone>', '<series-1>'}, 'the phone grey, the variant in its slot colour'
     assert 'solid' in o['dashes'] and [6, 4] in o['dashes'], 'IOB solid, ZT dashed'
     assert all(n.split(' ')[0] in ('phone', 'variant') for n in o['names'])
-    assert o['low'] == {'t': 120, 'bg': 69} and o['lowEv'] == {'t': 3000, 'bg': 66} and o['none'] is None, \
+    assert o['low'] == {'t': 120, 'bg': 69, 'manual': False} and o['lowEv'] == {'t': 3000, 'bg': 66, 'manual': False} \
+        and o['none'] is None, \
         'the first recorded low within 2 h, positional only'
+    assert o['lowMan'] == {'t': 3000, 'bg': 66, 'manual': True} and o['lowManBg']['manual'] is True, \
+        'a low the pre-hypo rule attributes to a manual bolus is marked (badge: not counted for P)'
     assert '-0.12;' in o['wd'] and '+0.13;' in o['wd'] and '-60m' in o['wd'] and '+120m' in o['wd'] and '=setting' in o['wd']
     assert o['ld'] == ['~', '=', '-', '+'], 'lines aligned on wording, numbers compared word by word'
     assert o['parsed'] == {'eventual': 138.6, 'minPred': 109.8, 'minGuard': 133.2}

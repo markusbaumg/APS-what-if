@@ -54,8 +54,9 @@ Guards (backlog H-302, DESIGN.md sections 5.1 and 6; details in the Runner and G
                     `sentinel_every` (study.json) tasks
     null            one searched parameter at the phone's value; once per run (= round); same comparison
     loop counts     a done row whose metrics.loops differs from its day's base row stops the run
-    stale_context   code_sha / settings_sha / freeze_sha on every row (and in the key); at the start of a run the
-                    done rows are compared with the live context: `--on-stale stop` (default) replays nothing and
+    stale_context   code_sha / settings_sha / freeze_sha on every row (and in the key), and metrics_version (not in
+                    the key: metrics.METRICS_VERSION, a done row of another version - missing = 1 - is stale under
+                    its own key); at the start of a run the done rows are compared with the live context: `--on-stale stop` (default) replays nothing and
                     exits 2, `--on-stale reeval` appends a `stale` row over each old done row, replays the affected
                     days' base first, then continues (the rest lazily, as the search asks for it); a change during
                     a run lets the round finish, then exits 2
@@ -722,8 +723,24 @@ def live_context(settings_path=NS_SETTINGS_PATH, software_dir=SOFTWARE_DIR, fall
     return code, sett
 
 
-def find_stale(study, rows, code_sha, settings_sha, freeze_sha_of=None):
+def current_metrics_version():
+    """metrics.METRICS_VERSION (lazy: metrics imports emulator_optimize)"""
+    from hindcast import metrics as _m
+    return int(_m.METRICS_VERSION)
+
+
+def metrics_stale(row, version=None):
+    """True for a done row whose metrics_version (missing = 1) differs from the current metrics.METRICS_VERSION"""
+    v = current_metrics_version() if version is None else version
+    return row.status == 'done' and int(getattr(row, 'metrics_version', 1) or 1) != v
+
+
+def find_stale(study, rows, code_sha, settings_sha, freeze_sha_of=None, metrics_version=None):
     """-> (reasons, stale) for the rows of a study against the live context.
+
+    metrics_version (default metrics.METRICS_VERSION): a done row made with another metrics version is stale like
+    a code_sha mismatch, although its key is the same (the version is not in the key): `--on-stale reeval`
+    supersedes it with a `stale` row, so the key is handed out again and re-replayed.
 
     The reference is the context the study's results were produced under: every latest `done` row (per key) whose
     code_sha or settings_sha differs from the live one, or whose freeze_sha differs from `freeze_sha_of(row.day)`
@@ -752,8 +769,12 @@ def find_stale(study, rows, code_sha, settings_sha, freeze_sha_of=None):
         return freeze_now[day]
 
     counts, stale = {}, []
+    mv = current_metrics_version() if metrics_version is None else int(metrics_version)
     for r in sorted(done, key=lambda r: r.trial):
         why = []
+        rv = int(getattr(r, 'metrics_version', 1) or 1)
+        if rv != mv:
+            why.append(('metrics_version', str(rv), str(mv)))
         if code_sha and r.code_sha != code_sha:
             why.append(('code_sha', r.code_sha, code_sha))
         if settings_sha and r.settings_sha != settings_sha:
@@ -1207,6 +1228,13 @@ class Runner:
         rows = self.sd.trials() if rows is None else rows
         return find_stale(self.study, rows, self.code_sha, self.settings_sha, lambda d: self.freeze_sha_of(d) or '')
 
+    @staticmethod
+    def stale_stop_reason(reasons):
+        """The --on-stale stop reason (Runner.run and the orchestrator's pre-check say the same)."""
+        return ('stale_context: ' + '; '.join(reasons) + '. Nothing was replayed; the rows of this study were made '
+                'with another context. Re-run with --on-stale reeval to mark them stale and re-evaluate (base first), '
+                'or start a new study')
+
     def context_drift(self):
         """Lines naming what changed since the run started: code / settings (unless pinned), frozen metas of the
         days this run has used. [] = nothing."""
@@ -1496,7 +1524,8 @@ class Runner:
                        worker=out.get('worker', self.worker), rung=task.rung, round=task.round,
                        started=started, finished=now_iso(), metrics=dict(out.get('metrics') or {}),
                        feasible=out.get('feasible'), flags=flags[:16],
-                       files=dict(out.get('files') or {}), error=error, control=task.control)
+                       files=dict(out.get('files') or {}), error=error, control=task.control,
+                       metrics_version=int(out.get('metrics_version') or current_metrics_version()))
         mismatch = self.loop_mismatch(task, row) if stop is None else None
         if mismatch is not None:
             base, loops = mismatch
@@ -1585,11 +1614,13 @@ class Runner:
         try:
             if reasons:
                 if on_stale == 'stop':
-                    raise GuardStop('stale_context: ' + '; '.join(reasons) + '. Nothing was replayed; the rows of '
-                                    'this study were made with another context. Re-run with --on-stale reeval to '
-                                    'mark them stale and re-evaluate (base first), or start a new study')
+                    raise GuardStop(self.stale_stop_reason(reasons))
                 trial_no = self.mark_stale(stale, trial_no)
                 result.marked_stale = len(stale)
+                # a metrics_version stale row keeps its key: it was 'done' when todo was built, hand it out again
+                done_now = self.sd.done_keys()
+                todo = [(t, k) for t, k in ((t, self.key_of(t)) for t in tasks) if k not in done_now]
+                result.skipped = len(tasks) - len(todo)
                 self.state.stale_context = list(reasons) + [f're-evaluating: {len(stale)} rows marked stale, base first']
                 todo = self._reeval_order(todo, {r.day for r, _ in stale}, rnd)
                 self.log(f'{self.sd.name}: stale context ({"; ".join(reasons)}); {len(stale)} rows marked stale, '
@@ -1846,6 +1877,14 @@ def build_status(study_dir, now=None):
     for r in rows:
         counts[r.status] = counts.get(r.status, 0) + 1
     done = counts.get('done', 0)
+    mv = current_metrics_version()
+    # to re-evaluate under the same key: done rows of another metrics version, and the `stale` rows --on-stale reeval
+    # wrote for them (a code / settings / freeze change makes new keys instead; its old rows stay `stale` for good).
+    # Controls (their keys carry the run, they are never handed out again) and rows of quarantined days (no phase
+    # schedules them) are left out: the count is what a reeval run would replay.
+    scored = set(study.search_days()) | set(study.holdout_days())
+    stale_n = sum(1 for r in rows if r.control not in CONTROL_KINDS and r.day in scored
+                  and (metrics_stale(r, mv) or (r.status == 'stale' and (r.flags or [''])[-1] == 'stale: metrics_version')))
     planned = len(latest)                                    # every key attempted so far (done, failed, blocked, stale)
     if state is not None:
         phase = state.phase
@@ -1857,7 +1896,7 @@ def build_status(study_dir, now=None):
     status = Status(study=study.name, question=study.question, phase=phase, trials_done=done, trials_planned=planned,
                     running=holder is not None, heartbeat=(state.heartbeat if state else study.created),
                     trials_failed=counts.get('failed', 0), trials_blocked=counts.get('blocked', 0),
-                    pid=(state.pid if state and holder else None), round=(state.round if state else None),
+                    trials_stale=stale_n, pid=(state.pid if state and holder else None), round=(state.round if state else None),
                     stale_context=list(state.stale_context) if state else [],
                     floor=aggregate_floor(rows, set(study.search_days()) | set(study.holdout_days())),
                     days={d.day: _day_label(d, not_frozen) for d in study.days},
@@ -1941,7 +1980,8 @@ def status_text(status, study=None):
     Verdict words go through `verdict_label` so the text passes the vocabulary lint ('recommended for review')."""
     lines = [f'study {status.study}   question: {status.question}   phase: {status.phase}',
              f'trials: {status.trials_done} done of {status.trials_planned} planned, {status.trials_failed} failed, '
-             f'{status.trials_blocked} blocked',
+             f'{status.trials_blocked} blocked, {status.trials_stale} stale'
+             + (' (to re-evaluate: hc study run --on-stale reeval)' if status.trials_stale else ''),
              f'running: {"yes, pid %s" % status.pid if status.running else "no"}   heartbeat: {status.heartbeat}']
     if status.exit_code is not None:
         lines.append(f'last run: exit {status.exit_code} ({status.stop_reason})')

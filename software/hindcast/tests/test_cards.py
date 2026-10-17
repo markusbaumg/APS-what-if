@@ -42,7 +42,9 @@ def test_card_text_matches_the_documented_wording(analysed):
     assert '- the other loops: +0.02 U vs base per day; floor 0.05 U; 0.4 x floor (tie: inside 2 x floor)' in text
     assert '123 loops with a smaller SMB than base and 9 with a larger one (over all 3 days)' in text
     assert 'Low-side flags: 0 loops' in text
-    assert 'P (insulin before a recorded low): within the limit on every day' in text
+    p_line = next(l for l in text.splitlines() if l.startswith('- P ('))
+    assert p_line.startswith('- P (insulin before a recorded low; lows within 4 h after a manual bolus are not counted')
+    assert 'within the limit on every day' in p_line
     assert 'E (validity envelope): inside on every day' in text
     assert f'the factor sat on a cap in 10.0 % of loops (autoISF_max {cards.fmt_value(PHONE_MAX)})' in text
     assert 'Largest single emulated SMB: 0.30 U; the phone\'s maxBolus on these days was at least 0.70 U' in text

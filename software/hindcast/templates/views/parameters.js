@@ -657,7 +657,7 @@
     rise_vs_base_U: 'rise vs base', rest_vs_base_U: 'rest vs base', delta_vs_base_U: 'total vs base',
     smb_vs_base_U: 'SMB vs base', tbr_vs_base_U: 'TBR vs base', changed_vs_base: 'loops changed vs base',
     smb_more_vs_base: 'larger SMB, loops', smb_less_vs_base: 'smaller SMB, loops', lowside_flags: 'low-side flags',
-    prehypo_extra_U: '2 h before a low', env_3h_max_U: '3 h envelope', env_day_pct_tdd: 'day, % TDD',
+    prehypo_extra_U: '2 h before a counted low', env_3h_max_U: '3 h envelope', env_day_pct_tdd: 'day, % TDD',
     zero_temp_vs_base: 'zero temps vs base', cap_binding_pct: 'on a cap', max_single_smb_U: 'largest SMB'
   };
   function colHead(x) { return (SHORT[x.key] || x.label) + ' (' + x.unit + ')'; }

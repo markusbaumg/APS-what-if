@@ -56,6 +56,9 @@
    "agreement_pct_min": 94.0,
    "cgm_gap_max_min": 120.0,
    "loop_hours_min": 16.0
+  },
+  "prehypo": {
+   "exclude_after_manual_h": 4.0
   }
  },
  "phases": [

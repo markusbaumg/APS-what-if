@@ -21,6 +21,7 @@
    },
    "flags": [
     "lowside_no_pred",
+    "prehypo_manual_unknown",
     "tdd_from_window",
     "zero_temp_rate_proxy",
     "tt_smb_off_unknown"
@@ -47,6 +48,7 @@
    },
    "flags": [
     "lowside_no_pred",
+    "prehypo_manual_unknown",
     "tdd_from_window",
     "tt_smb_off_unknown",
     "zero_temp_rate_proxy"
@@ -78,6 +80,7 @@
    },
    "flags": [
     "lowside_no_pred",
+    "prehypo_manual_unknown",
     "tdd_from_window",
     "tt_smb_off_unknown",
     "zero_temp_rate_proxy"
@@ -109,6 +112,7 @@
    },
    "flags": [
     "lowside_no_pred",
+    "prehypo_manual_unknown",
     "tdd_from_window",
     "tt_smb_off_unknown",
     "zero_temp_rate_proxy"
@@ -140,6 +144,7 @@
    },
    "flags": [
     "lowside_no_pred",
+    "prehypo_manual_unknown",
     "tdd_from_window",
     "tt_smb_off_unknown",
     "zero_temp_rate_proxy"
@@ -186,7 +191,7 @@
  "notes": [
   "Review order, not a ranking by outcome.",
   "Question \"explore\": nothing is ranked. Variants are listed by |effect| / floor, descending, where the effect is the insulin asked for vs base (rise or rest, whichever is larger against its floor).",
-  "Feasible = no more insulin than base plus the floor in the two hours before a recorded low on every day, inside the envelope on every day (at most 1.0 U vs base in any 3 h window and 15.0 % of the phone's TDD per day), no emulated SMB above the phone's maxBolus, factor on a cap in fewer than 50.0 % of loops, loop count equal to base. Infeasible variants are shown greyed with the reason, never ranked.",
+  "Feasible = no more insulin than base plus the floor in the two hours before a recorded low on every day (lows within 4 h after a manual bolus are not counted), inside the envelope on every day (at most 1.0 U vs base in any 3 h window and 15.0 % of the phone's TDD per day), no emulated SMB above the phone's maxBolus, factor on a cap in fewer than 50.0 % of loops, loop count equal to base. Infeasible variants are shown greyed with the reason, never ranked.",
   "Floor per day and component = |base - phone|; a difference smaller than 2 x floor is a tie (grey). Variants inside the floor on every component are indistinguishable from base within the noise floor; parameters with every point inside the floor on all days are not testable on these days.",
   "Recommended for review only if feasible on all days, top-3 on at least 80 % of the leave-one-day-out folds, the same sign of the primary effect on at least 80 % of days, and within the top 5 on the hold-out days. Settings are for you and your care team to review; nothing here changes the phone.",
   "Floors - 2026-09-06: rise 1.38 U, rest 0.01 U, total 1.37 U, 26 loops changed by the replay, base agreement 92.4 %."

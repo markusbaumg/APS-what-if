@@ -419,3 +419,17 @@ def test_fixture_set_is_consistent(fixture_docs):
         assert any('final ISF factor' in l for l in lines) and boxes[0][2] == '55'
         pred_orig = next(d for d in docs.values() if d['kind'] == 'pred_orig')
         assert all(r for r in pred_orig['reason']) and all(a for a in pred_orig['iob'])
+
+
+def test_low_events_after_a_manual_bolus_are_marked():
+    t = [i * 60.0 for i in range(400)]
+    bg = [120.0] * 400
+    for i in (200, 201, 202):
+        bg[i] = 65.0
+    bg[350] = None
+    bg[380] = 60.0
+    starts = export.manual_low_starts(t, bg, [(150 * 60.0, 2.0)], 3.0)
+    assert starts == {200}                                     # the 380 low is 230 min after the bolus: counted
+    assert export.manual_low_starts(t, bg, [(150 * 60.0, 2.0)], 0) == set()
+    assert export.manual_low_starts(t, bg, None) == set()
+    assert export.MANUAL_LOW_LABEL == 'after a manual bolus, not counted for P'

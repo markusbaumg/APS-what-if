@@ -704,13 +704,19 @@ PARAMETER_EXTRAS = (
     ('smb_more_vs_base', 'loops with a larger SMB than base', 'loops'),
     ('smb_less_vs_base', 'loops with a smaller SMB than base', 'loops'),
     ('lowside_flags', 'low-side flags', 'loops'),
-    ('prehypo_extra_U', 'extra insulin in the 2 h before a recorded low', 'U'),
+    ('prehypo_extra_U', 'extra insulin in the 2 h before a counted recorded low (P)', 'U'),
     ('env_3h_max_U', 'largest 3 h sum vs base', 'U'),
     ('env_day_pct_tdd', 'day sum vs base, % of the phone\'s TDD', '%'),
     ('zero_temp_vs_base', 'zero temps vs base', 'loops'),
     ('cap_binding_pct', 'factor on a cap', '%'),
     ('max_single_smb_U', 'largest single SMB', 'U'),
 )
+
+
+def objective_of(study):
+    """the study's objective as a dict (contracts.Objective or a plain dict)"""
+    obj = getattr(study, 'objective', None)
+    return obj.to_dict() if hasattr(obj, 'to_dict') else dict(obj or {})
 
 
 def _param_value(params, key, phone):
@@ -842,7 +848,9 @@ def parameter_space(study, rows, rounds, sensitivity=None):
         'question': study.question, 'days': days, 'floors': floors, 'tie_factor': hm.TIE_FACTOR,
         'components': [{'key': k, 'label': lab, 'unit': u, 'floor_key': fk, 'insulin': s}
                        for k, lab, u, fk, s in PARAMETER_COMPONENTS],
-        'extras': [{'key': k, 'label': lab, 'unit': u} for k, lab, u in PARAMETER_EXTRAS],
+        'extras': [{'key': k, 'unit': u,
+                    'label': (lab + '; ' + hm.prehypo_rule_phrase(hm.prehypo_exclude_hours(objective_of(study)))
+                              if k == 'prehypo_extra_U' else lab)} for k, lab, u in PARAMETER_EXTRAS],
         'coverage': ({'columns': [{'key': k, 'head': hd, 'label': lab, 'unit': u} for k, hd, lab, u in COVERAGE_KEYS],
                       'caveat': COVERAGE_CAVEAT} if with_cov else None),
         'pareto': pareto_view(study.question, ranking, variants, sensitivity),

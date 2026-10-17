@@ -45,6 +45,21 @@ input and falls back to the rate columns with the flag `zero_temp_rate_proxy`.
 
 OBJECTIVE_VERSION is part of every trial key (contracts.key()); bump it when a metric definition or a
 feasibility rule changes, so that old trials.jsonl rows are not compared with new ones.
+METRICS_VERSION is written into every new trials.jsonl row (`metrics_version`, missing = 1). It is NOT part of the
+key: a done row whose metrics_version differs from the current one is stale exactly like a code_sha mismatch
+(study.find_stale), so `hc study run --on-stale reeval` re-replays it under the same key and `--on-stale stop` names
+the count and stops. Bump it when the metrics a replay writes change while the decisions do not.
+    1  the original section 5.2 set
+    2  pre-hypo constraint P: a recorded low episode whose first reading comes within
+       objective.prehypo['exclude_after_manual_h'] hours (default 4.0, 0 = off) after a manual bolus is
+       manual-attributed and opens no P window; new keys prehypo_lows, prehypo_lows_manual, prehypo_manual_U,
+       prehypo_exclude_h
+
+Pre-hypo rule (P, DESIGN.md 5.2). A low episode = consecutive loops with recorded BG < 3.9 mmol. Every episode marks
+its 2 h before-window for shading (before_low_2h); only the episodes NOT within exclude_after_manual_h after a
+manual bolus open a window for P (prehypo_extra_U, prehypo_extra_vs_phone_U, prehypo_loops). The reason: a low that
+follows a bolus the user entered is not a test of what the loop asked for, and charging a variant for it made
+every step toward more insulin on rises infeasible on those days. Loop-only lows keep the rule as before.
 """
 import math
 import os
@@ -62,6 +77,7 @@ os.environ.setdefault('PYTHONUTF8', '1')              # emulator_optimize sets i
 import emulator_optimize as _opt                       # noqa: E402  imported, never copied (DESIGN.md 4.1)
 
 OBJECTIVE_VERSION = 1
+METRICS_VERSION = 2                                    # see the module docstring; trials.jsonl `metrics_version`
 
 # ----------------------------------------------------------------------------- constants (DESIGN.md 5.1 / 5.2)
 MMOL_TO_MGDL = 18.0
@@ -73,6 +89,8 @@ LOW_BG_MGDL = 3.9 * MMOL_TO_MGDL                       # 70.2: "a recorded low"
 LOWSIDE_BG_MGDL = 5.0 * MMOL_TO_MGDL                   # 90.0: recorded BG below this and falling = low side
 HIGH_BG_MGDL = 180.0                                   # hindsight covariate "a high followed"
 PREHYPO_S = 120 * 60                                   # constraint P: the two hours before a recorded low
+PREHYPO_EXCLUDE_AFTER_MANUAL_H = 4.0                   # P: a low starting this long after a manual bolus is not counted
+#REHYPO_EXCLUDE_AFTER_MANUAL_H = 3.0                   # 2026-10-17 morning value; 4 h covers the Oct 10 low 3 h 06 after a 3 U bolus
 LOW_FOLLOW_S = PREHYPO_S                               # covariate: a low within 2 h
 HIGH_FOLLOW_S = 180 * 60                               # covariate: a high within 3 h
 ENVELOPE_WINDOW_S = 3 * 3600                           # E: sliding 3 h window
@@ -97,7 +115,9 @@ DEFAULT_OBJECTIVE = {
     'envelope': {'max_3h_U': 1.0, 'max_day_pct_tdd': 15.0},
     'feasible': {'cap_binding_max_pct': 50.0},
     'recommend': {'fold_top': 3, 'fold_share': 0.8, 'sign_share': 0.8, 'holdout_top': 5},
+    'prehypo': {'exclude_after_manual_h': PREHYPO_EXCLUDE_AFTER_MANUAL_H},
 }
+PREHYPO_KEYS = ('prehypo_lows', 'prehypo_lows_manual', 'prehypo_manual_U')    # per-day keys of the pre-hypo rule
 
 # metric key -> floor key: the components that get a floor, a tie test and a floor band on the page
 FLOOR_COMPONENTS = {
@@ -286,36 +306,168 @@ def _recorded_lows(t, bg, low=LOW_BG_MGDL):
     return [ti for ti, b in zip(t, bg) if b < low]
 
 
-def hindsight_covariates(t: Sequence[float], bg: Sequence[float]) -> Dict[str, List[int]]:
-    """positional covariates per loop, 0/1 - stored in the series for shading and filtering, never scored:
-    before_low_2h  a recorded BG < 3.9 mmol follows within 2 h (the P window)
-    low_within_2h  alias of before_low_2h (the drill-down badge "a low followed")
-    high_within_3h a recorded BG > 180 mg/dl follows within 3 h"""
+def low_episodes(t: Sequence[float], bg: Sequence[float], low: float = LOW_BG_MGDL) -> List[Tuple[int, int]]:
+    """(first index, last index) of every recorded low episode: consecutive loops with BG < 3.9 mmol are one episode"""
+    out: List[Tuple[int, int]] = []
+    prev = False
+    for i, b in enumerate(bg):
+        is_low = b < low
+        if is_low and not prev:
+            out.append((i, i))
+        elif is_low:
+            out[-1] = (out[-1][0], i)
+        prev = is_low
+    return out
+
+
+def prehypo_exclude_hours(objective: Optional[dict] = None) -> float:
+    """objective['prehypo']['exclude_after_manual_h'] (default PREHYPO_EXCLUDE_AFTER_MANUAL_H; 0 disables)"""
+    v = ((objective or {}).get('prehypo') or {}).get('exclude_after_manual_h', PREHYPO_EXCLUDE_AFTER_MANUAL_H)
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return PREHYPO_EXCLUDE_AFTER_MANUAL_H
+
+
+def manual_attributed_lows(t: Sequence[float], bg: Sequence[float],
+                           manual_boluses: Optional[Sequence[Tuple[float, float]]],
+                           exclude_after_manual_h: Optional[float] = None) -> dict:
+    """The pre-hypo rule's split of the recorded low episodes (module docstring):
+    episodes       [(first, last)] index pairs (low_episodes)
+    manual         [bool] per episode: its first reading comes within exclude_after_manual_h hours after a manual
+                   bolus (bolus time <= first reading); False everywhere when the hours are 0 or the boluses unknown
+    manual_U       the units of the manual boluses in the hours before the manual-attributed episodes (each bolus once)
+    known          False when manual_boluses is None (not known: nothing is excluded)
+    hours          the window used"""
+    hours = PREHYPO_EXCLUDE_AFTER_MANUAL_H if exclude_after_manual_h is None else max(0.0, float(exclude_after_manual_h))
+    eps = low_episodes(t, bg)
+    known = manual_boluses is not None
+    bol = sorted((float(a), float(b)) for a, b in (manual_boluses or []) if b and b > 0)
+    manual = [False] * len(eps)
+    used = set()
+    if known and hours > 0:
+        span = hours * 3600.0
+        for k, (i0, _i1) in enumerate(eps):
+            t0 = t[i0]
+            hit = [j for j, (tb, _u) in enumerate(bol) if tb <= t0 and t0 - tb <= span]
+            if hit:
+                manual[k] = True
+                used.update(hit)
+    return {'episodes': eps, 'manual': manual, 'manual_U': sum(bol[j][1] for j in sorted(used)), 'known': known,
+            'hours': hours}
+
+
+def _before_mask(t: Sequence[float], times: Sequence[float], horizon_s: float) -> List[int]:
+    """1 for the loops followed by one of `times` (sorted) within horizon_s, strictly after the loop"""
     n = len(t)
+    out = [0] * n
+    j = 0
+    for i in range(n):
+        while j < len(times) and times[j] <= t[i]:
+            j += 1
+        if j < len(times) and times[j] - t[i] <= horizon_s:
+            out[i] = 1
+    return out
+
+
+def hindsight_covariates(t: Sequence[float], bg: Sequence[float],
+                         manual_boluses: Optional[Sequence[Tuple[float, float]]] = None,
+                         exclude_after_manual_h: Optional[float] = None) -> Dict[str, List[int]]:
+    """positional covariates per loop, 0/1 - stored in the series for shading and filtering, never scored:
+    before_low_2h         a recorded BG < 3.9 mmol follows within 2 h (every low, the drill-down shading)
+    low_within_2h         alias of before_low_2h (the drill-down badge "a low followed")
+    before_manual_low_2h  a reading of a manual-attributed low episode follows within 2 h (not counted for P)
+    prehypo_window        a reading of a counted (loop-only) low episode follows within 2 h: the P window
+    high_within_3h        a recorded BG > 180 mg/dl follows within 3 h
+    Without manual_boluses every low is counted (prehypo_window == before_low_2h)."""
+    split = manual_attributed_lows(t, bg, manual_boluses, exclude_after_manual_h)
     lows = _recorded_lows(t, bg)
+    counted, manual = [], []
+    for (i0, i1), is_manual in zip(split['episodes'], split['manual']):
+        (manual if is_manual else counted).extend(t[i0:i1 + 1])
     highs = [ti for ti, b in zip(t, bg) if b > HIGH_BG_MGDL]
-    before_low = [0] * n
-    before_high = [0] * n
-    j = 0
-    for i in range(n):
-        while j < len(lows) and lows[j] <= t[i]:
-            j += 1
-        if j < len(lows) and lows[j] - t[i] <= LOW_FOLLOW_S:
-            before_low[i] = 1
-    j = 0
-    for i in range(n):
-        while j < len(highs) and highs[j] <= t[i]:
-            j += 1
-        if j < len(highs) and highs[j] - t[i] <= HIGH_FOLLOW_S:
-            before_high[i] = 1
-    return {'before_low_2h': before_low, 'low_within_2h': list(before_low), 'high_within_3h': before_high}
+    before_low = _before_mask(t, lows, LOW_FOLLOW_S)
+    return {'before_low_2h': before_low, 'low_within_2h': list(before_low),
+            'before_manual_low_2h': _before_mask(t, manual, LOW_FOLLOW_S),
+            'prehypo_window': _before_mask(t, counted, PREHYPO_S),
+            'high_within_3h': _before_mask(t, highs, HIGH_FOLLOW_S)}
 
 
-def prehypo_extra_U(t: Sequence[float], bg: Sequence[float], give: Sequence[float], give_ref: Sequence[float]) -> float:
-    """P: sum over the loops in the 120 min before a recorded BG < 3.9 mmol of max(give - give_ref, 0).
-    'Any additional insulin before a low that actually happened' - the low itself is positional, never scored."""
-    mask = hindsight_covariates(t, bg)['before_low_2h']
+def prehypo_extra_U(t: Sequence[float], bg: Sequence[float], give: Sequence[float], give_ref: Sequence[float],
+                    manual_boluses: Optional[Sequence[Tuple[float, float]]] = None,
+                    exclude_after_manual_h: Optional[float] = None) -> float:
+    """P: sum over the loops in the 120 min before a counted recorded BG < 3.9 mmol of max(give - give_ref, 0).
+    'Any additional insulin before a low that actually happened' - the low itself is positional, never scored.
+    A low episode starting within exclude_after_manual_h after a manual bolus is not counted (module docstring)."""
+    mask = hindsight_covariates(t, bg, manual_boluses, exclude_after_manual_h)['prehypo_window']
     return sum(max(a - b, 0.0) for a, b, m in zip(give, give_ref, mask) if m)
+
+
+def prehypo_rule_phrase(hours: Optional[float] = None) -> str:
+    """'lows within 3 h after a manual bolus are not counted' (the pre-hypo rule as every surface prints it)"""
+    h = PREHYPO_EXCLUDE_AFTER_MANUAL_H if hours is None else float(hours)
+    if h <= 0:
+        return 'every recorded low counts, also one after a manual bolus'
+    return f'lows within {h:g} h after a manual bolus are not counted'
+
+
+def prehypo_counts(per_day: Dict[str, dict], days: Optional[Iterable[str]] = None) -> dict:
+    """The low episodes of the days from their BASE metrics (day -> metrics): lows (episodes), manual (excluded),
+    manual_days {day: excluded episodes} (only days with any), counted_days, unknown [days whose row has no
+    prehypo_lows / prehypo_lows_manual: metrics_version 1 or no manual-bolus cache]"""
+    out = {'lows': 0, 'manual': 0, 'manual_days': {}, 'unknown': [], 'days': 0}
+    for d in (sorted(per_day) if days is None else days):
+        m = per_day.get(d)
+        if not m:
+            continue
+        out['days'] += 1
+        lows, man = m.get('prehypo_lows'), m.get('prehypo_lows_manual')
+        if not isinstance(lows, (int, float)) or isinstance(lows, bool):
+            out['unknown'].append(d)
+            continue
+        out['lows'] += int(lows)
+        if isinstance(man, (int, float)) and not isinstance(man, bool):
+            out['manual'] += int(man)
+            if man:
+                out['manual_days'][d] = int(man)
+        else:
+            out['unknown'].append(d)
+    return out
+
+
+def prehypo_label(counts: Optional[dict] = None, hours: Optional[float] = None) -> str:
+    """'P (insulin before a recorded low; lows within 3 h after a manual bolus are not counted: 2 of 9 recorded low
+    episodes on these days)' - the head of every P line (cards, page). Counting the recorded episodes is positional:
+    the same for every variant of a day, never an outcome."""
+    head = f'P (insulin before a recorded low; {prehypo_rule_phrase(hours)}'
+    h = PREHYPO_EXCLUDE_AFTER_MANUAL_H if hours is None else float(hours)
+    if counts is None or h <= 0:
+        return head + ')'
+    if counts['unknown'] and not counts['lows']:
+        return head + ': not yet counted on these days, re-evaluate the rows)'
+    tail = f': {counts["manual"]} of {counts["lows"]} recorded low episodes on these days'
+    if counts['unknown']:
+        tail += f', {len(counts["unknown"])} day(s) not counted yet'
+    return head + tail + ')'
+
+
+def prehypo_note(counts: dict, hours: Optional[float] = None, where: str = 'the search days') -> str:
+    """The round note: 'pre-hypo constraint P: lows within 3 h after a manual bolus are not counted; 2 of 9 recorded
+    low episodes on the search days excluded (2026-10-04: 2)'."""
+    h = PREHYPO_EXCLUDE_AFTER_MANUAL_H if hours is None else float(hours)
+    text = f'pre-hypo constraint P: {prehypo_rule_phrase(h)}'
+    if h <= 0:
+        return text
+    if counts['unknown'] and not counts['lows']:
+        return text + f'; the low episodes of {where} are not counted yet (rows of metrics version 1: re-evaluate)'
+    text += f'; {counts["manual"]} of {counts["lows"]} recorded low episodes on {where} excluded'
+    if counts['manual_days']:
+        text += ' (' + ', '.join(f'{d}: {n}' for d, n in sorted(counts['manual_days'].items())) + ')'
+    else:
+        text += ' (no day)'
+    if counts['unknown']:
+        text += f'; not counted yet on {", ".join(counts["unknown"])}'
+    return text
 
 
 def envelope(t: Sequence[float], give: Sequence[float], give_ref: Sequence[float], tdd_ref_U: Optional[float]) -> Dict[str, Optional[float]]:
@@ -418,7 +570,10 @@ def manual_bolus_coverage(t: Sequence[float], smb_variant: Sequence[float], smb_
         out[k] = 0.0
     detail: List[dict] = []
     prev = None
+    t0 = t[0] if n else None
     for tb, units in sorted((float(a), float(b)) for a, b in (boluses or []) if b and b > 0):
+        if t0 is not None and tb < t0:                      # a look-back bolus before the first loop (P rule only)
+            continue
         lo = tb - window_s if prev is None else max(tb - window_s, prev)
         prev = tb
         pre_v = sum(v for ti, v in zip(t, smb_variant) if lo <= ti < tb)
@@ -439,7 +594,8 @@ def manual_bolus_coverage(t: Sequence[float], smb_variant: Sequence[float], smb_
 # ----------------------------------------------------------------------------- per-trial metrics
 def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_guard=None, zero_temp=None,
                   smb_off=None, tdd_phone_U=None, series: Optional[LoopSeries] = None,
-                  manual_boluses: Optional[Sequence[Tuple[float, float]]] = None) -> dict:
+                  manual_boluses: Optional[Sequence[Tuple[float, float]]] = None,
+                  prehypo_exclude_h: Optional[float] = None) -> dict:
     """One metrics dict per (variant, day) = emulator_optimize.metrics_from_csv(csv_path, caps) + the section 5.2
     additions.  `base` is the base replay of the same day (LoopSeries or CSV path); None means "this trial IS the
     base", then every *_vs_base metric is 0 and the vs-phone values are what floors_from_base() reads.
@@ -452,11 +608,15 @@ def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_g
     manual_bolus_coverage() (the per-bolus list stays out of the row: trials.jsonl lines are < 4 KB). An empty list =
     known, none given: every key 0, so every day of a study carries them. None = not known (no cache): the keys are
     left out, never a 0 that would read as "no manual bolus" (replay.py flags the row `manual_boluses_unknown`).
+    `prehypo_exclude_h`: the pre-hypo rule's hours (objective.prehypo.exclude_after_manual_h; None = 4.0, 0 = off):
+    a low episode starting that long after one of `manual_boluses` opens no P window. With manual_boluses None
+    nothing is excluded, the flag `prehypo_manual_unknown` says so and prehypo_lows_manual / prehypo_manual_U are
+    None.
 
     Flags (list of strings, always present): `lowside_no_pred` (no emulated minGuardBG on any loop: the recorded-BG rule
     alone), `lowside_pred_partial` (some loops), `zero_temp_rate_proxy`, `tt_smb_off_unknown`, `tdd_from_window`,
     `cap_unknown` (no autoISF_max/min cap given: cap_binding_pct is None), `maxbolus_unknown` (the phone echoed no
-    maxBolus on any loop)."""
+    maxBolus on any loop), `prehypo_manual_unknown` (see prehypo_exclude_h)."""
     s = series if series is not None else LoopSeries.from_csv(csv_path, min_guard, zero_temp, smb_off)
     if series is not None:
         for name, val in (('min_guard', min_guard), ('zero_temp', zero_temp), ('smb_off', smb_off)):
@@ -510,10 +670,23 @@ def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_g
     m['lowside_rule'] = 'recorded_bg_only' if known == 0 else ('pred_and_recorded_bg' if known == s.n else 'pred_partial')
 
     # P and E (vs base = the metric; vs phone = what the base's floor is made of)
-    m['prehypo_extra_U'] = prehypo_extra_U(s.t, s.bg, give_e, give_b)
-    m['prehypo_extra_vs_phone_U'] = prehypo_extra_U(s.t, s.bg, give_e, give_p)
-    m['prehypo_loops'] = sum(hindsight_covariates(s.t, s.bg)['before_low_2h'])
+    hours = PREHYPO_EXCLUDE_AFTER_MANUAL_H if prehypo_exclude_h is None else max(0.0, float(prehypo_exclude_h))
+    cov_h = hindsight_covariates(s.t, s.bg, manual_boluses, hours)
+    split = manual_attributed_lows(s.t, s.bg, manual_boluses, hours)
+    window = cov_h['prehypo_window']
+    m['prehypo_extra_U'] = sum(max(a - b, 0.0) for a, b, w in zip(give_e, give_b, window) if w)
+    m['prehypo_extra_vs_phone_U'] = sum(max(a - b, 0.0) for a, b, w in zip(give_e, give_p, window) if w)
+    m['prehypo_loops'] = sum(window)
     m['lows_recorded'] = len(_recorded_lows(s.t, s.bg))
+    m['prehypo_lows'] = len(split['episodes'])
+    m['prehypo_exclude_h'] = hours
+    if split['known']:
+        m['prehypo_lows_manual'] = sum(split['manual'])
+        m['prehypo_manual_U'] = round(split['manual_U'], 3)
+    else:
+        m['prehypo_lows_manual'] = None
+        m['prehypo_manual_U'] = None
+        flags.append('prehypo_manual_unknown')
     tdd = tdd_phone_U
     if tdd is None:
         tdd = sum(give_p)
@@ -812,7 +985,10 @@ def feasibility_split(metrics: dict, base_metrics: dict, floors: dict, objective
         p_base = base_metrics.get('prehypo_extra_U') or 0.0
         limit = p_base + effective_floor(floors.get('floor_P_U'))
         if p > limit + 1e-9:
-            hard.append(f'asks for {p:.2f} U more than base in the two hours before a recorded low (limit {limit:.2f} U)')
+            hours = metrics.get('prehypo_exclude_h', base_metrics.get('prehypo_exclude_h'))
+            rule = (f'; {prehypo_rule_phrase(hours)}' if isinstance(hours, (int, float)) and hours > 0 else '')
+            hard.append(f'asks for {p:.2f} U more than base in the two hours before a recorded low (limit {limit:.2f} U'
+                        f'{rule})')
     env3 = metrics.get('env_3h_max_U')
     if env3 is not None and env3 > cfg['envelope']['max_3h_U'] + 1e-9:
         env.append(f'{ENVELOPE_PREFIX}: {env3:.2f} U vs base in a 3 h window (limit {cfg["envelope"]["max_3h_U"]} U)')
@@ -1495,7 +1671,8 @@ def ranking_rule_text(question: str = 'explore', objective: Optional[dict] = Non
         lines.append('Validate for "earlier": the Pareto front first, then the scalar, up to N variants; the direction'
                      ' holds on a hold-out day when the loop would have asked for more insulin than base in rising'
                      ' loops there.')
-    lines.append(f'Feasible = no more insulin than base plus the floor in the two hours before a recorded low on every day,'
+    lines.append(f'Feasible = no more insulin than base plus the floor in the two hours before a recorded low on every day'
+                 f' ({prehypo_rule_phrase(prehypo_exclude_hours(cfg))}),'
                  f' inside the envelope on every day (at most {env["max_3h_U"]} U vs base in any 3 h window and'
                  f' {env["max_day_pct_tdd"]} % of the phone\'s TDD per day), no emulated SMB above the phone\'s maxBolus,'
                  f' factor on a cap in fewer than {feas["cap_binding_max_pct"]} % of loops, loop count equal to base.'
@@ -1612,7 +1789,9 @@ def leaderboard_rows(ranking: Ranking) -> List[dict]:
     return out
 
 
-__all__ = ['OBJECTIVE_VERSION', 'LoopSeries', 'trial_metrics', 'metrics_from_csv', 'read_result_csv', 'effective_cap',
+__all__ = ['OBJECTIVE_VERSION', 'METRICS_VERSION', 'PREHYPO_EXCLUDE_AFTER_MANUAL_H', 'PREHYPO_KEYS', 'low_episodes',
+           'manual_attributed_lows', 'prehypo_exclude_hours', 'prehypo_rule_phrase', 'prehypo_counts', 'prehypo_label',
+           'prehypo_note', 'LoopSeries', 'trial_metrics', 'metrics_from_csv', 'read_result_csv', 'effective_cap',
            'loop_intervals_h', 'hindsight_covariates', 'prehypo_extra_U', 'envelope', 'changed_flags', 'agreement',
            'min_guard_from_levels', 'min_guard_from_reason', 'floors_from_base', 'effective_floor', 'is_tie',
            'tie_components', 'tie_with_base', 'effect_over_floor', 'feasibility_day', 'aggregate_days',

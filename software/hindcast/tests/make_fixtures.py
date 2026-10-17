@@ -322,7 +322,8 @@ def build_fixture_study(out_dir=OUT_DIR, results_dir=RESULTS_DIR, settings_path=
                        phase='floor' if is_base else 'grid', vhash=vhash, variant=variant, params=params, day=day,
                        status='done', code_sha=study.code_sha, settings_sha=study.settings_sha, freeze_sha='',
                        seconds=seconds, worker=1, round=1, started=trial_started, finished=finished, metrics=m,
-                       feasible=feasible, flags=list(m.get('flags', [])), files=files, control='base' if is_base else None)
+                       feasible=feasible, flags=list(m.get('flags', [])), files=files, control='base' if is_base else None,
+                       metrics_version=M.METRICS_VERSION)
         sd.append(row)
         ranking_rows.append({'variant': variant, 'day': day, 'metrics': m, 'params': params, 'status': 'done'})
         trial_started = finished

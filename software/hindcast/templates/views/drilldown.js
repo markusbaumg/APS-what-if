@@ -6,7 +6,9 @@
    The sheet shows
      header       time (UTC), day, the variant against base, recorded BG / IOB / COB / target at that loop
      badge        'a low followed at HH:MM' when a recorded reading below 3.9 mmol/l lies within 2 h after the loop:
-                  a position in the history, never a score and never a cause
+                  a position in the history, never a score and never a cause; '(after a manual bolus, not counted
+                  for P)' is appended when the pre-hypo rule attributes that low to a manual bolus (the low event's
+                  `manual` flag, else orig.manual_low_ahead)
      decisions    phone | base replay | variant for insulinReq, SMB, maxBolus, TBR, final ISF factor, eventualBG,
                   minPredBG, minGuardBG; a variant cell that differs from the reference column (base, or the phone
                   when the variant is base) carries a 3 px stripe in the variant's colour
@@ -31,13 +33,14 @@
      HC.drilldown.fanOption(tokens, model, units)        pure: the ECharts option of the prediction fans
      HC.drilldown.wordDiff(a, b), lineDiff(a[], b[])     pure: [{op: '=' | '-' | '+', a, b}] diff runs
      HC.drilldown.parseReason(text, units)               {eventual, minPred, minGuard} in mg/dl from a reason text
-     HC.drilldown.lowAfter(orig, i, lowMgdl, followS)    {t, bg} of the first recorded low after loop i, or null */
+     HC.drilldown.lowAfter(orig, i, lowMgdl, followS)    {t, bg, manual} of the first recorded low after loop i, or null */
 (function () {
   'use strict';
   var HC = window.HC;
   if (!HC || !HC.registerView) return;
   var h = HC.h, fmt = HC.fmt;
   var MGDL = 18.0;
+  var MANUAL_LOW = 'after a manual bolus, not counted for P';   // export.MANUAL_LOW_LABEL
   var DEFAULTS = { pred: {}, pred_text: {}, pred_orig: {}, pred_orig_text: {}, orig: {}, series: {},
                    guards_mgdl: [68.4, 97.2], guards_mmol: [3.8, 5.4], low_mgdl: 70.2, low_follow_s: 7200,
                    tol: { insulin: 0.05, tbr: 0.05, factor: 0.005 }, match_s: 90, base_vhash: null };
@@ -275,13 +278,14 @@
     var t0 = orig.t[i], best = null;
     (orig.events || []).forEach(function (ev) {
       if (ev && ev.kind === 'low' && num(ev.t) && ev.t > t0 && ev.t - t0 <= followS && (!best || ev.t < best.t)) {
-        best = { t: ev.t, bg: num(ev.value) ? ev.value : null };
+        best = { t: ev.t, bg: num(ev.value) ? ev.value : null, manual: !!ev.manual };
       }
     });
     if (best) return best;
     var bg = orig.bg || [];
+    var manual = !!(orig.manual_low_ahead && orig.manual_low_ahead[i]);
     for (var j = i + 1; j < orig.t.length && orig.t[j] - t0 <= followS; j++) {
-      if (num(bg[j]) && bg[j] < lowMgdl) return { t: orig.t[j], bg: bg[j] };
+      if (num(bg[j]) && bg[j] < lowMgdl) return { t: orig.t[j], bg: bg[j], manual: manual };
     }
     return null;
   }
@@ -565,7 +569,7 @@
     var badges = h('div', { class: 'dd-badges' });
     if (m.low) {
       badges.appendChild(h('span', { class: 'dd-badge', title: 'a recorded reading below ' + fmt.num(info.cfg.low_mgdl / MGDL, 1) + ' mmol/l within ' + Math.round(info.cfg.low_follow_s / 60) + ' min after this loop; a position in the recorded history, which no variant changes',
-        text: 'a low followed at ' + hhmm(m.low.t) }));
+        text: 'a low followed at ' + hhmm(m.low.t) + (m.low.manual ? ' (' + MANUAL_LOW + ')' : '') }));
     }
     var nd = m.rows.filter(function (r) { return r.differs; }).length;
     badges.appendChild(h('span', { class: 'dd-badge quiet', text: nd ? nd + ' of ' + m.rows.length + ' decision values differ from ' + (m.ref === 'base' ? 'base' : 'the phone') : 'every decision value matches ' + (m.ref === 'base' ? 'base' : 'the phone') }));
@@ -842,7 +846,7 @@
         var low = lowAfter(o, i, cfg.low_mgdl, cfg.low_follow_s);
         rows.push({ i: i, t: x, ch: ch, cells: [hhmm(x), bgText(at(o, 'bg', i), units), n2(at(o, 'ins_req', i)), n2(at(s, 'ins_req', k)),
           n2(at(o, 'smb', i)), n2(at(s, 'smb', k)), n2(at(o, 'tbr', i)), n2(at(s, 'tbr', k)), n2(at(o, 'isf_factor', i)), n2(at(s, 'isf_factor', k)),
-          low ? hhmm(low.t) : ''] });
+          low ? hhmm(low.t) + (low.manual ? ' (manual bolus before, not counted for P)' : '') : ''] });
       });
       var total = o.t.length;
       tab.list.appendChild(h('p', { text: (tab.changedOnly && s ? rows.length + ' of ' + total + ' loops differ from the phone' : total + ' loops') +

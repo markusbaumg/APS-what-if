@@ -601,6 +601,31 @@ class Orchestrator:
                                                           for d, n in sorted(by_day.items())))
         return out
 
+    # ---- stale rows before the first plan
+    def stale_precheck(self):
+        """Before the first plan: find_stale over the study's rows (study.find_stale; code, settings, freeze and
+        metrics_version). A metrics_version mismatch keeps the key, so search.plan would count those rows as done and
+        call the study finished without a round; hence the check runs here, not only inside Runner.run.
+        --on-stale stop: returns the stop reason (exit 2, nothing replayed, the count named). --on-stale reeval: every
+        stale done row - base, floor and control rows included - is superseded by a `stale` row now, so the plan hands
+        their keys out again (base replays first, search.next_batch) and round.json is rebuilt from the new rows."""
+        reasons, stale = self.runner.find_stale()
+        if not reasons:
+            return None
+        if self.on_stale == 'stop':
+            return st._clip('guard: ' + self.runner.stale_stop_reason(reasons))
+        if stale:
+            trial_no = self.sd.next_trial_number(self.sd.trials())
+            self.runner.mark_stale(stale, trial_no)
+            days = sorted({r.day for r, _ in stale})
+            note = f're-evaluating: {len(stale)} rows marked stale ({len(days)} day(s)), base first'
+            if self.runner.state is not None:
+                self.runner.state.stale_context = list(reasons) + [note]
+                self.runner.heartbeat()
+            self.log(f'{self.sd.name}: stale context ({"; ".join(reasons)}); {len(stale)} rows marked stale, base '
+                     f'replays first')
+        return None
+
     # ---- the run
     def run(self):
         """The whole run under one lock (Runner.open_session ... close_session): rounds until the phases are
@@ -622,6 +647,9 @@ class Orchestrator:
             return self.finish(EXIT_REFUSED, str(e), t_start, refused=True)
         self.runner.deadline = deadline
         self.already_done = len(self.sd.done_keys())
+        pre = self.stale_precheck()
+        if pre is not None:
+            return self.finish(EXIT_GUARD, pre, t_start)
         self.log(f'{self.sd.name}: {self.workers} worker(s), budget '
                  + (f'{self.budget_s / 3600:.2f} h' if self.budget_s is not None else 'none')
                  + (f', batch {self.batch}' if self.batch else '') + f', on-stale {self.on_stale}'

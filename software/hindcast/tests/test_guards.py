@@ -388,6 +388,36 @@ def test_change_during_the_run_finishes_the_round_then_exits_2(env):
     assert res2.exit_code == 2 and any('(5 done rows)' in x for x in res2.stale_context)
 
 
+def test_metrics_version_change_reevaluates_the_same_keys(env, monkeypatch):
+    from hindcast import metrics as hm
+    sd = env.make_study(days=(DAY, DAY2))
+    study = sd.load_study(env.settings)
+    tasks = tasks_for(study, (DAY, DAY2))
+    assert env.runner(sd, study).run(tasks, env.evaluate).exit_code == 0
+    assert {r.metrics_version for r in sd.trials()} == {hm.METRICS_VERSION}
+    keys = {r.key for r in sd.trials()}
+    monkeypatch.setattr(hm, 'METRICS_VERSION', hm.METRICS_VERSION + 1)
+    env.calls.clear()
+    r2 = env.runner(sd, study).run(tasks, env.evaluate)
+    assert r2.exit_code == 2 and env.calls == []
+    assert any('metrics_version changed' in x and '(10 done rows)' in x for x in r2.stale_context)
+    r3 = env.runner(sd, study, on_stale='reeval').run(tasks, env.evaluate)
+    assert r3.exit_code == 0 and r3.marked_stale == 10 and r3.done == 10 and r3.skipped == 0
+    assert [t.control for t in env.calls[:2]] == ['base', 'base']              # base first
+    latest = sd.latest_by_key(sd.trials())
+    assert set(latest) == keys and all(r.status == 'done' and r.metrics_version == hm.METRICS_VERSION
+                                       for r in latest.values())
+    old = [r for r in sd.trials() if r.status == 'stale']
+    assert len(old) == 10 and all(r.flags[-1] == 'stale: metrics_version' for r in old)
+
+
+def test_rows_without_metrics_version_count_as_version_1():
+    row = c.TrialRow.from_dict({'trial': 0, 'key': 'a' * 40, 'phase': 'floor', 'vhash': c.vhash({}), 'variant': 'base',
+                                'params': {}, 'day': DAY, 'status': 'done', 'code_sha': 'c', 'settings_sha': 's',
+                                'freeze_sha': '', 'metrics': {'loops': 1}}, strict=False)
+    assert row.metrics_version == 1 and st.metrics_stale(row, 2) and not st.metrics_stale(row, 1)
+
+
 def test_bad_on_stale_is_refused(env):
     sd = env.make_study()
     with pytest.raises(st.StudyError):

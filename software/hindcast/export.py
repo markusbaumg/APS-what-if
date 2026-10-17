@@ -211,10 +211,26 @@ def hindsight(t, bg):
     return low, high
 
 
-def events_from_rows(rows, t0):
-    """Events the CSV alone can show, positional only: low, cgm_gap, target_change, cob_rise."""
+MANUAL_LOW_LABEL = 'after a manual bolus, not counted for P'
+
+
+def manual_low_starts(t, bg, manual_boluses=None, prehypo_exclude_h=None):
+    """{index of the first reading} of the low episodes the pre-hypo rule attributes to a manual bolus
+    (metrics.manual_attributed_lows; empty without manual_boluses). BG None counts as not low."""
+    if not manual_boluses:
+        return set()
+    bgv = [b if b is not None else LOW_MGDL + 1.0 for b in bg]
+    split = _metrics.manual_attributed_lows(t, bgv, manual_boluses, prehypo_exclude_h)
+    return {i0 for (i0, _i1), m in zip(split['episodes'], split['manual']) if m}
+
+
+def events_from_rows(rows, t0, manual_boluses=None, prehypo_exclude_h=None):
+    """Events the CSV alone can show, positional only: low, cgm_gap, target_change, cob_rise. A low event the
+    pre-hypo rule attributes to a manual bolus (`manual_boluses` [(unix s, U)], metrics.manual_attributed_lows)
+    carries manual: true and says so in its label."""
     t = loop_times(rows)
     bg = bg_of(rows)
+    manual_starts = manual_low_starts(t, bg, manual_boluses, prehypo_exclude_h)
     cob = _num(rows, 'cob')
     lo, hi = _num(rows, 'target low orig'), _num(rows, 'target high orig')
     events = []
@@ -225,8 +241,12 @@ def events_from_rows(rows, t0):
                            'value': rnd((t[i] - t[i - 1]) / 60.0, 'minutes'),
                            'label': 'no loop for %d min' % round((t[i] - t[i - 1]) / 60.0)})
         if bg[i] is not None and bg[i] < LOW_MGDL and (i == 0 or bg[i - 1] is None or bg[i - 1] >= LOW_MGDL):
-            events.append({'kind': 'low', 't': ts, 't_end': None, 'value': rnd(bg[i], 'bg'),
-                           'label': 'recorded BG %.1f mmol/l (below 3.9) followed here' % (bg[i] / MGDL_PER_MMOL)})
+            ev = {'kind': 'low', 't': ts, 't_end': None, 'value': rnd(bg[i], 'bg'),
+                  'label': 'recorded BG %.1f mmol/l (below 3.9) followed here' % (bg[i] / MGDL_PER_MMOL)}
+            if i in manual_starts:
+                ev['manual'] = True
+                ev['label'] += ' (%s)' % MANUAL_LOW_LABEL
+            events.append(ev)
         if i > 0 and (lo[i], hi[i]) != (lo[i - 1], hi[i - 1]) and lo[i] is not None and hi[i] is not None:
             events.append({'kind': 'target_change', 't': ts, 't_end': None, 'value': [rnd(lo[i], 'bg'), rnd(hi[i], 'bg')],
                            'label': 'target %.1f-%.1f mmol/l' % (lo[i] / MGDL_PER_MMOL, hi[i] / MGDL_PER_MMOL)})
@@ -379,7 +399,7 @@ def _header(kind, day, vhash, variant, t_abs, window=None):
 
 
 def series_from_rows(names, rows, day=None, vhash=contracts.BASE_VHASH, variant='base', pred=None, window=None,
-                     events=None):
+                     events=None, manual_boluses=None, prehypo_exclude_h=None):
     """(emul_series, orig_series) from a parsed result CSV. `pred` = emulator_core.Pred right after the replay
     (optional). `events` are merged into the orig document's events. `day` defaults to the UTC date of the first
     loop; `t` is relative to its 00:00 UTC even for loops that run past midnight."""
@@ -420,7 +440,11 @@ def series_from_rows(names, rows, day=None, vhash=contracts.BASE_VHASH, variant=
     for col, key, kind in ORIG_COLUMNS:
         orig[key] = [rnd(v, kind) for v in _num(rows, col)]
     orig['low_ahead'], orig['high_ahead'] = hindsight(t_abs, bg)
-    orig['events'] = sorted(events_from_rows(rows, day_start(day)) + list(events or []),
+    if manual_boluses is not None:
+        bgv = [b if b is not None else LOW_MGDL + 1.0 for b in bg]
+        cov = _metrics.hindsight_covariates(t_abs, bgv, manual_boluses, prehypo_exclude_h)
+        orig['manual_low_ahead'] = cov['before_manual_low_2h']
+    orig['events'] = sorted(events_from_rows(rows, day_start(day), manual_boluses, prehypo_exclude_h) + list(events or []),
                             key=lambda e: (e.get('t') or 0, e.get('kind', '')))
     return emul, orig
 
