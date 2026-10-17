@@ -341,3 +341,82 @@ def test_day_without_an_entries_file(tmp_path):
     assert ch['cgm_note'] == days.NO_CGM_FILE and ch['bg_mean'] is None
     assert days.NO_CGM_FILE in days.confounders(DAY, {}, object(), [make_loop(START)], cache_root=root)
     assert days.quarantine_reasons(DAY, meta={'character': ch}) == []
+
+
+# ----------------------------------------------------------------------------- H-714: looped vs silent CGM gaps
+
+def _write_devicestatus(root, day, stamps, offset=120):
+    path = days.devicestatus_file(root, day)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    from ns_client import to_iso
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump([{'created_at': to_iso(ms + 6000), 'utcOffset': offset,
+                    'openaps': {'suggested': {'deliverAt': to_iso(ms), 'reason': 'x'}}} for ms in stamps]
+                  + [{'created_at': to_iso(stamps[0]), 'pump': {}}] if stamps else [], fh)      # no loop result
+
+
+def test_silent_cgm_gap_is_a_badge_not_a_reason(tmp_path):
+    """CGM missing 00:20-02:20Z and the phone silent the same time (the H-714 finding: the phone uploaded
+    nothing): cgm_gap_min 120+, cgm_gap_looped_min ~0, phone_silent_min = the gap, a 'no CGM and no loop' badge instead of
+    the 'cgm gap' badge, and no quarantine reason even above the threshold."""
+    root = str(tmp_path / 'host')
+    cgm = _every_5(START, START + 20 * MIN) + _every_5(START + 2 * H + 20 * MIN + 30 * MIN, END)       # gap 00:15-02:50
+    _write_entries(root, DAY, cgm)
+    ds = _every_5(START, START + 20 * MIN) + _every_5(START + 2 * H + 50 * MIN, END)
+    _write_devicestatus(root, DAY, ds)
+    cd = days.cgm_day(DAY, cache_root=root)
+    assert cd['cgm_gap_min'] == 155 and cd['cgm_gap_looped_min'] == 0 and cd['phone_silent_min'] == 155
+    loops = [make_loop(ms) for ms in ds]
+    ch = days.character(DAY, object(), loops, cache_root=root)
+    assert ch['cgm_gap_min'] == 155 and ch['cgm_gap_looped_min'] == 0 and ch['phone_silent_min'] == 155
+    out = days.confounders(DAY, {}, object(), loops, cache_root=root)
+    assert 'no CGM and no loop 155 min 02h15-04h50 local' in out
+    assert not any(b.startswith('cgm gap') for b in out)
+    assert 'phone not looping for 155 min 02h15-04h50 local' in out                    # the loop-gap badge stays
+    for badge in out:
+        from hindcast import lint
+        lint.lint_text(badge, kind='line')
+        lint.lint_text(badge, kind='issue')
+    assert days.quarantine_reasons(DAY, meta={'character': ch, 'confounders': out}) == []
+    old = {'character': {k: v for k, v in ch.items() if k not in ('cgm_gap_looped_min', 'phone_silent_min')}}
+    assert days.quarantine_reasons(DAY, meta=old) == ['CGM gap 155 min (threshold 120 min)']   # old meta: whole gap
+
+
+def test_looped_cgm_gap_quarantines(tmp_path):
+    """CGM missing 10:00-13:00Z while the phone kept looping except 11:00-11:30: 150 min looped (the loops the replay
+    drops as no_cgm), 30 min silent; the looped part is the reason."""
+    root = str(tmp_path / 'host')
+    _write_entries(root, DAY, _every_5(START, START + 10 * H + 5 * MIN) + _every_5(START + 13 * H, END))
+    ds = _every_5(START, START + 11 * H + 5 * MIN) + _every_5(START + 11 * H + 30 * MIN, END)
+    _write_devicestatus(root, DAY, ds[:-3])
+    _write_devicestatus(root, days.day_add(DAY, 1), ds[-3:])                                   # upload lag: next file
+    cd = days.cgm_day(DAY, cache_root=root)
+    assert cd['gaps'] == [(START + 10 * H, START + 13 * H, 180)]
+    assert cd['silent'] == [(START + 11 * H, START + 11 * H + 30 * MIN, 30)]
+    assert cd['cgm_gap_looped_min'] == 150 and cd['phone_silent_min'] == 30
+    loops = [make_loop(ms) for ms in ds]
+    ch = days.character(DAY, object(), loops, cache_root=root)
+    out = days.confounders(DAY, {}, object(), loops, cache_root=root)
+    assert 'cgm gap 180 min 12h00-15h00 local (150 min of it looping)' in out
+    assert 'no CGM and no loop 30 min 13h00-13h30 local' in out
+    assert days.quarantine_reasons(DAY, meta={'character': ch}) == \
+        ['CGM gap 150 min with the phone looping (threshold 120 min)']
+
+
+def test_gap_without_devicestatus_file_falls_back_to_the_whole_gap(tmp_path):
+    root = str(tmp_path / 'host')
+    _write_entries(root, DAY, _every_5(START, START + 10 * H + 5 * MIN) + _every_5(START + 13 * H, END))
+    ch = days.character(DAY, object(), [make_loop(START)], cache_root=root)
+    assert ch['cgm_gap_looped_min'] == 180 and ch['phone_silent_min'] is None
+    assert 'cgm gap 180 min 12h00-15h00 local' in days.confounders(DAY, {}, object(), [make_loop(START)], cache_root=root)
+    assert days.quarantine_reasons(DAY, meta={'character': ch}) == ['CGM gap 180 min (threshold 120 min)']
+
+
+def test_loop_stamps_reads_only_loop_results():
+    from ns_client import to_iso
+    recs = [{'openaps': {'suggested': {'deliverAt': to_iso(START + MIN)}}},
+            {'openaps': {'suggested': {'deliverAt': to_iso(START + MIN)}}},               # duplicate upload
+            {'openaps': {'iob': {}}, 'created_at': to_iso(START + 2 * MIN)},                # no loop result
+            {'pump': {}, 'created_at': to_iso(START + 3 * MIN)},
+            {'openaps': {'suggested': {'deliverAt': to_iso(END)}}}, 'junk']                 # outside
+    assert days.loop_stamps(recs, START, END) == [START + MIN]

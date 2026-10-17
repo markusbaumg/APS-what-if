@@ -27,8 +27,14 @@ Every card passes lint.lint_text(text, kind='card') (the vocabulary of DESIGN.md
 paragraph) or it is NOT written: write_cards() reports the refusal with the offending phrase and goes on with the
 next card; `hc card` then exits 2. Numbers come from round.analyze() (metrics.py), never from this module.
 
-Files: studies/<study>/cards/<rank>.md and <rank>.vdf for ranked variants; cards/<short vhash>.md for a variant
-without a rank (infeasible, pending) asked for by --vhash. The honesty rule on names: the card prints "review
+Numbering (H-716, card_order): the variants recommended for review first, then the candidates, then the ties, each
+group in the review order (metrics.review_order_key: the floor multiple on the review component, descending, the
+same order round.json, status.json and the page use); the card's own text still names the review-order position.
+`hc study run` writes the cards at the end of every finished round through the same write_cards() as `hc card`.
+
+Files: studies/<study>/cards/<n>.md and <n>.vdf (n = card number) for ranked variants; cards/<short vhash>.md for a
+variant without a number (infeasible, pending) asked for by --vhash. A full rewrite (no --rank / --vhash / --out)
+removes numbered cards left from an earlier numbering. The honesty rule on names: the card prints "review
 order" for question explore and "rank" only for earlier / gentler; the verdict word for the contract value
 'recommended' is "recommended for review".
 """
@@ -160,9 +166,30 @@ def _position_word(question):
     return 'review order' if question == 'explore' else 'rank'
 
 
-def card_number(report):
-    """The number in the title: the rank (review-order position) or None."""
-    return report.rank
+CARD_GROUPS = {'recommended': 0, 'candidate': 1, 'tie': 2}   # H-716: the card numbering; every other verdict after
+
+
+def card_order(analysis):
+    """The reports that get a card number, in card-number order (H-716): the variants recommended for review first,
+    then the candidates, then the ties (then any other ranked verdict, e.g. dead), each group in the review order
+    (analysis.order = metrics.review_order_key for explore, the ranked order for earlier / gentler). Infeasible and
+    pending variants have no number."""
+    ranked = [analysis.reports[vh] for vh in analysis.order if vh in analysis.reports and vh != BASE_VHASH]
+    pos = {r.vhash: i for i, r in enumerate(ranked)}
+    return sorted(ranked, key=lambda r: (CARD_GROUPS.get(r.verdict, len(CARD_GROUPS)), pos[r.vhash]))
+
+
+def card_numbers(analysis):
+    """{vhash: card number} (1-based position in card_order)."""
+    return {r.vhash: i for i, r in enumerate(card_order(analysis), 1)}
+
+
+def card_number(report, analysis=None):
+    """The number in the title and the file name: the position in card_order(analysis); without an analysis the
+    rank (review-order position); None for a variant without one."""
+    if analysis is None:
+        return report.rank
+    return card_numbers(analysis).get(report.vhash)
 
 
 def _title(report, number):
@@ -390,7 +417,8 @@ def _tie_lines(report, analysis):
         other = analysis.reports.get(vh)
         if other is None:
             continue
-        who = f'candidate {other.rank}' if other.rank is not None else f'variant {contracts.short(vh)}'
+        n = card_number(other, analysis)
+        who = f'candidate {n}' if n is not None else f'variant {contracts.short(vh)}'
         out.append(f'Not distinguishable from {who} ({other.variant}) within the noise floor.')
     return out or ['No tie with another listed variant within the noise floor (ties are checked for the first '
                    f'{rnd.TIE_SCAN} of the order).']
@@ -417,7 +445,7 @@ def unlock_lines(study):
 def card_text(report, analysis, settings=None, prefs_map=None, number=None):
     """The Markdown card of one VariantReport (not yet linted; see write_card)."""
     prefs_map = load_prefs_map() if prefs_map is None else prefs_map
-    number = card_number(report) if number is None else number
+    number = card_number(report, analysis) if number is None else number
     study = analysis.study
     lines = [_title(report, number), '',
              f'Study `{study.name}`, question {study.question}; verdict: **{st.verdict_label(report.verdict)}**. {report.why}', '',
@@ -455,20 +483,21 @@ def write_card(path, text, vdf_path=None, vdf_text=None):
 
 
 def select_reports(analysis, ranks=None, vhashes=None, top=DEFAULT_TOP):
-    """The reports to write cards for: by rank, by (short) vhash, else the first `top` of the order."""
+    """The reports to write cards for: by card number (`ranks`), by (short) vhash, else the first `top` of
+    card_order (recommended for review first, then candidates, then ties, each in the review order)."""
     out = []
+    ordered = card_order(analysis)
     for r in ranks or []:
-        rep = analysis.by_rank(int(r))
-        if rep is None:
-            raise CardError(f'no variant has {_position_word(analysis.question)} {r} (the order has {len(analysis.order)} entries)')
-        out.append(rep)
+        if not 1 <= int(r) <= len(ordered):
+            raise CardError(f'no variant has card number {r} (the order has {len(ordered)} entries)')
+        out.append(ordered[int(r) - 1])
     for vh in vhashes or []:
         hits = [rep for h, rep in analysis.reports.items() if h == vh or h.startswith(vh)] if vh else []
         if len(hits) != 1:
             raise CardError(f'vhash {vh!r} matches {len(hits)} variants')
         out.append(hits[0])
     if not ranks and not vhashes:
-        out = [analysis.reports[vh] for vh in analysis.order[:top]]
+        out = ordered[:top]
     seen, uniq = set(), []
     for rep in out:
         if rep.vhash not in seen and rep.vhash != BASE_VHASH:
@@ -477,25 +506,53 @@ def select_reports(analysis, ranks=None, vhashes=None, top=DEFAULT_TOP):
     return uniq
 
 
-def card_paths(out_dir, report):
-    label = str(report.rank) if report.rank is not None else contracts.short(report.vhash)
+def card_paths(out_dir, report, number=None):
+    label = str(number) if number is not None else (str(report.rank) if report.rank is not None
+                                                     else contracts.short(report.vhash))
     return label, os.path.join(out_dir, f'{label}.md'), os.path.join(out_dir, f'{label}.vdf')
 
 
+def _prune_numbered(out_dir, keep):
+    """Remove the numbered cards (<n>.md / <n>.vdf) of `out_dir` whose label is not in `keep`: after a full
+    rewrite a card number left over from an earlier numbering would name another variant. Returns the paths."""
+    removed = []
+    try:
+        names = os.listdir(out_dir)
+    except OSError:
+        return removed
+    for name in sorted(names):
+        stem, ext = os.path.splitext(name)
+        if ext in ('.md', '.vdf') and stem.isdigit() and stem not in keep:
+            path = os.path.join(out_dir, name)
+            try:
+                os.remove(path)
+                removed.append(path)
+            except OSError:
+                pass
+    return removed
+
+
 def write_cards(study_dir, ranks=None, vhashes=None, top=DEFAULT_TOP, settings=None, out_dir=None, prefs_map=None,
-                log=None, analysis=None):
-    """Cards for the selected variants into studies/<study>/cards/ (or `out_dir`); returns
-    ([(label, md path, vdf path)], [(label, refusal text)]). A card that fails the lint is reported, not written."""
+                log=None, analysis=None, prune=None):
+    """THE card writer of `hc card` and of `hc study run` (the orchestrator calls it at the end of every finished
+    round with the round's analysis, H-716). Cards for the selected variants into studies/<study>/cards/ (or
+    `out_dir`), numbered by card_order; returns ([(label, md path, vdf path)], [(label, refusal text)]). A card
+    that fails the lint is reported, not written. `prune` (default: True for the default selection - no ranks,
+    no vhashes - into the study's own cards/ directory) removes numbered cards left from an earlier numbering."""
     sd = study_dir if isinstance(study_dir, st.StudyDir) else st.StudyDir(study_dir)
     log = log or (lambda text: None)
     if analysis is None:
         analysis = analysis_of(sd, settings)
+    if prune is None:
+        prune = not ranks and not vhashes and out_dir is None
     out_dir = out_dir or os.path.join(sd.path, CARDS_DIR)
     prefs_map = load_prefs_map() if prefs_map is None else prefs_map
+    numbers = card_numbers(analysis)
     written, refused = [], []
     for rep in select_reports(analysis, ranks, vhashes, top):
-        label, md, vdf = card_paths(out_dir, rep)
-        text = card_text(rep, analysis, settings, prefs_map)
+        number = numbers.get(rep.vhash)
+        label, md, vdf = card_paths(out_dir, rep, number)
+        text = card_text(rep, analysis, settings, prefs_map, number=number)
         try:
             write_card(md, text, vdf, vdf_text_of(rep, analysis))
         except CardError as e:
@@ -504,6 +561,8 @@ def write_cards(study_dir, ranks=None, vhashes=None, top=DEFAULT_TOP, settings=N
             continue
         written.append((label, md, vdf))
         log(f'card {label}: {md}')
+    if prune:
+        _prune_numbered(out_dir, {label for label, _md, _vdf in written})
     return written, refused
 
 
@@ -511,11 +570,12 @@ def write_cards(study_dir, ranks=None, vhashes=None, top=DEFAULT_TOP, settings=N
 
 def register(subparsers):
     """Add the `card` subcommand (cli.py's convention: `func(args) -> int`)."""
-    p = subparsers.add_parser('card', help='linted candidate cards -> studies/<study>/cards/<rank>.md (+ .vdf)')
+    p = subparsers.add_parser('card', help='linted candidate cards -> studies/<study>/cards/<n>.md (+ .vdf)')
     p.add_argument('name', help='study name or directory')
-    p.add_argument('--rank', action='append', type=int, default=None, help='the review-order position(s) to write (repeatable)')
+    p.add_argument('--rank', action='append', type=int, default=None,
+                   help='the card number(s) to write (repeatable): recommended for review first, then candidates, then ties, each in the review order')
     p.add_argument('--vhash', action='append', default=None, help='a variant by (short) vhash, also unranked ones')
-    p.add_argument('--top', type=int, default=DEFAULT_TOP, help=f'without --rank/--vhash: the first N of the order (default {DEFAULT_TOP})')
+    p.add_argument('--top', type=int, default=DEFAULT_TOP, help=f'without --rank/--vhash: the first N card numbers (default {DEFAULT_TOP})')
     p.add_argument('--out', default=None, help='directory for the cards (default studies/<study>/cards/)')
     p.add_argument('--studies-dir', default=st.STUDIES_DIR)
     p.add_argument('--settings', default=contracts.NS_SETTINGS_PATH)

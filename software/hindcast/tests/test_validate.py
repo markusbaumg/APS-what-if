@@ -501,3 +501,55 @@ def test_non_validate_recommended_why_reads_objective_recommend():
     lint_clean(why)
     _verdict, default_why = rnd.verdict_of(rep, [], S)
     assert 'top-3 on at least 80 %' in default_why and 'within the top 5' in default_why
+
+
+# ----------------------------------------------------------------------------- H-715 / H-716 on a study directory
+H715_VARIANTS = {
+    'A': ({'profile autoISF_max': tr.PHONE_MAX, 'profile dura_ISF_weight': 0.5}, dict(rise=0.8, rest=0.0)),
+    'B': ({'profile autoISF_max': tr.PHONE_MAX, 'profile dura_ISF_weight': 0.6}, dict(rise=0.6, rest=0.0)),
+}
+
+
+def h715_study_dir(tmp_path):
+    """A: 4 x floor on rise on the first search day, 4 x floor on rest on the other two (review_score 4, floor
+    multiple 8/3 on rest); B: 3 x floor on rise on every day (review_score 3, floor multiple 3). Validate top 1."""
+    sd, study = tr.make_study_with_rows(tmp_path, variants=H715_VARIANTS, holdout=['2026-09-05', '2026-09-06'], tags={})
+    study.phases.append(Phase(kind='validate', top=1, days='holdout'))
+    sd.write_study(study)
+    rows = sd.trials()
+    for r in rows:
+        if r.params == H715_VARIANTS['A'][0] and r.day in ('2026-09-02', '2026-09-03'):
+            r.metrics = tr.mk(rise=0.0, rest=0.2)
+    with open(sd.trials_path, 'w', encoding='utf-8') as fh:
+        for r in rows:
+            fh.write(r.to_compact_json() + '\n')
+    return sd, sd.load_study(tr.SETTINGS)
+
+
+def test_one_review_order_on_every_surface(tmp_path):
+    sd, study = h715_study_dir(tmp_path)
+    a_vh, b_vh = c.vhash(H715_VARIANTS['A'][0]), c.vhash(H715_VARIANTS['B'][0])
+    analysis = rnd.analyze(study, sd.trials(), tr.SETTINGS)
+    ra, rb = analysis.reports[a_vh], analysis.reports[b_vh]
+    assert ra.review_score > rb.review_score                         # the old key would put A first
+    assert rnd.floor_multiple_of(ra) == pytest.approx(8 / 3) and rnd.floor_multiple_of(rb) == pytest.approx(3.0)
+    assert ra.review_component == 'rest_vs_base_U'
+    assert analysis.order == [b_vh, a_vh] and rb.rank == 1           # rank_variants
+    assert analysis.validation.validated == [rb.variant]             # the validate top-N (metrics)
+    points, _ = search.validate_points(study, sd.trials(), study.phases[-1], settings=tr.SETTINGS)
+    assert points == [H715_VARIANTS['B'][0]]                         # the validate top-N (search plan)
+    doc, status = rnd.produce(sd, round_no=2, phase='validate', settings=tr.SETTINGS)
+    assert [v.vhash for v in doc.variants if v.verdict != 'base'][:2] == [b_vh, a_vh]
+    assert doc.front[:2] == [b_vh, a_vh]
+    by = {v.vhash: v for v in doc.variants}
+    assert by[b_vh].effect['floor_multiple'] == pytest.approx(3.0) and by[a_vh].effect['floor_multiple'] == pytest.approx(2.667)
+    assert '(2.7 x floor)' in by[a_vh].why                           # the why prints the review order key
+    assert status.top[0].vhash == c.short(b_vh)                      # status.json top
+    assert [r.vhash for r in cards.card_order(analysis)][:2] == [b_vh, a_vh]
+    ps = report.parameter_space(study, sd.trials(), [doc])           # the page's leaderboard
+    assert [v['vhash'] for v in ps['variants']][:2] == [b_vh, a_vh]
+    first = ps['variants'][0]
+    assert first['floor_multiple'] == pytest.approx(3.0) and first['floor_multiples']['rise_vs_base_U'] == pytest.approx(3.0)
+    assert ps['variants'][1]['review_score'] > first['review_score']  # kept in the row for the record
+    js = open(os.path.join(report.TEMPLATES_DIR, 'views', 'parameters.js'), encoding='utf-8').read()
+    assert "text: 'x floor'" in js and 'fmt.num(v.floor_multiple' in js and 'fmt.num(v.review_score' not in js

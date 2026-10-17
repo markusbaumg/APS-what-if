@@ -624,3 +624,31 @@ def test_session_rounds_log_round_lines_and_one_exit_line(tmp_path, fake):
     in_round = [r for r in rows_of(sd) if r.round == 3]
     assert int(m.group(2)) == sum(1 for r in in_round if r.control in st.CONTROL_KINDS) == 2
     assert not lint.lint_findings(body, 'issue')
+
+
+def test_every_finished_round_writes_the_cards_through_write_cards(tmp_path, fake, monkeypatch):
+    """H-716: the orchestrator calls cards.write_cards (the function of `hc card`) with the round's analysis at
+    the end of every round; the cards on disk equal what `hc card` writes."""
+    from hindcast import cards
+    calls = []
+    original = cards.write_cards
+
+    def spy(study_dir, **kw):
+        calls.append(kw)
+        return original(study_dir, **kw)
+    monkeypatch.setattr(cards, 'write_cards', spy)
+    sd = new_study(tmp_path)
+    o, lines = orch(sd, batch=6)
+    assert o.run() == 0
+    assert len(calls) == o.round_no == 3
+    assert all(kw.get('analysis') is not None and not kw.get('ranks') and not kw.get('vhashes') for kw in calls)
+    out = os.path.join(sd.path, cards.CARDS_DIR)
+    on_disk = sorted(os.listdir(out)) if os.path.isdir(out) else []
+    a = cards.analysis_of(sd, o.settings)
+    want = cards.card_order(a)[:cards.DEFAULT_TOP]
+    assert want and len(on_disk) == 2 * len(want)                       # <n>.md + <n>.vdf per card number
+    by_hand = str(tmp_path / 'by_hand')
+    original(sd, settings=o.settings, analysis=a, out_dir=by_hand)
+    assert sorted(os.listdir(by_hand)) == on_disk
+    for name in on_disk:
+        assert open(os.path.join(out, name), encoding='utf-8').read() == open(os.path.join(by_hand, name), encoding='utf-8').read()

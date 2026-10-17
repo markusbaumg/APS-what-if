@@ -25,8 +25,8 @@ unless `--allow-partial`.
 
 Character record (numbers of the day, written into <day>.meta.json, shown as the day strip on the page; mg/dl):
     loops, tdd_U (= bolus_U + basal_U), bolus_U, smb_U, basal_U, carbs_g, cgm_values, bg_mean, pct_gt180, pct_lt70,
-    tt_minutes, tt_parity_smb_off_pct, cgm_gap_min, cgm_gaps (count >= GAP_MIN), cgm_note, loop_gap_min, activity_min,
-    duplicate_pct, autoISF_versions
+    tt_minutes, tt_parity_smb_off_pct, cgm_gap_min, cgm_gaps (count >= GAP_MIN), cgm_gap_looped_min, phone_silent_min,
+    cgm_note, loop_gap_min, activity_min, duplicate_pct, autoISF_versions
 The CGM numbers (cgm_values, bg_mean, the percentages, cgm_gap_min, cgm_gaps) come from the sgv entries of the
 UTC day, read from the cache file entries/<day>.json when the caller passes `cache_root` (freeze, recompute), else
 from the source's `entries` (only the entries inside the day count, the 8 h look-back is ignored). Gaps are
@@ -34,16 +34,25 @@ clipped at midnight: each day accounts only for its own hours. No sgv entry in t
 day is a gap from the day start (00:00Z) to the first entry, none in its last GAP_MIN minutes a gap from the last
 entry to 24:00Z; a sensor gap that spans midnight is split between the two days, each counting its own part (the
 previous and the next day's files are not consulted). A day without an entries file has cgm_gap_min None and
-cgm_note 'no CGM file'. loop_gap_min is the longest pause between the day's loop runs: the phone not looping (off,
-pump offline, closed loop paused) is a different thing from a CGM gap
-and is never a quarantine reason.
+cgm_note 'no CGM file'. Each CGM gap is split by the loop runs of the cached devicestatus files devicestatus/<day>
+and <day+1> (every record with a loop result, also the ones the replay drops; H-714): pauses >= GAP_MIN between
+runs inside the gap are time with no CGM and no loop (AAPS runs no loop without CGM; the phone often kept uploading pump status - the
+replay loses no loop there), the rest is time the phone looped without CGM (those loops are dropped as no_cgm: the
+real loss). cgm_gap_looped_min is the largest looped part of one CGM gap, phone_silent_min the silent minutes of all
+CGM gaps; without a devicestatus file cgm_gap_looped_min = cgm_gap_min and phone_silent_min None. loop_gap_min is the
+longest pause between the day's replayed loop runs: the phone not looping (off, pump offline, closed loop paused)
+is a different thing from a CGM gap and is never a quarantine reason.
 `tdd_U` is insulin the pump delivered as recorded in Nightscout (boluses + temp basals + scheduled basal where no
 temp ran), not the phone's own TDD statistic. The character describes the day; it is never a score and never
 inferred into chips - day chips (`workday`, `sport`) are typed by the user in study.json (DESIGN.md section 4.5).
 
 Confounders (strings for the badges; local time of the phone from the records' utcOffset):
-    settings changes from ns_settings.json profile_history inside the day, CGM gaps >= GAP_MIN minutes ('cgm gap N
-    min 02h00-03h52 local', clipped at the UTC day edges; 'no CGM file' without entries), the phone not looping >= LOOP_GAP_MIN minutes ('phone not looping for N min 07h34-17h44 local'),
+    settings changes from ns_settings.json profile_history inside the day, CGM gaps >= GAP_MIN minutes during which
+    the phone looped >= GAP_MIN minutes ('cgm gap N min 02h00-03h52 local', ' (M min of it looping)' when part of it
+    was silent; clipped
+    at the UTC day edges; 'no CGM file' without entries), the silent parts of CGM gaps ('no CGM and no loop N min
+    00h20-02h20 local (no CGM, no loop)'; never a quarantine reason by itself), the phone not looping >= LOOP_GAP_MIN
+    minutes ('phone not looping for N min 07h34-17h44 local'),
     autoISF version
     changes inside the day (H-712: the smoother changed with
     3.2.1), Profile Switches with a percentage or time shift, Temporary Targets longer than LONG_TT_MIN.
@@ -57,9 +66,10 @@ Quarantine (H-204, DESIGN.md section 5.4 phase 0). A day is quarantined - listed
 status.json, excluded from scoring, never hidden - when any of these holds:
     1. the base replay's `agreement_pct` is below `agreement_pct_min` (94 %: the study would measure the emulator,
        not the settings),
-    2. the longest CGM gap of the day exceeds `cgm_gap_max_min` (120 min; from the frozen meta's character record
-       `cgm_gap_min`, measured on the CGM entries as described above, or from raw entries when given; loop gaps
-       never count),
+    2. the looped part of a CGM gap exceeds `cgm_gap_max_min` (120 min; from the frozen meta's character record
+       `cgm_gap_looped_min`, measured on the CGM entries and the devicestatus loop runs as described above, or from
+       raw entries (+ devicestatus records) when given; an old meta without the key, or a day without devicestatus,
+       falls back to the whole gap `cgm_gap_min`; silent phone time and loop gaps never count),
     3. ns_settings.json `profile_history` records a change INSIDE the day of a key the study searches (the phone's
        own value of that key is not one value on that day),
     4. the loop counts of the day's trials differ across variants (state leaked between in-process replays, or a
@@ -422,12 +432,80 @@ def cgm_day(day, src=None, cache_root=None, min_gap_min=GAP_MIN):
     if cache_root is not None:
         recs = read_entries_file(cache_root, day)
         if recs is None:
-            return {'cgm': [], 'gaps': [], 'cgm_gap_min': None, 'cgm_gaps': None, 'note': NO_CGM_FILE}
+            return {'cgm': [], 'gaps': [], 'cgm_gap_min': None, 'cgm_gaps': None, 'note': NO_CGM_FILE,
+                    'looped': [], 'silent': [], 'cgm_gap_looped_min': None, 'phone_silent_min': None}
     else:
         recs = getattr(src, 'entries', None) or []
     cgm = entries_in(recs, start, end)
     g = gaps([ms for ms, _ in cgm], start, end, min_gap_min)
-    return {'cgm': cgm, 'gaps': g, 'cgm_gap_min': max([m for _, _, m in g], default=0), 'cgm_gaps': len(g), 'note': None}
+    out = {'cgm': cgm, 'gaps': g, 'cgm_gap_min': max([m for _, _, m in g], default=0), 'cgm_gaps': len(g), 'note': None}
+    out.update(split_cgm_gaps(g, day_loop_stamps(day, src, cache_root), min_gap_min))
+    return out
+
+
+def devicestatus_file(cache_root, day):
+    """<cache_root>/devicestatus/<day>.json"""
+    return os.path.join(cache_root, 'devicestatus', day + '.json')
+
+
+def read_devicestatus_file(cache_root, day):
+    """The records of the cached devicestatus day file, None when the file is missing or unreadable."""
+    try:
+        with open(devicestatus_file(cache_root, day), 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def loop_stamps(records, start_ms, end_ms):
+    """Run times (ns_source.loop_ms) of the devicestatus records that carry a loop result (openaps.suggested) inside
+    [start, end), ascending, duplicates once. Every run counts, also the ones the replay drops (no_cgm, aborted):
+    the question is whether the phone looped, not whether the loop is replayable."""
+    out = set()
+    for rec in records or []:
+        if not isinstance(rec, dict) or not isinstance(rec.get('openaps'), dict) or not rec['openaps'].get('suggested'):
+            continue
+        ms = ns_source.loop_ms(rec)
+        if ms is not None and start_ms <= ms < end_ms:
+            out.add(ms)
+    return sorted(out)
+
+
+def day_loop_stamps(day, src=None, cache_root=None):
+    """The day's loop run times from the devicestatus records: with `cache_root` the cache files devicestatus/<day>
+    and <day+1> (the upload lag of the last loops), else the source's `devicestatus`; None when neither exists (a
+    FrozenSource, a day whose devicestatus file is not cached)."""
+    start, end = day_bounds(day)
+    if cache_root is not None:
+        recs = read_devicestatus_file(cache_root, day)
+        if recs is None:
+            return None
+        recs = list(recs) + list(read_devicestatus_file(cache_root, day_add(day, 1)) or [])
+    else:
+        recs = getattr(src, 'devicestatus', None)
+        if not isinstance(recs, list):
+            return None
+    return loop_stamps(recs, start, end)
+
+
+def split_cgm_gaps(cgm_gaps_, stamps, min_gap_min=GAP_MIN):
+    """Split each CGM gap (a, b, minutes) into the time the phone looped and the time it was silent (no CGM and no
+    loop run: pauses >= min_gap_min between the loop runs inside the gap, clipped at the gap edges, gaps()).
+    {'looped': [minutes looped per CGM gap], 'silent': [(a, b, minutes)], 'cgm_gap_looped_min': the largest looped
+    part of one CGM gap (from the exact times, not the rounded minutes), 'phone_silent_min': the silent minutes of
+    all CGM gaps}; with `stamps` None (no
+    devicestatus) the looped parts are the whole gaps and phone_silent_min is None."""
+    if stamps is None:
+        return {'looped': [m for _, _, m in cgm_gaps_], 'silent': [],
+                'cgm_gap_looped_min': max([m for _, _, m in cgm_gaps_], default=0), 'phone_silent_min': None}
+    looped, silent = [], []
+    for a, b, minutes in cgm_gaps_:
+        quiet = gaps(stamps, a, b, min_gap_min)
+        silent.extend(quiet)
+        looped.append(max(0, round(((b - a) - sum(qb - qa for qa, qb, _ in quiet)) / MIN_MS)))
+    return {'looped': looped, 'silent': silent, 'cgm_gap_looped_min': max(looped, default=0),
+            'phone_silent_min': sum(m for _, _, m in silent)}
 
 
 def loop_gaps(day, loops, min_gap_min=LOOP_GAP_MIN):
@@ -576,6 +654,8 @@ def character(day, src, loops, cache_root=None):
         rec['bg_mean'] = rec['pct_gt180'] = rec['pct_lt70'] = None
     rec['cgm_gap_min'] = cd['cgm_gap_min']
     rec['cgm_gaps'] = cd['cgm_gaps']
+    rec['cgm_gap_looped_min'] = cd['cgm_gap_looped_min']
+    rec['phone_silent_min'] = cd['phone_silent_min']
     rec['cgm_note'] = cd['note']
 
     rec['tt_minutes'] = _tt_minutes(src, start, end)
@@ -639,8 +719,15 @@ def confounders(day, settings, src, loops, min_gap_min=GAP_MIN, cache_root=None)
     cd = cgm_day(day, src, cache_root, min_gap_min)
     if cd['note'] == NO_CGM_FILE:
         out.append(NO_CGM_FILE)
-    for a, b, minutes in cd['gaps']:
-        out.append(f'cgm gap {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
+    known = cd['phone_silent_min'] is not None
+    for (a, b, minutes), looped in zip(cd['gaps'], cd['looped']):
+        if not known:
+            out.append(f'cgm gap {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
+        elif looped >= min_gap_min:                         # a few minutes of loops right after the last reading
+            out.append(f'cgm gap {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local'
+                       + ('' if looped == minutes else f' ({looped} min of it looping)'))
+    for a, b, minutes in cd['silent']:
+        out.append(f'no CGM and no loop {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
     for a, b, minutes in loop_gaps(day, loops):
         out.append(f'phone not looping for {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
     last_v = None
@@ -747,10 +834,12 @@ def _fmt_minutes(v):
 
 
 def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, meta=None, entries=None,
-                       loop_counts=None, thresholds=None):
+                       loop_counts=None, thresholds=None, devicestatus=None):
     """The reasons `day` is quarantined ([] = it takes part in scoring). Pieces, each optional:
-    `base_metrics` the base trial's metrics dict (agreement_pct), `meta` the frozen meta (character.cgm_gap_min) or
-    `entries` raw CGM entries (the gap is measured here, clipped at the day edges like cgm_day()), `settings` + `searched_keys` for the profile_history rule,
+    `base_metrics` the base trial's metrics dict (agreement_pct), `meta` the frozen meta (character.cgm_gap_looped_min,
+    character.cgm_gap_min for an old meta or a day without devicestatus) or `entries` raw CGM entries (the gap is
+    measured here, clipped at the day edges like cgm_day(); with `devicestatus` records only its looped part counts),
+    `settings` + `searched_keys` for the profile_history rule,
     `loop_counts` {variant: loops} or a list of loop counts of the day's trials. Strings are lint-clean for the kinds
     'line' and 'issue'."""
     thr = quarantine_thresholds(None, thresholds)
@@ -760,14 +849,23 @@ def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, 
         if isinstance(pct, (int, float)) and not isinstance(pct, bool) and pct < thr['agreement_pct_min']:
             out.append(f'base agreement {pct:.1f} % (threshold {thr["agreement_pct_min"]:g} %): the replay would '
                        f'measure the emulator, not the settings')
-    gap = None
+    gap, looped = None, False
     if entries is not None:
         start, end = day_bounds(day)
-        gap = max([m for _, _, m in cgm_gaps(entries, start, end)], default=0)
+        g = cgm_gaps(entries, start, end)
+        if devicestatus is not None:
+            gap, looped = split_cgm_gaps(g, loop_stamps(devicestatus, start, end))['cgm_gap_looped_min'], True
+        else:
+            gap = max([m for _, _, m in g], default=0)
     elif isinstance(meta, dict):
-        gap = ((meta.get('character') or {}).get('cgm_gap_min'))
+        ch = meta.get('character') or {}
+        if 'cgm_gap_looped_min' in ch and ch.get('phone_silent_min') is not None:
+            gap, looped = ch['cgm_gap_looped_min'], True
+        else:                                               # an old meta, or no devicestatus: the whole CGM gap
+            gap = ch.get('cgm_gap_min')
     if isinstance(gap, (int, float)) and not isinstance(gap, bool) and gap > thr['cgm_gap_max_min']:
-        out.append(f'CGM gap {_fmt_minutes(gap)} min (threshold {thr["cgm_gap_max_min"]:g} min)')
+        out.append(f'CGM gap {_fmt_minutes(gap)} min{" with the phone looping" if looped else ""} '
+                   f'(threshold {thr["cgm_gap_max_min"]:g} min)')
     for when, key, old, new in history_hits(settings, day, searched_keys):
         out.append(f'profile_history: {key} changed {_fmt(old)}->{_fmt(new)} inside the day and {key} is a searched key')
     counts = loop_counts.values() if isinstance(loop_counts, dict) else (loop_counts or [])
@@ -866,7 +964,7 @@ def quarantine_listing(reasons_by_day, thresholds=None):
         for d, reasons in q.items():
             for i, r in enumerate(reasons):
                 lines.append(f'  {d if i == 0 else " " * len(d)}  {r}')
-    lines.append(f'  thresholds: base agreement >= {thr["agreement_pct_min"]:g} %, CGM gap <= {thr["cgm_gap_max_min"]:g} min, '
+    lines.append(f'  thresholds: base agreement >= {thr["agreement_pct_min"]:g} %, CGM gap with the phone looping <= {thr["cgm_gap_max_min"]:g} min, '
                  f'no profile_history change of a searched key inside the day, equal loop counts across variants')
     return lines
 

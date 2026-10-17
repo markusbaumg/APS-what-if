@@ -716,7 +716,8 @@ def parameter_space(study, rows, rounds):
     """The data of the Parameters view (H-403), computed here so the page only draws it:
     {question, days[], floors{day: {floor_*, tie{component: U or loops}}}, components[], extras[], params[],
      base{vhash, variant, values{param: phone}}, variants[{vhash, variant, values, per_day{day: {metric: v}},
-     mean{metric: v}, verdict, why, rank, position, feasible, reasons{day: [str]}, review_score, review_component,
+     mean{metric: v}, verdict, why, rank, position, feasible, reasons{day: [str]}, floor_multiple (the review order
+     key: metrics.review_order_key), floor_multiples{component: x}, review_score (the record only), review_component,
      tie_with_base, flags, validation}], order[vhash], rule_lines[], warnings[], validation}.
     `validation` per variant: _validation_of() (None unless the validate phase replayed it); the top-level
     `validation` is round.json's study-level block (metrics.Validation.summary(): {top, validated, search_days,
@@ -793,7 +794,9 @@ def parameter_space(study, rows, rounds):
             'values': {p['key']: _param_value(v['params'], p['key'], p['phone']) for p in params},
             'per_day': v['per_day'], 'mean': mean, 'days': sorted(v['per_day']),
             'verdict': verdict, 'why': why, 'rank': rank, 'feasible': feasible, 'reasons': reasons,
-            'review_score': _r(s.review_score, 3) if s is not None else None,
+            'floor_multiple': _r(_floor_multiple_of(s), 3) if s is not None else None,      # the review order key
+            'floor_multiples': ({k: _r(x, 3) for k, x in (s.floor_multiples or {}).items()} if s is not None else {}),
+            'review_score': _r(s.review_score, 3) if s is not None else None,                # the record only
             'review_component': s.review_component if s is not None else None,
             'tie_with_base': s.tie_with_base if s is not None else (verdict == 'tie'),
             'flags': list(s.flags) if s is not None else list(c.flags if c is not None else []),
@@ -828,10 +831,10 @@ def parameter_space(study, rows, rounds):
 
 def _floor_multiple_of(s):
     """The 'x floor' multiple of a VariantSummary's review component: metrics.floor_multiple() (the mean over days
-    of |effect| / that day's floor), review_score only when it is missing - as metrics.leaderboard_rows and the
-    cards print it."""
-    fm = (s.floor_multiples or {}).get(s.review_component)
-    return fm if fm is not None else s.review_score
+    of |effect| / that day's floor, the review order key of metrics.review_order_key), 0 when it is missing (never
+    the review score, H-715) - as metrics.leaderboard_rows and the cards print it."""
+    fm = (getattr(s, 'floor_multiples', None) or {}).get(s.review_component)
+    return 0.0 if fm is None else fm
 
 
 def _validation_of(candidate):

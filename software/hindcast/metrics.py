@@ -831,8 +831,9 @@ class VariantSummary:
     infeasible_reasons: Dict[str, List[str]]          # day -> reasons
     tie_with_base: bool                               # on every day
     tie_days: Dict[str, bool]
-    review_score: float                               # mean over days of |effect| / floor on the larger component
-    review_component: str
+    review_score: float                               # mean over days of the per-day max |effect| / floor (for the
+                                                      # record only: no surface orders by it, H-715)
+    review_component: str                             # the component with the largest floor multiple
     mean: dict                                        # aggregate_days()['mean']
     sign_frac: dict
     pareto: bool = False
@@ -843,6 +844,7 @@ class VariantSummary:
     flags: List[str] = field(default_factory=list)
     missing_days: List[str] = field(default_factory=list)
     floor_multiples: Dict[str, Optional[float]] = field(default_factory=dict)   # REVIEW_COMPONENTS -> floor_multiple()
+    floor_multiple: float = 0.0                       # floor_multiples[review_component]: THE review order key (H-715)
 
     def to_dict(self):
         return asdict(self)
@@ -881,11 +883,32 @@ def _rows_by_variant_day(rows: Iterable[dict], base_variant: str, days: Optional
     return table, params
 
 
+def review_component_of(floor_multiples: Dict[str, Optional[float]], day_components: Sequence[str] = ()) -> Tuple[str, float]:
+    """(review component, its floor multiple) of one variant: the component of REVIEW_COMPONENTS with the largest
+    floor_multiple() (DESIGN.md 5.3 rule 2: |effect| / floor on the largest-magnitude component; on equal multiples
+    the first of REVIEW_COMPONENTS). Without any multiple: the component most days picked (effect_over_floor) and 0."""
+    present = [(floor_multiples[k], -i, k) for i, k in enumerate(REVIEW_COMPONENTS)
+               if isinstance(floor_multiples.get(k), (int, float)) and not isinstance(floor_multiples.get(k), bool)]
+    if present:
+        fm, _, comp = max(present)
+        return comp, float(fm)
+    comps = list(day_components)
+    return (max(set(comps), key=comps.count) if comps else REVIEW_COMPONENTS[0]), 0.0
+
+
+def review_order_key(v: 'VariantSummary') -> Tuple[float, str]:
+    """THE review order (H-715; DESIGN.md 5.3 rule 2): floor multiple on the review component, descending, then the
+    variant label. rank_variants (explore), and with it leaderboard_rows, the validate top-N (validate_variants,
+    search.validate_points), round.json / status.json `top`, the cards and the page, all follow this key; the
+    review_score stays in the rows for the record only."""
+    return (-(v.floor_multiple or 0.0), v.variant)
+
+
 def rank_variants(rows: Iterable[dict], question: str = 'explore', objective: Optional[dict] = None,
                   days: Optional[Sequence[str]] = None, base_variant: str = BASE_VARIANT) -> Ranking:
     """DESIGN.md 5.3 on trials.jsonl-like rows: {variant, day, metrics, [params], [status]} (status != done ignored).
     `days` restricts the evaluation (search days; hold-out days are ranked by a second call).
-    explore -> review order (|effect| / floor, descending), earlier/gentler -> Pareto front first (by scalar inside the
+    explore -> review order (review_order_key: the floor multiple on the review component, descending), earlier/gentler -> Pareto front first (by scalar inside the
     front), then the rest by scalar.  Infeasible variants are never in `order`; variants without a base row on a day
     are infeasible on that day ("no base"); the recommended_for_review flag needs leave_one_day_out() and the hold-out
     ranking and is set by recommend()."""
@@ -923,19 +946,19 @@ def rank_variants(rows: Iterable[dict], question: str = 'explore', objective: Op
             scores.append(sc)
             comps.append(comp)
         agg = aggregate_days({d: m for d, m in by_day.items() if d in all_days})
-        comp = max(set(comps), key=comps.count) if comps else REVIEW_COMPONENTS[0]
+        fms = {k: floor_multiple(by_day, floors, k, all_days) for k in REVIEW_COMPONENTS}
+        comp, fm = review_component_of(fms, comps)
         variants[name] = VariantSummary(
             variant=name, params=params.get(name, {}), days=agg['days'], feasible=not reasons,
             infeasible_reasons=reasons, tie_with_base=bool(ties) and all(ties.values()), tie_days=ties,
             review_score=statistics.fmean(scores) if scores else 0.0, review_component=comp,
             mean=agg['mean'], sign_frac=agg['sign_frac'], flags=sorted(vflags),
-            missing_days=[d for d in all_days if d not in by_day],
-            floor_multiples={k: floor_multiple(by_day, floors, k, all_days) for k in REVIEW_COMPONENTS})
+            missing_days=[d for d in all_days if d not in by_day], floor_multiples=fms, floor_multiple=fm)
     feasible = [n for n, v in variants.items() if v.feasible]
     infeasible = [n for n, v in variants.items() if not v.feasible]
     front: List[str] = []
     if question == 'explore':
-        order = sorted(feasible, key=lambda n: (-variants[n].review_score, n))
+        order = sorted(feasible, key=lambda n: review_order_key(variants[n]))
     else:
         pts = {n: pareto_objectives(variants[n].mean, question) for n in feasible}
         front = pareto_front(pts)
@@ -1297,11 +1320,11 @@ def leaderboard_rows(ranking: Ranking) -> List[dict]:
         elif v.recommended_for_review:
             verdict, why = 'recommended', 'feasible on all days, stable across folds, days and hold-out'
         else:
-            fm = v.floor_multiples.get(v.review_component)
             verdict, why = 'candidate', (f'{v.review_component} {v.mean.get(v.review_component, 0.0):+.2f} U vs base,'
-                                         f' {(fm if fm is not None else v.review_score):.1f} x floor')
+                                         f' {v.floor_multiple:.1f} x floor')
         out.append({'variant': name, 'rank': v.rank, 'params': v.params, 'days': v.days, 'verdict': verdict, 'why': why,
-                    'pareto': v.pareto, 'scalar': v.scalar, 'review_score': v.review_score,
+                    'pareto': v.pareto, 'scalar': v.scalar, 'floor_multiple': v.floor_multiple,
+                    'floor_multiples': dict(v.floor_multiples), 'review_score': v.review_score,
                     'review_component': v.review_component, 'feasible': v.feasible,
                     'recommended_for_review': v.recommended_for_review, 'tie_with_base': v.tie_with_base,
                     'mean': {k: v.mean.get(k) for k in ('rise_vs_base_U', 'rest_vs_base_U', 'delta_vs_base_U',
@@ -1320,6 +1343,6 @@ __all__ = ['OBJECTIVE_VERSION', 'LoopSeries', 'trial_metrics', 'metrics_from_csv
            'recommend', 'ranking_rule_text', 'leaderboard_rows', 'Ranking', 'VariantSummary', 'DEFAULT_OBJECTIVE',
            'kendall_tau', 'validate_variants', 'validation_line', 'validation_caveat', 'Validation',
            'DEFAULT_VALIDATE_TOP', 'VALIDATE_SIGN_SHARE', 'VALIDATION_KEYS', 'TIE_REASON', 'floor_multiple',
-           'floor_band', 'tie_every_day', 'study_floor', 'share_pct', 'recommend_config', 'recommend_rule_text',
+           'floor_band', 'tie_every_day', 'review_component_of', 'review_order_key', 'study_floor', 'share_pct', 'recommend_config', 'recommend_rule_text',
            'RULE5_TIE',
            'FLOOR_COMPONENTS', 'REVIEW_COMPONENTS', 'TIE_FACTOR', 'BASE_VARIANT', 'QUESTIONS']

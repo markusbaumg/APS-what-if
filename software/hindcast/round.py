@@ -96,7 +96,7 @@ TIE_WITH_MAX = 5                         # vhashes listed per variant
 WHY_MAX = 300                            # characters of a Candidate.why
 EFFECT_KEYS = ('rise_vs_base_U', 'rest_vs_base_U', 'delta_vs_base_U', 'changed_vs_base', 'smb_more_vs_base',
                'smb_less_vs_base', 'lowside_flags', 'prehypo_extra_U', 'env_3h_max_U', 'env_day_pct_tdd',
-               'cap_binding_pct', 'max_single_smb_U', 'zero_temp_vs_base', 'review_score')
+               'cap_binding_pct', 'max_single_smb_U', 'zero_temp_vs_base', 'floor_multiple', 'review_score')
 FLOOR_KEYS = ('floor_rise_U', 'floor_rest_U', 'floor_total_U', 'floor_smb_U', 'floor_tbr_U', 'floor_P_U',
               'floor_loops', 'agreement_pct', 'loops')
 HOLDOUT = 'holdout'
@@ -195,7 +195,8 @@ class VariantReport:
     def effect(self):
         out = {}
         for k in EFFECT_KEYS:
-            v = self.review_score if k == 'review_score' else self.mean.get(k)
+            v = (self.review_score if k == 'review_score' else
+                 (floor_multiple_of(self) if self.floor_multiples else None) if k == 'floor_multiple' else self.mean.get(k))
             if _num(v):
                 out[k] = _r3(v)
         return out
@@ -322,15 +323,13 @@ def _component_words(component):
 def floor_multiple_of(report, component=None, floors=None):
     """The one 'x floor' multiple of one component of a report, for round.json's `why` and the card alike:
     metrics.floor_multiple() as rank_variants stored it over the scored search days; when nothing was stored and
-    `floors` (day -> floors_from_base) is given, metrics.floor_multiple() over the report's search days; else the
-    review score (primary component) or 0."""
+    `floors` (day -> floors_from_base) is given, metrics.floor_multiple() over the report's search days; else 0
+    (never the review score: H-715, one number and one order everywhere)."""
     comp = component or report.review_component
     fm = (report.floor_multiples or {}).get(comp)
     if fm is None and floors is not None:
         fm = M.floor_multiple(report.per_day, floors, comp, report.days)
-    if fm is None:
-        return report.review_score if comp == report.review_component else 0.0
-    return fm
+    return 0.0 if fm is None else fm
 
 
 def candidate_why(report):
@@ -619,10 +618,12 @@ def update_status(study_dir, now=None):
     return sd.write_status(st.build_status(sd, now))
 
 
-def produce(study_dir, round_no=None, phase=None, settings=None, now=None, started=None):
-    """round.json, then status.json; returns (Round, Status). What the orchestrator calls at the end of a round."""
+def produce(study_dir, round_no=None, phase=None, settings=None, now=None, started=None, analysis=None):
+    """round.json, then status.json; returns (Round, Status). What the orchestrator calls at the end of a round
+    (it passes its `analysis`, which it then hands to cards.write_cards: one view for round.json and the cards)."""
     sd = study_dir if isinstance(study_dir, st.StudyDir) else st.StudyDir(study_dir)
-    doc = build_round(sd, round_no=round_no, phase=phase, settings=settings, now=now, started=started)
+    doc = build_round(sd, round_no=round_no, phase=phase, settings=settings, now=now, started=started,
+                      analysis=analysis)
     write_round(sd, doc)
     return doc, update_status(sd, now)
 

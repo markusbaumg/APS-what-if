@@ -153,7 +153,12 @@ def test_real_frozen_days_and_profile_history():
     searched = ['profile autoISF_max']
     got = {d: days.quarantine_reasons(d, settings=settings, searched_keys=searched, meta=metas[d]) for d in metas}
     assert got['2026-09-06'] == []
-    assert any(r.startswith('CGM gap') for r in got['2026-09-03'])
+    # 2026-09-03: 139 min without CGM, but the phone ran no loop in them (no CGM and no loop) -> no reason
+    assert got['2026-09-03'] == []
+    old_meta = dict(metas['2026-09-03'], character={k: v for k, v in metas['2026-09-03']['character'].items()
+                                                      if k not in ('cgm_gap_looped_min', 'phone_silent_min')})
+    assert any(r.startswith('CGM gap') for r in days.quarantine_reasons('2026-09-03', settings=settings,
+                                                                          searched_keys=searched, meta=old_meta))
     assert any('autoISF_max' in r for r in got['2026-09-07'])
     _lint_clean([r for rs in got.values() for r in rs])
 
@@ -249,3 +254,23 @@ def test_requarantine_refuses_a_running_study(tmp_path):
     p = argparse.ArgumentParser()
     days.register(p.add_subparsers(dest='c'))
     assert p.parse_args(['requarantine', 'x', '--dry']).func is days.run_requarantine
+
+
+def test_cgm_gap_from_raw_entries_counts_only_looped_minutes():
+    """H-714: with devicestatus records only the minutes of a CGM gap during which the phone looped count."""
+    start, end = days.day_bounds('2026-09-06')
+    five, hour = 5 * 60 * 1000, 60 * 60 * 1000
+    entries = [{'date': t, 'sgv': 120} for t in list(range(start, start + 4 * hour, five)) + list(range(start + 7 * hour, end, five))]
+    from ns_client import to_iso
+    looping = [{'openaps': {'suggested': {'deliverAt': to_iso(t)}}} for t in range(start, end, five)]
+    silent = [{'openaps': {'suggested': {'deliverAt': to_iso(e['date'])}}} for e in entries]   # loops only with CGM
+    assert days.quarantine_reasons('2026-09-06', entries=entries) == ['CGM gap 185 min (threshold 120 min)']
+    got = days.quarantine_reasons('2026-09-06', entries=entries, devicestatus=looping)
+    assert got == ['CGM gap 185 min with the phone looping (threshold 120 min)']
+    _lint_clean(got)
+    assert days.quarantine_reasons('2026-09-06', entries=entries, devicestatus=silent) == []
+    assert days.quarantine_reasons('2026-09-06', meta={'character': {'cgm_gap_min': 300, 'cgm_gap_looped_min': 2,
+                                                                     'phone_silent_min': 298}}) == []
+    assert days.quarantine_reasons('2026-09-06', meta={'character': {'cgm_gap_min': 300, 'cgm_gap_looped_min': 300,
+                                                                     'phone_silent_min': None}}) == \
+        ['CGM gap 300 min (threshold 120 min)']                                    # no devicestatus: whole gap

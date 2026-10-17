@@ -37,7 +37,7 @@ lint refused, 3 refused or not checked.
 | `hc round <name>` | `round.py` | the verdict step: `round.json` and `status.json` from `trials.jsonl` |
 | `hc report <name>` / `hc serve <name>` | `report.py` | render `studies/<name>/report/index.html` (normal, `--single-file`, `--artifact`); serve it on localhost. The page names its source "Nightscout" only: the Nightscout URL and hostname are scrubbed from the embedded JSON and refused in the rendered HTML |
 | `hc explain <name> <iso>` | `explain.py` | the drill-down of one loop as text (decision pair, factor chain, reason diff) |
-| `hc card <name>` | `cards.py` | linted candidate cards `cards/<rank>.md` plus `.vdf` |
+| `hc card <name>` | `cards.py` | linted candidate cards `cards/<n>.md` plus `.vdf` (n: recommended for review first, then candidates, then ties, each in the review order); `hc study run` writes them after every round through the same function |
 | `hc gh labels\|issues\|epics\|campaign\|round` | `gh.py` | GitHub labels, backlog issues, the campaign issue and one comment per round |
 | `hc lint` | `lint.py` | the may / may-not vocabulary and privacy lint |
 | `hc skill install\|vocabulary\|lint\|checkin` | `skill_install.py` | the Claude skill: install it to `~/.claude/skills/hindcast/` (user scope; `--project` for the repository's `.claude/skills/`), regenerate `skill/references/vocabulary.md`, lint the skill text, the one-line check-in |

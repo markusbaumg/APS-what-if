@@ -3,7 +3,10 @@
    Reads data.parameters (report.parameter_space): question, days[], floors{day: {floor_*, tie{component}}}, tie_factor,
    components[{key, label, unit, floor_key, insulin}], extras[{key, label, unit}], params[{key, type, phone, ...}],
    base{vhash, variant, values, days}, variants[{vhash, variant, values, per_day{day: {metric}}, mean, verdict, why,
-   rank, position, feasible, reasons{day: []}, review_score, review_component, tie_with_base, flags, validation{line, caveat, ...}}],
+   rank, position, feasible, reasons{day: []}, floor_multiple, floor_multiples{component}, review_score (not shown),
+   review_component, tie_with_base, flags, validation{line, caveat, ...}}],
+   The rows come in the review order (H-715): the floor multiple on the review component, descending - the 'x floor'
+   column, the same number round.json's why and the cards print.
    rule_lines[], validation_lines[] (the 'Hold-out validation' panel; empty without a validate round).
    Tier 2 is not needed. Styles are scoped under #view-parameters and injected once (report.py inlines page.css only);
    every colour is a page.css token.
@@ -571,7 +574,7 @@
       comps.forEach(function (c) {
         tr.appendChild(h('th', { class: 'n', title: c.label + '; floor band ±' + fmt.num(ties[c.key], decimals(c)) + ' ' + c.unit + ' (widest search day)', text: colHead(c) }));
       });
-      tr.appendChild(h('th', { class: 'n', text: '|effect| / floor' }));
+      tr.appendChild(h('th', { class: 'n', title: '|effect| / floor on the review component: the mean over the days of each day\'s multiple (the review order key)', text: 'x floor' }));
       extras.forEach(function (x) { tr.appendChild(h('th', { class: 'n', title: x.label, text: colHead(x) })); });
       tr.appendChild(h('th', { text: 'feasibility' }));
       tr.appendChild(h('th', { text: 'why' }));
@@ -605,7 +608,7 @@
         });
         row.appendChild(h('td', { class: 'n num', text: fmt.int((v.days || []).length) }));
         comps.forEach(function (c) { row.appendChild(bandCell(c, (v.mean || {})[c.key], ties[c.key], scale[c.key])); });
-        row.appendChild(h('td', { class: 'n num', title: v.review_component ? 'on ' + v.review_component : null, text: num(v.review_score) ? fmt.num(v.review_score, 2) + ' x' : '-' }));
+        row.appendChild(h('td', { class: 'n num', title: v.review_component ? 'on ' + v.review_component : null, text: num(v.floor_multiple) ? fmt.num(v.floor_multiple, 1) + ' x' : '-' }));
         extras.forEach(function (x) {
           var val = (v.mean || {})[x.key];
           row.appendChild(h('td', { class: 'n num', text: !num(val) ? '-' : x.key.slice(-4) === 'base' ? fmt.signed(val, x.unit === 'loops' ? 0 : 2) : fmt.num(val, x.unit === 'loops' ? 0 : x.unit === '%' ? 1 : 2) }));

@@ -1174,7 +1174,7 @@ def test_fallback_why_prints_the_floor_multiple_not_the_review_score():
                               review_score=9.9)
     assert report._floor_multiple_of(s) == 3.25
     s.floor_multiples = {}
-    assert report._floor_multiple_of(s) == 9.9
+    assert report._floor_multiple_of(s) == 0.0                 # H-715: never the review score, not even as a fallback
     src = open(report.__file__, encoding='utf-8').read()
     assert "{s.review_score:.1f} x floor" not in src
 

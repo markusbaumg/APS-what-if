@@ -565,32 +565,29 @@ Depends on: H-401.
 
 ---
 
-## Added during the 2026-10-17 campaign night (issues to open when Markus says so)
+## E10 — Campaign-night follow-ups 2026-10-17 (epic `H-1000`) · labels: hindcast, epic
 
-### H-714 · Bridge CGM gaps in `entries` from the devicestatus glucose · labels: hindcast, algorithm-fidelity
-Several October nights have no CGM entries on the server while devicestatus shows the phone looping with glucose
-(10-13 00:00-02:35Z, 10-14 00:00-03:50Z, parts of 10-05/10-10/10-12). Synthesize readings from `suggested.bg` at
-the loop times, flag the loops (`cgm_bridged`), own confounder badge, quarantine rule only when the bridged loops'
-base agreement holds. Built in a worktree during the night; merge after the gate.
+Findings of the first unattended campaign (docs/hindcast/CAMPAIGN_2026-10-17.md); issues to open when Markus says so.
+
+### H-714 · CGM gaps in `entries`: bridge from devicestatus (closed: nothing to bridge) and the looped-gap quarantine rule
+labels: hindcast, algorithm-fidelity
+Body: Built and measured in branch `experiment/h714-cgm-bridge` (not merged): on all 42 cached days every CGM gap is also a gap in the phone's loop runs (AAPS runs no loop without CGM), so no loop is lost and nothing can be bridged; on simulated gaps the bridged loops agreed 27-53 % with the phone. Done instead (days.py): quarantine rule 2 counts only CGM-gap minutes during which the phone looped, no-CGM-no-loop time is a badge; nine October/September days returned to the studies. Left: days.summarize / main still print cgm_gap_min; requarantine does not rebuild status.json (the next run does).
 
 ### H-715 · One review order everywhere
-The validate top-N is selected by `review_score` (|effect| / worst-day floor) while round.json `why`, cards and
-the page print the per-day floor multiple (`metrics.floor_multiple`). lower_ISFrange_weight 0.75/1.0 (2.2x floor)
-missed the oct_tierB validation because of it. Make `rank_variants` order by the floor multiple and show that
-column on the leaderboard.
+labels: hindcast
+Body: The validate top-N is selected by `review_score` (|effect| / worst-day floor) while round.json `why`, cards and the page print the per-day floor multiple (`metrics.floor_multiple`). lower_ISFrange_weight 0.75/1.0 (2.2x floor) missed the oct_tierB validation because of it. Make `rank_variants` order by the floor multiple and show that column on the leaderboard.
 
 ### H-716 · `hc study run` writes the cards at the end of a finished round
-Cards were stale after the re-evaluation runs (the orchestrator regenerates round.json/status.json/report but not
-`cards/`); `hc card` had to be run by hand. Also list recommended-for-review variants first in the card numbering.
+labels: hindcast
+Body: Cards were stale after the re-evaluation runs (the orchestrator regenerates round.json/status.json/report but not `cards/`); `hc card` had to be run by hand. Also list recommended-for-review variants first in the card numbering.
 
 ### H-717 · 2026-10-13 basaliob offset and the reinstall minutes of 2026-10-15
-261 loops on 10-13 have basaliob about +0.062 U too high in ns_iob (a low/zero temp missing from or recorded
-differently in Nightscout); the 21:46-21:59Z reinstall loops on 10-15 (fresh phone database) can never be
-reproduced and should be skipped by a rule, not counted against the day.
+labels: hindcast
+Body: 261 loops on 10-13 have basaliob about +0.062 U too high in ns_iob (a low/zero temp missing from or recorded differently in Nightscout); the 21:46-21:59Z reinstall loops on 10-15 (fresh phone database) can never be reproduced and should be skipped by a rule, not counted against the day.
 
 ### H-718 · `ns_profile --validate` must not run concurrently with itself
-It writes a fixed temp file (`ns_profile_validate_ce.txt`); two parallel runs corrupt each other's activity
-monitor comparison (observed 110/207 instead of 207/207).
+labels: hindcast
+Body: It writes a fixed temp file (`ns_profile_validate_ce.txt`); two parallel runs corrupt each other's activity monitor comparison (observed 110/207 instead of 207/207).
 
 ## Later (not scheduled; one issue each when picked up)
 

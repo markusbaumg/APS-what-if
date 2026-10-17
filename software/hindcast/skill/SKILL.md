@@ -121,7 +121,7 @@ hc study status <name> [--json]                    <= 2 KB
 hc study stop   <name>                             writes STOP; the run finishes its trial and exits 0
 hc round <name> [--print]                          round.json + status.json from trials.jsonl
 hc report <name> [--single-file] [--artifact] [--out DIR] [--days D,...] [--variants top3] [--pred top5]
-hc card <name> [--rank N] [--vhash H] [--top N]    linted cards -> studies/<name>/cards/<rank>.md + .vdf
+hc card <name> [--rank N] [--vhash H] [--top N]    linted cards -> studies/<name>/cards/<n>.md + .vdf (also after every round)
 hc explain <name> <iso> [--variant <vhash>|base] [--json]     one loop's drill-down as text
 hc gh campaign <name> [--artifact URL] [--dry-run]            open or refresh the campaign issue
 hc gh round <name> [--artifact URL] [--dry-run]               at most one comment per round

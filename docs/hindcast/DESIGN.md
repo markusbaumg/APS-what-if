@@ -154,7 +154,7 @@ replay.py: FrozenSource installed as ns_source.NightscoutSource -> parameters_kn
 export.py -> report/index.html (tier 1 embedded) + series/, pred/ (tier 2 files)  ─── Artifact publish (agent, same URL)
           -> status.json (<= 2 KB) and round.json (<= 2 KB per variant)              ─── what the skill reads
           -> db rows (studies/<id>, trials/<key>, cards/<rank>)                      ─── ArtifactData batch (agent)
-          -> cards/<rank>.md (linted), proposals/<vhash>.md (linted)                 ─── human review; gh.py posts links only
+          -> cards/<n>.md (linted), proposals/<vhash>.md (linted)                 ─── human review; gh.py posts links only
 ```
 
 ### 4.4 How Hindcast uses `parameters_known()`
@@ -272,7 +272,7 @@ hc study stop   autoISF_oct                     writes STOP
 hc report autoISF_oct [--single-file --days 2026-09-06 --variants top3] [--pred top5]   -> studies/autoISF_oct/report/
 hc serve  autoISF_oct                           stdlib http.server on report/
 hc explain autoISF_oct 2026-09-06T09:00:37Z --variant <vhash>     the drill-down as text (for the skill and for grep)
-hc card    autoISF_oct [--rank 1..N]            linted candidate cards -> cards/<rank>.md (+ VDF)
+hc card    autoISF_oct [--rank 1..N]            linted candidate cards -> cards/<n>.md (+ VDF)
 hc export  autoISF_oct --db-rows [--since <iso>] > rows.json      what the skill pushes with ArtifactData batch
 hc gh      labels|epics|campaign|round|propose|sync ...            GitHub (section 9), every body passes lint.py
 ```
@@ -353,8 +353,9 @@ Phases, each resumable, each a row in `trials.jsonl`:
 
 0. **Freeze and floor** — `hc freeze` (refuses non-final days), base + sentinel on every day, floors,
    day character, confounder badges, quarantine of days under the fidelity floor (`agreement_pct < 94 %` or
-   CGM gap > 2 h or a `profile_history` change inside the day for a searched key): listed, not hidden,
-   excluded from scoring.
+   more than 2 h of CGM gap while the phone looped, or a `profile_history` change inside the day for a searched
+   key): listed, not hidden, excluded from scoring. Gap time with no CGM and no loop at all (AAPS runs no loop
+   without CGM; the replay loses no loop there) is only a 'no CGM and no loop' badge, never a quarantine reason.
 1. **Screen** — one-at-a-time, 5-7 levels per parameter, on 2-3 days of different strata (Morris-style
    mean |effect| / floor across days). Parameters below 1.5 × floor everywhere are frozen ("not testable").
 2. **Latin hypercube** over the live parameters (24-48 points) on the screening days; the first picture

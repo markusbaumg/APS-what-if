@@ -159,8 +159,8 @@ def test_parse_real_backlog(backlog_md):
     blocks = ghmod.load_backlog(backlog_md)
     epics = [b for b in blocks if b.kind == 'epic']
     tasks = [b for b in blocks if b.kind == 'task']
-    assert [e.hid for e in epics] == ['H-%d00' % i for i in range(10)]
-    assert len(tasks) == 61
+    assert [e.hid for e in epics] == ['H-%d00' % i for i in range(10)] + ['H-1000']
+    assert len(tasks) == 66
     assert len({b.issue_title for b in blocks}) == len(blocks)
     assert sum(len(e.tasks) for e in epics) == len(tasks)
     for t in tasks:

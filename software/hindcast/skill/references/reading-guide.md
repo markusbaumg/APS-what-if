@@ -46,8 +46,9 @@ zero).
 - **Cap binding.** Share of loops where the factor sat on `autoISF_max` or `autoISF_min`. At 50 % or more
   the variant is infeasible: the setting was not really tested.
 - **Largest single SMB** next to the phone's maxBolus: a reading for a human to check, always on the card.
-- **Review order** (question `explore`): sorted by effect size in floors, "review order, not a ranking by
-  outcome". Questions `earlier` / `gentler` show a Pareto front instead.
+- **Review order** (question `explore`): sorted by effect size in floors (the "x floor" column: the mean
+  over the days of |effect| / that day's floor on the larger component), "review order, not a ranking by
+  outcome". round.json, status.json, the cards, the validate top-N and the page all use this one order. Questions `earlier` / `gentler` show a Pareto front instead.
 - **Cannot be tested with this method**: basal rates, DIA and peak, carb ratio, autosens ratio, the
   smoother. **Not testable on these days**: a searched parameter whose every point stayed inside the
   floor on every day.

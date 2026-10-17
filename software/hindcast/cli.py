@@ -67,7 +67,7 @@ LAZY_COMMANDS = {
     'report':  (('hindcast.report',), 'H-401', 'render studies/<study>/report/'),
     'serve':   (('hindcast.report', 'hindcast.serve'), 'H-401', 'stdlib http.server on report/'),
     'explain': (('hindcast.explain', 'hindcast.status'), 'H-502', 'the drill-down of one loop as text'),
-    'card':    (('hindcast.cards', 'hindcast.card', 'hindcast.export'), 'H-205', 'linted candidate cards -> cards/<rank>.md'),
+    'card':    (('hindcast.cards', 'hindcast.card', 'hindcast.export'), 'H-205', 'linted candidate cards -> cards/<n>.md'),
     'round':   (('hindcast.round',), 'H-502', 'write round.json and status.json from trials.jsonl'),
     'search':  (('hindcast.search',), 'H-304', 'the search plan of a study: phases, pending tasks, frozen parameters'),
     'replay':  (('hindcast.replay',), 'H-102', 'replay one variant on one frozen day and print its metrics'),

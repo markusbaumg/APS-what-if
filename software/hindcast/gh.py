@@ -722,7 +722,7 @@ def _direction_text(c, floors):
     ratio, v, floor, words = max(comps, key=lambda t: t[0])
     if not v:
         return None
-    score = eff.get('review_score')
+    score = eff.get('floor_multiple', eff.get('review_score'))   # H-715: the floor multiple; older rounds: review_score
     if isinstance(score, bool) or not isinstance(score, (int, float)) or score <= 0:
         score = ratio if floor else None
     text = 'would have asked for %s insulin than base in %s' % ('more' if v > 0 else 'less', words)

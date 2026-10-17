@@ -214,3 +214,44 @@ def test_unlocked_study_card_puts_the_weak_evidence_caveat_under_the_honesty_sta
     assert honesty < weak < glucose < text.index('## VDF'), 'caveat first under the honesty statement'
     assert 'so this card shows only where' in text and 'so this page shows' not in text
     cards.lint_card(text)
+
+
+# ----------------------------------------------------------------------------- H-716: numbering and pruning
+def test_card_numbering_lists_recommended_first_then_candidates_then_ties(analysed):
+    sd, study, a = analysed
+    ranked = [a.reports[x] for x in a.order]
+    assert len(ranked) >= 4
+    # relabel the verdicts so the review order and the card numbering differ
+    ranked[0].verdict, ranked[1].verdict, ranked[2].verdict, ranked[3].verdict = 'tie', 'candidate', 'recommended', 'candidate'
+    order = cards.card_order(a)
+    assert [r.vhash for r in order[:4]] == [ranked[2].vhash, ranked[1].vhash, ranked[3].vhash, ranked[0].vhash]
+    numbers = cards.card_numbers(a)
+    assert numbers[ranked[2].vhash] == 1 and numbers[ranked[0].vhash] == 4
+    assert cards.card_number(ranked[2], a) == 1 and cards.card_number(ranked[2]) == ranked[2].rank   # no analysis: rank
+    text = cards.card_text(ranked[2], a, SETTINGS)
+    assert text.startswith('# Candidate 1: ')
+    assert f'review order {ranked[2].rank} of' in text                 # the card still names its review-order position
+    written, refused = cards.write_cards(sd, settings=SETTINGS, analysis=a)
+    labels = {w[0]: w[1] for w in written}
+    with open(labels['1'], encoding='utf-8') as fh:
+        assert fh.read().startswith('# Candidate 1: ') and ranked[2].vhash == cards.card_order(a)[0].vhash
+    assert [r.vhash for r in cards.select_reports(a, ranks=[1])] == [ranked[2].vhash]
+
+
+def test_a_full_rewrite_removes_stale_card_numbers(analysed):
+    sd, study, a = analysed
+    out = os.path.join(sd.path, cards.CARDS_DIR)
+    os.makedirs(out, exist_ok=True)
+    for name in ('17.md', '17.vdf', 'notes.md', 'abcdef12.md'):
+        with open(os.path.join(out, name), 'w', encoding='utf-8') as fh:
+            fh.write('x')
+    written, _ = cards.write_cards(sd, settings=SETTINGS, analysis=a)
+    left = sorted(os.listdir(out))
+    assert '17.md' not in left and '17.vdf' not in left
+    assert 'notes.md' in left and 'abcdef12.md' in left                # only numbered cards are pruned
+    assert {w[0] for w in written} <= {os.path.splitext(n)[0] for n in left}
+    # a selection (--rank / --vhash) never prunes
+    with open(os.path.join(out, '17.md'), 'w', encoding='utf-8') as fh:
+        fh.write('x')
+    cards.write_cards(sd, ranks=[1], settings=SETTINGS, analysis=a)
+    assert os.path.isfile(os.path.join(out, '17.md'))

@@ -318,3 +318,49 @@ def test_fixture_study_ranking(example_csvs, ns_settings_path):
     for q in ('earlier', 'gentler'):
         rq = M.rank_variants(rows, q)
         assert rq.infeasible == [] and rq.front and set(rq.order) == set(r.order)
+
+
+# ----------------------------------------------------------------------------- H-715: one review order everywhere
+def two_day_rows_where_review_score_and_floor_multiple_disagree():
+    """A: 4 x floor on rise on day 1 and 4 x floor on rest on day 2 (review_score 4, floor multiple 2 on either
+    component); B: 3 x floor on rise on both days (review_score 3, floor multiple 3). Floors: rise 0.2, rest 0.05."""
+    rows = []
+    for d, a in zip(DAYS5[:2], (mk(rise=0.8, rest=0.0), mk(rise=0.0, rest=0.2))):
+        rows.append({'variant': 'base', 'day': d, 'metrics': mk(base=True)})
+        rows.append({'variant': 'A', 'day': d, 'metrics': a, 'params': {'profile x': 'A'}})
+        rows.append({'variant': 'B', 'day': d, 'metrics': mk(rise=0.6, rest=0.0), 'params': {'profile x': 'B'}})
+    return rows
+
+
+def test_review_order_is_the_floor_multiple_not_the_review_score():
+    rows = two_day_rows_where_review_score_and_floor_multiple_disagree()
+    r = M.rank_variants(rows, 'explore', days=DAYS5[:2])
+    a, b = r.variants['A'], r.variants['B']
+    assert a.review_score == pytest.approx(4.0) and b.review_score == pytest.approx(3.0)   # kept for the record
+    assert a.floor_multiple == pytest.approx(2.0) and b.floor_multiple == pytest.approx(3.0)
+    assert b.review_component == 'rise_vs_base_U' and b.floor_multiples['rise_vs_base_U'] == pytest.approx(3.0)
+    assert r.order == ['B', 'A'] and b.rank == 1 and a.rank == 2
+    lb = M.leaderboard_rows(r)
+    assert [x['variant'] for x in lb] == ['B', 'A']
+    assert lb[0]['floor_multiple'] == pytest.approx(3.0) and lb[0]['review_score'] == pytest.approx(3.0)
+    assert lb[1]['floor_multiple'] == pytest.approx(2.0) and lb[1]['review_score'] == pytest.approx(4.0)
+    assert lb[0]['why'].endswith('3.0 x floor') and lb[1]['why'].endswith('2.0 x floor')
+    assert lb[0]['floor_multiples']['rise_vs_base_U'] == pytest.approx(3.0)
+
+
+def test_validate_top_n_follows_the_floor_multiple():
+    rows = two_day_rows_where_review_score_and_floor_multiple_disagree()
+    hold = DAYS5[2]
+    rows += [{'variant': 'base', 'day': hold, 'metrics': mk(base=True)},
+             {'variant': 'A', 'day': hold, 'metrics': mk(rise=0.8), 'params': {'profile x': 'A'}},
+             {'variant': 'B', 'day': hold, 'metrics': mk(rise=0.6), 'params': {'profile x': 'B'}}]
+    val = M.validate_variants(rows, 'explore', None, DAYS5[:2], [hold], top=1)
+    assert val.validated == ['B']                       # the review_score order would have validated A
+
+
+def test_review_component_of_takes_the_largest_floor_multiple():
+    assert M.review_component_of({'rise_vs_base_U': 1.0, 'rest_vs_base_U': 2.5}) == ('rest_vs_base_U', 2.5)
+    assert M.review_component_of({'rise_vs_base_U': 2.0, 'rest_vs_base_U': 2.0}) == ('rise_vs_base_U', 2.0)
+    assert M.review_component_of({'rise_vs_base_U': None, 'rest_vs_base_U': None},
+                                 ['rest_vs_base_U', 'rest_vs_base_U', 'rise_vs_base_U']) == ('rest_vs_base_U', 0.0)
+    assert M.review_component_of({}) == (M.REVIEW_COMPONENTS[0], 0.0)
