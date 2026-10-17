@@ -47,8 +47,8 @@ def main(argv):
                vdf, start, end]
         run = subprocess.run(cmd, cwd=HERE, env=env, capture_output=True, text=True)
         tail = [l for l in run.stdout.splitlines()
-                if 'loop runs' in l or 'skipped' in l or 'pinned' in l or 'failed' in l.lower()]
-        for line in tail[-4:]:
+                if 'loop runs' in l or 'skipped' in l or 'pinned' in l or 'bridged' in l or 'failed' in l.lower()]
+        for line in tail[-5:]:
             print(line.strip())
         csvs = glob.glob(os.path.join(tmp, '*.no_change.csv'))
         if run.returncode != 0 or not csvs:

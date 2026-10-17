@@ -70,6 +70,11 @@ def window_label(start_iso, end_iso, now_ms=None):
     return (to_iso(start)[:19] + 'Z_' + to_iso(end)[:19] + 'Z').replace(':', '-')
 
 
+def bridged_line(readings, loops):
+    """the end-of-run counter of the CGM bridge (ns_glucose): readings made from devicestatus, loops replayed on one"""
+    return f'CGM readings bridged from devicestatus: {readings} ({loops} loops)'
+
+
 def loop_ms(rec):
     """run time of a devicestatus record: suggested.deliverAt (the loop's own clock), else created_at (upload)"""
     sug = (rec.get('openaps') or {}).get('suggested') or {}
@@ -95,6 +100,7 @@ class NightscoutSource:
                                        api_secret_sha1=ns_cfg.get('api_secret_sha1'), verbose=verbose)
         self._loaded = False
         self.skipped = {}                   # reason -> count, reported at the end
+        self.bridged_loops = 0              # loops replayed on a CGM reading bridged from devicestatus
 
     # ------------------------------------------------------------------ data loading
     def _window(self):
@@ -177,6 +183,7 @@ class NightscoutSource:
             if glucose_status is None:
                 self._skip('no CGM value within 12 min')
                 continue
+            cgm_bridged = self.glucose.last_bridged
             autosens = self.autosens_ratio(console_error, autosens)
             autosens_data = {'ratio': autosens}
 
@@ -205,13 +212,17 @@ class NightscoutSource:
                 micro_bolus_allowed = False         # tempBasalFallback re-run after a failed SMB delivery
                 self._skip('SMB fallback loop (replayed without SMB)')
 
-            yield {
+            loop = {
                 'record': rec, 'suggested': sug, 'stamp': stamp, 'now_ms': now_ms, 'utcOffset': utc_offset_h,
                 'glucose_status': glucose_status, 'iob_array': iob_array, 'currenttemp': currenttemp,
                 'lastTempAge': last_temp_age, 'profile': profile, 'activity_monitor': activity_monitor,
                 'autosens_data': autosens_data, 'meal_data': meal_data, 'microBolusAllowed': micro_bolus_allowed,
                 'console_error': console_error, 'autoISF_version': version,
             }
+            if cgm_bridged:                         # only when set: loops on real CGM keep their exact shape
+                loop['cgm_bridged'] = True
+                self.bridged_loops += 1
+            yield loop
         if self.skipped:
             self.log_msg('\nNightscout loops skipped: ' + ', '.join(f'{v} x {k}' for k, v in self.skipped.items()))
         pinned = sum(getattr(self.glucose, 'pinned', {}).values())
@@ -219,6 +230,9 @@ class NightscoutSource:
         if pinned or unmatched:                             # ns_glucose loop-to-reading pin (sluggish phone)
             self.log_msg(f'Nightscout loops pinned to an older CGM reading (phone ran late): {pinned}'
                          f', suggested.bg reproduced by no recent reading: {unmatched}')
+        bridged = self.glucose.bridged_in(start, end) if hasattr(self.glucose, 'bridged_in') else 0
+        if bridged or self.bridged_loops:
+            self.log_msg(bridged_line(bridged, self.bridged_loops))
 
     def meal_data(self, now_ms, sug, last_bolus_time, glucose_status=None, iob_now=None, console_error=None):
         """oref meal data: COB as computed by AAPS, carbs entered during the last 6 h, deviation slopes rebuilt by

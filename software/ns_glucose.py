@@ -25,6 +25,25 @@ reading (settings 'glucose': {'pin_fit': 'newest'}, the default; 'pinned' fits o
 candidate matches -> newest reading.  Counters: gh.pinned {readings back: loops}, gh.pin_unmatched; the Kalman
 state (learned R) is left as smoothing at the chosen cutoff leaves it, probes of other cutoffs are undone.
 
+CGM bridge (H-714; settings 'glucose': {'bridge': true}, the default): when the server lacks CGM entries while the
+phone kept looping, each devicestatus loop's suggested.bg becomes a reading at the loop's run time (deliverAt;
+duplicate uploads once), flagged as bridged (gh.bridged_ts; status_at sets gh.last_bridged when the reading it used is
+one, ns_source then marks the loop 'cgm_bridged').  A loop is bridged when no real reading lies within MAX_AGE_MS
+(12 min) before it, or when it runs inside a real-reading gap longer than 12 min, more than BRIDGE_ANCHOR_MS (90 s)
+after the gap's last reading, with a bg differing (PIN_TOL) from the loop that ran on that reading.  suggested.bg is
+the phone's SMOOTHED value: bridged buckets are interpolated without whole-mg/dl rounding, are not 'filled' while
+their two readings are at most BRIDGE_SPAN_MS (30 min: the phone loops every 1-5 min and pauses up to ~16 min at
+night with 1-minute CGM on the phone) apart, take part in the Kalman update (the state runs through the stretch, so
+the join is continuous) but never in the innovation statistics that teach the learned R, and are re-smoothed by
+the RTS pass ('bridge_smoothed': 'kalman', default; 'phone' keeps the phone's value - measured on 2026-10-13 with
+the entries of 00:00-01:55Z removed: 'kalman' reproduces the phone's tick on 68 of 118 bridged loops, 'phone' on
+46, the decisions agree about equally, 47.5 vs 49.2 %).  The parabola fit
+runs on the bridged values like on raw 1-minute readings.  Limits (measured, NIGHTSCOUT_SOURCE.md): the phone's
+values are forward-filter estimates, not the RTS-smoothed history the phone used for its deltas, and the fork's
+parabola fit sees smoothed instead of raw values with the loop pauses as gaps, so acce_ISF / ISF of the bridged
+loops agree with the phone far less often than on real CGM.  On the 42 cached days (2026-08-30..10-16) no loop
+runs without CGM entries: every gap is a gap of both collections, nothing is bridged.
+
 What is ported (AAPS 3.4.2 fork "aisf3.2.1", commit 346a68550c of nightscout/AndroidAPS, and master):
     AutosensDataStoreObject.createBucketedData        1-minute Libre data -> 5-minute buckets (interpolated,
                                                       rounded to whole mg/dl, "filledGap" flag), 5-min path too
@@ -41,7 +60,8 @@ What is ported (AAPS 3.4.2 fork "aisf3.2.1", commit 346a68550c of nightscout/And
 Which series / bucketing and why (result of --validate, see the bottom of this docstring):
     * raw `entries.sgv` are the only input; the loop's `suggested.bg` is NOT fed back into the series because
       AAPS re-smooths the whole window on every run (the RTS backward pass changes past values) - the value a
-      past loop saw is not the value the present loop uses for that bucket.
+      past loop saw is not the value the present loop uses for that bucket.  Exception: the CGM bridge above,
+      only where the server has no entries at all.
     * the 5-minute bucket grid is anchored at the newest CGM reading of every loop ("moving" grid).  In the
       Kotlin source the anchor (`referenceTime`) is fixed once per app start, but the devicestatus data shows
       `suggested.bg` changing on every 1-minute loop, which is only possible with a grid that moves with the
@@ -82,6 +102,8 @@ KALMAN_WINDOW_MS = 34 * 60 * 60 * 1000       # AAPS loads 24 h + 10 h (max DIA) 
 IRREGULAR_DATA_MS = 30 * 1000                # AutosensDataStoreObject.IRREGULAR_DATA_SEC
 PIN_READINGS = 6                             # status_at: candidate cutoffs = the newest reading and 5 older ones
 PIN_TOL = 0.05                               # mg/dl: rebuilt smoothed bg == suggested.bg
+BRIDGE_SPAN_MS = 30 * 60 * 1000              # CGM bridge: a bucket between loop readings <= 30 min apart is not "filled"
+BRIDGE_ANCHOR_MS = 90 * 1000                 # CGM bridge: the loop run on the last reading before a gap follows it within 90 s
 
 
 # ============================================================================ helpers
@@ -106,13 +128,14 @@ def _kround(x):
 
 class Bucket:
     """InMemoryGlucoseValue"""
-    __slots__ = ('ts', 'value', 'smoothed', 'filled')
+    __slots__ = ('ts', 'value', 'smoothed', 'filled', 'bridged')
 
-    def __init__(self, ts, value, filled=False):
+    def __init__(self, ts, value, filled=False, bridged=False):
         self.ts = ts
         self.value = float(value)
         self.smoothed = None
         self.filled = filled
+        self.bridged = bridged              # value is the phone's smoothed bg bridged from devicestatus (see CGM bridge)
 
     @property
     def recalculated(self):
@@ -136,10 +159,15 @@ def is_about_5min_data(ts_desc):
     return (total // len(ts_desc)) // 1000 < 1
 
 
-def bucketed_recalculated(ts_asc, val_asc, i_newest, grid_ms):
+def bucketed_recalculated(ts_asc, val_asc, i_newest, grid_ms, br_asc=None):
     """AutosensDataStoreObject.createBucketedDataRecalculated.
     ts_asc/val_asc: readings ascending; i_newest: index of the newest reading to use;
-    grid_ms: a time on the 5-minute grid (the app's referenceTime). Returns buckets newest first."""
+    grid_ms: a time on the 5-minute grid (the app's referenceTime). Returns buckets newest first.
+    br_asc: optional flags (ascending) of readings bridged from devicestatus; a bucket is bridged when the nearer of
+    its two readings is, a bucket between two bridged readings is interpolated without the whole-mg/dl rounding
+    (the phone's values are smoothed, not CGM readings), and a bucket next to a bridged reading is not "filled"
+    while its two readings are at most BRIDGE_SPAN_MS apart (the loops run every 1-5 min, the phone's own
+    readings every minute: dura_ISF must not stop at every bridged bucket)."""
     if i_newest < 2:
         return None
     t_new = ts_asc[i_newest]
@@ -159,7 +187,7 @@ def bucketed_recalculated(ts_asc, val_asc, i_newest, grid_ms):
         if j > i_newest:
             break
         if ts_asc[j] == t:
-            out.append(Bucket(t, val_asc[j]))
+            out.append(Bucket(t, val_asc[j], bridged=bool(br_asc and br_asc[j])))
         else:
             k = j - 1                      # findOlder: largest timestamp <= t
             if k < 0:
@@ -167,17 +195,25 @@ def bucketed_recalculated(ts_asc, val_asc, i_newest, grid_ms):
             dt_new = ts_asc[j] - t
             dt_old = t - ts_asc[k]
             bg = val_asc[j] - dt_new / float(ts_asc[j] - ts_asc[k]) * (val_asc[j] - val_asc[k])
-            out.append(Bucket(t, float(_kround(bg)), filled=min(dt_old, dt_new) > IRREGULAR_DATA_MS))
+            filled = min(dt_old, dt_new) > IRREGULAR_DATA_MS
+            if br_asc and (br_asc[j] or br_asc[k]) and ts_asc[j] - ts_asc[k] <= BRIDGE_SPAN_MS:
+                filled = False              # the phone had 1-minute readings here; only the server lacks them
+            if br_asc and br_asc[j] and br_asc[k]:
+                out.append(Bucket(t, bg, filled=filled, bridged=True))
+            else:
+                out.append(Bucket(t, float(_kround(bg)), filled=filled,
+                                  bridged=bool(br_asc and br_asc[j if dt_new <= dt_old else k])))
         t -= FIVE_MIN
     return out
 
 
-def bucketed_5min(ts_asc, val_asc, i_newest, grid_ms):
+def bucketed_5min(ts_asc, val_asc, i_newest, grid_ms, br_asc=None):
     """AutosensDataStoreObject.createBucketedData5min (regular 5-minute CGMs); falls back to the
-    recalculated variant when the normalisation would move a value by more than 90 s."""
+    recalculated variant when the normalisation would move a value by more than 90 s.  br_asc as there."""
     if i_newest < 2:
         return None
-    b = [Bucket(ts_asc[i_newest], val_asc[i_newest])]
+    br = (lambda i: bool(br_asc[i])) if br_asc else (lambda i: False)
+    b = [Bucket(ts_asc[i_newest], val_asc[i_newest], bridged=br(i_newest))]
     j = 0
     for i in range(i_newest - 1, -1, -1):
         bg_time = ts_asc[i]
@@ -191,15 +227,15 @@ def bucketed_5min(ts_asc, val_asc, i_newest, grid_ms):
                 j += 1
                 gap_delta = val_asc[i] - last_value
                 next_bg = last_value + 5.0 / elapsed * gap_delta
-                b.append(Bucket(next_time, float(_kround(next_bg)), filled=True))
+                b.append(Bucket(next_time, float(_kround(next_bg)), filled=True, bridged=br(i) and br(i + 1)))
                 elapsed -= 5
                 last_value = next_bg
                 last_time = next_time
             j += 1
-            b.append(Bucket(bg_time, val_asc[i]))
+            b.append(Bucket(bg_time, val_asc[i], bridged=br(i)))
         elif abs(elapsed) > 2:
             j += 1
-            b.append(Bucket(bg_time, val_asc[i]))
+            b.append(Bucket(bg_time, val_asc[i], bridged=br(i)))
         else:
             b[j].value = (b[j].value + val_asc[i]) / 2
     oldest = b[-1]
@@ -209,7 +245,7 @@ def bucketed_5min(ts_asc, val_asc, i_newest, grid_ms):
         cur, prev = b[i], b[i + 1]
         adjusted = (cur.ts - prev.ts - FIVE_MIN) / 1000
         if abs(adjusted) > 90:
-            return bucketed_recalculated(ts_asc, val_asc, i_newest, grid_ms)
+            return bucketed_recalculated(ts_asc, val_asc, i_newest, grid_ms, br_asc)
         cur.ts = prev.ts + FIVE_MIN
     return b
 
@@ -411,6 +447,10 @@ class KalmanSmoother:
             else:
                 xpe, Ppe = xp, Pp
             x, P = self._update(xpe, Ppe, z, R_eff)
+            if data[i].bridged:             # the phone's smoothed value: tracks the state, never teaches R
+                fwd[i - s] = x[0]
+                states.insert(0, before)
+                continue
             self.innovations.appendleft(mahal)
             self.raw_innov.appendleft(innov * innov)
             if len(self.innovations) > self.INNOV_WINDOW:
@@ -575,7 +615,8 @@ def parabola_fit(ts_desc, val_desc, fsl_min_dur, filled_desc=None):
 class GlucoseHistory:
     """See module docstring. settings may carry an optional 'glucose' section:
         {'bucket_grid': 'moving' | <unix ms of a grid time>, 'smoothing': 'kalman' | 'none',
-         'libre_1min_fit': true, 'pin_readings': 6 (1 = no pin), 'pin_fit': 'newest' | 'pinned'}"""
+         'libre_1min_fit': true, 'pin_readings': 6 (1 = no pin), 'pin_fit': 'newest' | 'pinned',
+         'bridge': true (CGM bridge from devicestatus), 'bridge_smoothed': 'kalman' | 'phone'}"""
 
     def __init__(self, entries, devicestatus, settings):
         cfg = (settings or {}).get('glucose', {}) if isinstance(settings, dict) else {}
@@ -592,13 +633,22 @@ class GlucoseHistory:
             ms = _entry_ms(r)
             if ms:
                 pts[ms] = float(v)                # de-duplicate on timestamp
-        self.ts = sorted(pts)
-        self.val = [pts[t] for t in self.ts]
         self.loop_bg = {}
         for r in devicestatus or []:
             sug = ((r.get('openaps') or {}).get('suggested') or {})
             if 'bg' in sug and sug.get('deliverAt'):
                 self.loop_bg[sug['deliverAt']] = sug['bg']
+        # CGM bridge (see the module docstring): inside a stretch without CGM entries the phone's own bg of a loop
+        # becomes a reading at the loop's run time, flagged as bridged
+        self.bridge = cfg.get('bridge', True)
+        self.bridge_smoothed = cfg.get('bridge_smoothed', 'kalman')
+        self.bridged_ts = set()
+        if self.bridge:
+            self._bridge(pts, devicestatus)
+        self.ts = sorted(pts)
+        self.val = [pts[t] for t in self.ts]
+        self.br = [t in self.bridged_ts for t in self.ts] if self.bridged_ts else None
+        self.last_bridged = False                           # the reading the last status_at used is bridged
         self.kalman = KalmanSmoother()
         self._last_status = None
         self._last_key = None
@@ -608,6 +658,53 @@ class GlucoseHistory:
         self.pinned = {}                                    # readings back -> loops (back >= 1 only)
         self.pin_unmatched = 0                              # loops whose suggested.bg no candidate reproduced
         self.last_index = None                              # index into ts of the reading the last status used
+
+    @staticmethod
+    def _loop_readings(devicestatus):
+        """[(run time ms, suggested.bg)] of the loops (deliverAt, else timestamp; duplicates once), ascending"""
+        from ns_client import parse_iso
+        out = {}
+        for r in devicestatus or []:
+            sug = ((r.get('openaps') or {}).get('suggested') or {})
+            bg = sug.get('bg')
+            stamp = sug.get('deliverAt') or sug.get('timestamp')
+            if not stamp or isinstance(bg, bool) or not isinstance(bg, (int, float)) or not bg > 39:
+                continue
+            try:
+                ms = parse_iso(stamp)
+            except ValueError:
+                continue
+            out.setdefault(ms, float(bg))
+        return sorted(out.items())
+
+    def _bridge(self, pts, devicestatus):
+        """add the bridged readings to pts {ms: sgv}: a loop gets one when no real reading lies within MAX_AGE_MS
+        before it, or when it runs inside a real-reading gap longer than MAX_AGE_MS, more than BRIDGE_ANCHOR_MS after
+        the gap's last reading, with a bg that differs from the bg of the last loop run within BRIDGE_ANCHOR_MS of
+        that reading (the phone had a newer reading than the server)"""
+        real = sorted(pts)
+        anchor = {}                                         # index of the real reading -> bg of the loop run on it
+        for ms, bg in self._loop_readings(devicestatus):
+            if ms in pts:
+                continue
+            i = bisect.bisect_right(real, ms) - 1
+            if i < 0 or ms - real[i] > MAX_AGE_MS:
+                bridged = True
+            elif i + 1 < len(real) and real[i + 1] - real[i] > MAX_AGE_MS:
+                if ms - real[i] <= BRIDGE_ANCHOR_MS:      # ran on that reading (or an older one)
+                    anchor[i] = bg
+                    bridged = False
+                else:
+                    bridged = i not in anchor or abs(bg - anchor[i]) > PIN_TOL
+            else:
+                bridged = False
+            if bridged:
+                pts[ms] = bg
+                self.bridged_ts.add(ms)
+
+    def bridged_in(self, start_ms, end_ms):
+        """number of bridged readings with start <= ts < end"""
+        return sum(1 for t in self.bridged_ts if start_ms <= t < end_ms)
 
     # ------------------------------------------------------------------ core
     def _newest_index(self, now_ms):
@@ -669,21 +766,27 @@ class GlucoseHistory:
         lo = bisect.bisect_left(self.ts, self.ts[i] - KALMAN_WINDOW_MS)
         ts = self.ts[lo:i + 1]
         val = self.val[lo:i + 1]
+        br = self.br[lo:i + 1] if self.br else None
         n = len(ts) - 1
         grid = ts[n] if self.grid == 'moving' else int(self.grid)
         if is_about_5min_data(ts[::-1]):
-            data = bucketed_5min(ts, val, n, grid)
+            data = bucketed_5min(ts, val, n, grid, br)
         else:
-            data = bucketed_recalculated(ts, val, n, grid)
+            data = bucketed_recalculated(ts, val, n, grid, br)
         if not data:
             return None
         if self.smoothing == 'kalman':
             self.kalman.smooth(data)
+        if br and self.bridge_smoothed == 'phone':
+            for b in data:                      # bridged buckets already are the phone's smoothed values
+                if b.bridged:
+                    b.smoothed = max(b.value, 39.0)
         self._last_key = key
         self._last_status = data
         return data
 
     def status_at(self, now_ms, record=None):
+        self.last_bridged = False
         i = self._newest_index(now_ms)
         if i < 0 or now_ms - self.ts[i] > MAX_AGE_MS:
             return None
@@ -693,6 +796,7 @@ class GlucoseHistory:
         if not data:
             return None
         self.last_index = i
+        self.last_bridged = bool(self.br and self.br[i])
         now = data[0]
         glucose = now.recalculated
         if record is not None:

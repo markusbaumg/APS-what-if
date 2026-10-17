@@ -37,8 +37,9 @@ What one trial does, in order (DESIGN.md section 4.4):
      `round(ms / 1000, 1)`, filled unconditionally in TreatLoop, also on noplot). Missing or empty -> the flag
      `no_pred`, the trial still counts: the metrics fall back to the recorded-BG rule (`lowside_no_pred`).
   7. `metrics.trial_metrics(csv, base=<base csv of the day>, caps, min_guard from Pred Levels, tdd_phone_U from the
-     frozen meta)`; without a base CSV (the base trial itself, or the orchestrator did not hand one over) the trial is
-     compared with itself and flagged `no_base_csv`. A base whose loop count differs is not used (flag
+     frozen meta, bridged = the rows inside the meta's CGM-bridged stretches (H-714) -> agreement_bridged_pct /
+     agreement_unbridged_pct for the quarantine)`; without a base CSV (the base trial itself, or the orchestrator
+     did not hand one over) the trial is compared with itself and flagged `no_base_csv`. A base whose loop count differs is not used (flag
      `base_loop_mismatch:<n>/<m>`); the quarantine (days.py, H-204) and the orchestrator's guard read `metrics.loops`.
   8. Tier-2 files through export.py when `report_dir` is set: `series/<day>/<vhash>.json` always, `series/<day>/orig.json`
      once per day, `pred/<day>/<vhash>.json` + `.text.json` (and the phone's `orig` pair once per day) when `pred` is
@@ -429,6 +430,15 @@ def min_guard_list(pred, rows):
     return out
 
 
+def bridged_flags(rows, meta):
+    """Per CSV row: the loop lies in a stretch replayed on CGM readings bridged from devicestatus (the frozen meta's
+    character.cgm_bridged_stretches, H-714; ms bounds, inclusive); None when the meta names no stretch."""
+    stretches = ((meta or {}).get('character') or {}).get('cgm_bridged_stretches') or []
+    if not stretches:
+        return None
+    return [any(a / 1000.0 - 0.5 <= t <= b / 1000.0 + 0.5 for a, b, _ in stretches) for t in export.loop_times(rows)]
+
+
 def caps_for(spec, settings):
     a = spec.assignment()
     return (effective_cap(a, spec.base_lines, settings, 'autoISF_max'),
@@ -587,19 +597,20 @@ def run_trial(spec, worker=None):
         if tdd is None and meta and spec.whole_day():
             tdd = ((meta.get('character') or {}).get('tdd_U'))
         mg = min_guard_list(pred, rows) if pred else None
+        br = bridged_flags(rows, meta)
         base = spec.base_csv if (spec.base_csv and os.path.isfile(spec.base_csv)) else None
         if base is None and spec.params:
             res.flags.append('no_base_csv')
         try:
             m = hm.trial_metrics(paths['csv'], base=base, autoisf_max=cap_max, autoisf_min=cap_min, min_guard=mg,
-                                 tdd_phone_U=tdd)
+                                 tdd_phone_U=tdd, bridged=br)
         except ValueError as e:                      # loop counts differ from the base: compare with itself, say so
             if base is None:
                 raise
             nb = len(read_result_csv(base)[1])
             res.flags.append(f'base_loop_mismatch:{len(rows)}/{nb}')
             m = hm.trial_metrics(paths['csv'], base=None, autoisf_max=cap_max, autoisf_min=cap_min, min_guard=mg,
-                                 tdd_phone_U=tdd)
+                                 tdd_phone_U=tdd, bridged=br)
             m['base_loop_mismatch'] = str(e)[:200]
         for f in m.pop('flags', []) or []:
             if f not in res.flags:

@@ -20,9 +20,13 @@ that `emulator_core.scanNightscout()` constructs; `replay.py` (H-102) installs i
 File format. `<day>.loops.jsonl.gz` is gzip JSONL, one event per line in the order the live source produced them:
 a loop line is the dict `loops()` yielded (`record`, `suggested`, `stamp`, `now_ms`, `utcOffset`, `glucose_status`,
 `iob_array`, `currenttemp`, `lastTempAge`, `profile`, `activity_monitor`, `autosens_data`, `meal_data`,
-`microBolusAllowed`, `console_error`, `autoISF_version`; see NIGHTSCOUT_SOURCE.md), a dropped line is
+`microBolusAllowed`, `console_error`, `autoISF_version`, and `cgm_bridged: true` only on a loop replayed on a CGM
+reading bridged from devicestatus (H-714, ns_glucose; files written before it simply have no such key); see
+NIGHTSCOUT_SOURCE.md), a dropped line is
 `{"dropped": "<reason>", "ms": <loop_ms of the record>}` for every record the live source skipped (duplicate upload,
-loop aborted by AAPS, no CGM within 12 min, no result, and the counted-but-replayed 'SMB fallback loop'). Storing
+loop aborted by AAPS, no CGM within 12 min, no result, and the counted-but-replayed 'SMB fallback loop'; plus
+`"cgm_bridged": true` when the skipped record still gave a bridged reading, so FrozenSource can print the live
+source's 'CGM readings bridged from devicestatus: N (M loops)' counter: N = bridged loops + such drops). Storing
 the drops with their time lets `FrozenSource.loops()` print the same end-of-run `Nightscout loops skipped:` counters
 for any sub-window as the live source. The dicts are JSON by construction (the core `json.dumps()` them into its
 collectors) and the round trip is dict-equal (verified: `frozen loops() == live loops()` for 2026-09-06 06-09Z and
@@ -32,8 +36,10 @@ uncompressed JSONL bytes and is the `freeze_sha` of every trials.jsonl row of th
 `<day>.meta.json` (contract of DESIGN.md section 4.5, extended): day, host, url, window [start, end) ISO, loops,
 sha1, bytes, bytes_gz, seconds, created, final, partial, ns_code_sha (sha1 over the ns_*.py files only - the
 freeze depends on nothing else of the core), code_sha (contracts.code_sha, for the record), settings_sha
-(contracts.settings_sha), dropped {no_reason, aborted, no_cgm, duplicate, outside, smb_fallback}, character
-(days.character), confounders (days.confounders), autoISF_versions, finality {missing, partial}.
+(contracts.settings_sha), dropped {no_reason, aborted, no_cgm, duplicate, outside, smb_fallback}, bridged {readings,
+loops} (H-714: CGM readings of the day bridged from devicestatus and loops replayed on one; absent in metas written
+before it, readers use .get), character (days.character), confounders (days.confounders), autoISF_versions,
+finality {missing, partial}.
 
 Meta recompute (`hc freeze --recompute-meta [days]`, recompute_meta()). Rewrites only `character`, `confounders`
 and `autoISF_versions` of <day>.meta.json (plus `meta_recomputed`, the time) from the cache and the frozen loops,
@@ -232,7 +238,10 @@ class _RecordingSource(ns_source.NightscoutSource):
     def _skip(self, why):
         super()._skip(why)
         rec = getattr(self.devicestatus, 'current', None)
-        self.pending.append({'dropped': why, 'ms': ns_source.loop_ms(rec) if isinstance(rec, dict) else None})
+        ev = {'dropped': why, 'ms': ns_source.loop_ms(rec) if isinstance(rec, dict) else None}
+        if why != 'duplicate upload' and ev['ms'] in getattr(self.glucose, 'bridged_ts', ()):
+            ev['cgm_bridged'] = True        # a bridged CGM reading came from this record (FrozenSource counts it)
+        self.pending.append(ev)
 
 
 # ----------------------------------------------------------------------------- freezing
@@ -354,6 +363,10 @@ def freeze_day(day, url='ns:', settings=None, allow_partial=False, force=False, 
     for k, v in counters.items():
         if k not in dropped:
             dropped[k] = v
+    day_start, day_end = day_bounds(day)
+    gh = getattr(src, 'glucose', None)
+    bridged = {'readings': gh.bridged_in(day_start, day_end) if hasattr(gh, 'bridged_in') else 0,
+               'loops': sum(1 for l in loops if l.get('cgm_bridged'))}
     meta = {
         'format': FORMAT, 'day': day, 'host': host, 'url': days.resolve_url(url, settings),
         'window': [start_iso, end_iso], 'loops': n_loops, 'sha1': sha.hexdigest(),
@@ -362,6 +375,7 @@ def freeze_day(day, url='ns:', settings=None, allow_partial=False, force=False, 
         'ns_code_sha': ns_code_sha(software_dir), 'code_sha': contracts.code_sha(software_dir),
         'settings_sha': contracts.settings_sha(settings_path, settings),
         'dropped': dropped,
+        'bridged': bridged,
         'character': days.character(day, src, loops, cache_root=cache_root),
         'confounders': days.confounders(day, settings, src, loops, cache_root=cache_root),
         'autoISF_versions': sorted({l['autoISF_version'] for l in loops if l.get('autoISF_version')}),
@@ -385,7 +399,7 @@ def _loops_sha1(path):
 
 
 _CharacterSource = ns_source.NightscoutSource              # load() only: treatments, iob, profiles (tests patch it)
-_SLIM_KEYS = ('now_ms', 'utcOffset', 'console_error', 'autoISF_version')
+_SLIM_KEYS = ('now_ms', 'utcOffset', 'console_error', 'autoISF_version', 'cgm_bridged')
 
 
 def recompute_meta(day, url='ns:', settings=None, base_dir=None, log_msg=print, software_dir=SOFTWARE_DIR,
@@ -641,19 +655,25 @@ class FrozenSource:
         if not self._loaded:
             self.load()
         start, end = self._window()
+        bridged_loops = bridged_readings = 0
         for day in self.days:
             for ev in read_events(loops_path(day, self.host, self.base_dir)):
                 if 'dropped' in ev:
                     ms = ev.get('ms')
                     if ms is not None and start <= ms < end:
                         self._skip(ev['dropped'])
+                        bridged_readings += bool(ev.get('cgm_bridged'))
                     continue
                 ms = ev.get('now_ms')
                 if ms is None or not (start <= ms < end):
                     continue
+                if ev.get('cgm_bridged'):
+                    bridged_loops += 1
                 yield ev
         if self.skipped:
             self.log_msg('\nNightscout loops skipped: ' + ', '.join(f'{v} x {k}' for k, v in self.skipped.items()))
+        if bridged_loops or bridged_readings:
+            self.log_msg(ns_source.bridged_line(bridged_readings + bridged_loops, bridged_loops))
 
 
 _LIVE_SOURCE = ns_source.NightscoutSource

@@ -383,9 +383,31 @@ def agreement(s: LoopSeries) -> Dict[str, float]:
             'isf_within_pct': pct(isf_ok), 'agreement_pct': pct(all(x) for x in zip(smb_ok, req_ok, rate_ok, isf_ok))}
 
 
+def subset(s: LoopSeries, mask: Sequence[bool]) -> LoopSeries:
+    """the loops of `s` where `mask` is true (the decision columns agreement() reads, plus t and bg)"""
+    idx = [i for i, m in enumerate(_opt_list(mask, s.n)) if m]
+    pick = lambda name: [getattr(s, name)[i] for i in idx]   # noqa: E731
+    return LoopSeries(t=pick('t'), bg=pick('bg'), smb_phone=pick('smb_phone'), smb_emul=pick('smb_emul'),
+                      insreq_phone=pick('insreq_phone'), insreq_emul=pick('insreq_emul'),
+                      rate_phone=pick('rate_phone'), rate_emul=pick('rate_emul'),
+                      isf_phone=pick('isf_phone'), isf_emul=pick('isf_emul'), source=s.source)
+
+
+def bridged_agreement(s: LoopSeries, bridged: Optional[Sequence[bool]]) -> Dict[str, Optional[float]]:
+    """H-714: agreement_pct on the loops replayed on a CGM reading bridged from devicestatus vs on the other loops
+    ({} when no loop is bridged, so the metrics of every other day keep their keys): bridged_loops,
+    agreement_bridged_pct, agreement_unbridged_pct (None without such loops).  days.quarantine_reasons reads the pair."""
+    if not bridged or not any(bridged):
+        return {}
+    flags = [bool(v) for v in _opt_list(bridged, s.n)]
+    rest = [not v for v in flags]
+    return {'bridged_loops': sum(flags), 'agreement_bridged_pct': agreement(subset(s, flags))['agreement_pct'],
+            'agreement_unbridged_pct': agreement(subset(s, rest))['agreement_pct'] if any(rest) else None}
+
+
 # ----------------------------------------------------------------------------- per-trial metrics
 def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_guard=None, zero_temp=None,
-                  smb_off=None, tdd_phone_U=None, series: Optional[LoopSeries] = None) -> dict:
+                  smb_off=None, tdd_phone_U=None, series: Optional[LoopSeries] = None, bridged=None) -> dict:
     """One metrics dict per (variant, day) = emulator_optimize.metrics_from_csv(csv_path, caps) + the section 5.2
     additions.  `base` is the base replay of the same day (LoopSeries or CSV path); None means "this trial IS the
     base", then every *_vs_base metric is 0 and the vs-phone values are what floors_from_base() reads.
@@ -393,7 +415,8 @@ def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_g
     `min_guard`, `zero_temp`, `smb_off`: optional per-loop lists aligned to the CSV rows (see LoopSeries).
     `tdd_phone_U`: the phone's TDD of the day for env_day_pct_tdd; None -> the window's total_orig_U with the flag
     `tdd_from_window`.  `series`: pass a ready LoopSeries instead of reading csv_path again (csv_path may then be None
-    only if the optimizer metrics are not wanted - they need the file).
+    only if the optimizer metrics are not wanted - they need the file).  `bridged`: optional per-loop flags (loops
+    replayed on a CGM reading bridged from devicestatus, H-714) -> bridged_agreement() keys.
 
     Flags (list of strings, always present): `lowside_no_pred` (no emulated minGuardBG on any loop: the recorded-BG rule
     alone), `lowside_pred_partial` (some loops), `zero_temp_rate_proxy`, `tt_smb_off_unknown`, `tdd_from_window`,
@@ -422,6 +445,7 @@ def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_g
     give_e, give_p, give_b = s.give_emul, s.give_phone, ref.give_emul
     rise_mask = _rise_mask(s)
     m.update(agreement(s))
+    m.update(bridged_agreement(s, bridged))
     changed_phone = changed_flags(s)
     # the change counts, see "Change counts" in the module docstring: changed_vs_base is the signed net difference
     # of the two vs-phone counts, changed_vs_base_loops the unsigned number of loops where variant and base differ
@@ -1314,6 +1338,7 @@ def leaderboard_rows(ranking: Ranking) -> List[dict]:
 
 __all__ = ['OBJECTIVE_VERSION', 'LoopSeries', 'trial_metrics', 'metrics_from_csv', 'read_result_csv', 'effective_cap',
            'loop_intervals_h', 'hindsight_covariates', 'prehypo_extra_U', 'envelope', 'changed_flags', 'agreement',
+           'subset', 'bridged_agreement',
            'min_guard_from_levels', 'min_guard_from_reason', 'floors_from_base', 'effective_floor', 'is_tie',
            'tie_components', 'tie_with_base', 'effect_over_floor', 'feasibility_day', 'aggregate_days',
            'pareto_objectives', 'pareto_front', 'dominates', 'scalar_objective', 'rank_variants', 'leave_one_day_out',

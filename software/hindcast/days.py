@@ -37,13 +37,21 @@ previous and the next day's files are not consulted). A day without an entries f
 cgm_note 'no CGM file'. loop_gap_min is the longest pause between the day's loop runs: the phone not looping (off,
 pump offline, closed loop paused) is a different thing from a CGM gap
 and is never a quarantine reason.
+CGM bridge (H-714). Loops replayed on a CGM reading that ns_glucose bridged from devicestatus (the server had no
+entry, the phone looped on its own bg) carry `cgm_bridged: true`. On a day with such loops - and only there, so
+every other record keeps its shape - the character adds cgm_bridged_loops, cgm_bridged_stretches [[first_ms,
+last_ms, minutes]] (bridged_stretches(): runs of consecutive bridged loops), cgm_bridged_min (their sum) and
+cgm_gap_unbridged_min (the longest CGM gap with the bridged loops counted as readings, cgm_bridge_day());
+cgm_gap_min stays the raw gap of the entries.
 `tdd_U` is insulin the pump delivered as recorded in Nightscout (boluses + temp basals + scheduled basal where no
 temp ran), not the phone's own TDD statistic. The character describes the day; it is never a score and never
 inferred into chips - day chips (`workday`, `sport`) are typed by the user in study.json (DESIGN.md section 4.5).
 
 Confounders (strings for the badges; local time of the phone from the records' utcOffset):
     settings changes from ns_settings.json profile_history inside the day, CGM gaps >= GAP_MIN minutes ('cgm gap N
-    min 02h00-03h52 local', clipped at the UTC day edges; 'no CGM file' without entries), the phone not looping >= LOOP_GAP_MIN minutes ('phone not looping for N min 07h34-17h44 local'),
+    min 02h00-03h52 local', clipped at the UTC day edges; 'no CGM file' without entries; a stretch bridged from the
+    phone is its own badge 'CGM bridged from phone N min 02h04-03h50 local' and only what is left of the gap around
+    it stays a 'cgm gap'), the phone not looping >= LOOP_GAP_MIN minutes ('phone not looping for N min 07h34-17h44 local'),
     autoISF version
     changes inside the day (H-712: the smoother changed with
     3.2.1), Profile Switches with a percentage or time shift, Temporary Targets longer than LONG_TT_MIN.
@@ -59,7 +67,11 @@ status.json, excluded from scoring, never hidden - when any of these holds:
        not the settings),
     2. the longest CGM gap of the day exceeds `cgm_gap_max_min` (120 min; from the frozen meta's character record
        `cgm_gap_min`, measured on the CGM entries as described above, or from raw entries when given; loop gaps
-       never count),
+       never count). A stretch bridged from the phone (H-714) is not a gap - the meta's cgm_gap_unbridged_min is
+       judged instead - only when the base trial's agreement on the bridged loops (metrics agreement_bridged_pct,
+       replay.bridged_flags from the meta's stretches) is not below its agreement on the other loops of the day
+       (agreement_unbridged_pct); otherwise, or when the pair was not measured, the raw gap counts and the reason
+       says why,
     3. ns_settings.json `profile_history` records a change INSIDE the day of a key the study searches (the phone's
        own value of that key is not one value on that day),
     4. the loop counts of the day's trials differ across variants (state leaked between in-process replays, or a
@@ -430,6 +442,31 @@ def cgm_day(day, src=None, cache_root=None, min_gap_min=GAP_MIN):
     return {'cgm': cgm, 'gaps': g, 'cgm_gap_min': max([m for _, _, m in g], default=0), 'cgm_gaps': len(g), 'note': None}
 
 
+def bridged_stretches(loops):
+    """[(first_ms, last_ms, minutes)] of the runs of consecutive loops replayed on a CGM reading bridged from
+    devicestatus (`cgm_bridged`, H-714), in loop order; a loop on a real reading ends a run."""
+    out, run = [], []
+    for loop in sorted((l for l in loops or [] if l.get('now_ms') is not None), key=lambda l: l['now_ms']):
+        if loop.get('cgm_bridged'):
+            run.append(loop['now_ms'])
+        elif run:
+            out.append((run[0], run[-1], round((run[-1] - run[0]) / MIN_MS)))
+            run = []
+    if run:
+        out.append((run[0], run[-1], round((run[-1] - run[0]) / MIN_MS)))
+    return out
+
+
+def cgm_bridge_day(day, cd, loops, min_gap_min=GAP_MIN):
+    """The bridged view of a cgm_day() result: {'stretches': bridged_stretches() inside the day, 'gaps': the CGM gaps
+    with the bridged loops counted as readings (what is left of each gap), 'gap_min': the longest of those}."""
+    start, end = day_bounds(day)
+    stretches = [st for st in bridged_stretches(loops) if start <= st[0] < end]
+    stamps = [ms for ms, _ in cd['cgm']] + [l['now_ms'] for l in loops or [] if l.get('cgm_bridged')]
+    g = gaps(stamps, start, end, min_gap_min)
+    return {'stretches': stretches, 'gaps': g, 'gap_min': max([m for _, _, m in g], default=0)}
+
+
 def loop_gaps(day, loops, min_gap_min=LOOP_GAP_MIN):
     """Pauses between the day's loop runs (the phone not looping), day edges included."""
     start, end = day_bounds(day)
@@ -577,6 +614,13 @@ def character(day, src, loops, cache_root=None):
     rec['cgm_gap_min'] = cd['cgm_gap_min']
     rec['cgm_gaps'] = cd['cgm_gaps']
     rec['cgm_note'] = cd['note']
+    if any(l.get('cgm_bridged') for l in loops) and cd['note'] != NO_CGM_FILE:
+        # H-714: only on a day with bridged loops, so every other day's character record keeps its shape
+        br = cgm_bridge_day(day, cd, loops)
+        rec['cgm_bridged_loops'] = sum(1 for l in loops if l.get('cgm_bridged'))
+        rec['cgm_bridged_min'] = sum(m for _, _, m in br['stretches'])
+        rec['cgm_bridged_stretches'] = [[a, b, m] for a, b, m in br['stretches']]
+        rec['cgm_gap_unbridged_min'] = br['gap_min']
 
     rec['tt_minutes'] = _tt_minutes(src, start, end)
     n = len(loops)
@@ -639,7 +683,13 @@ def confounders(day, settings, src, loops, min_gap_min=GAP_MIN, cache_root=None)
     cd = cgm_day(day, src, cache_root, min_gap_min)
     if cd['note'] == NO_CGM_FILE:
         out.append(NO_CGM_FILE)
-    for a, b, minutes in cd['gaps']:
+    cgm_gaps_ = cd['gaps']
+    if cd['note'] != NO_CGM_FILE and any(l.get('cgm_bridged') for l in loops):
+        br = cgm_bridge_day(day, cd, loops, min_gap_min)     # a bridged stretch is its own badge, not a gap
+        cgm_gaps_ = br['gaps']
+        for a, b, minutes in br['stretches']:
+            out.append(f'CGM bridged from phone {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
+    for a, b, minutes in cgm_gaps_:
         out.append(f'cgm gap {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
     for a, b, minutes in loop_gaps(day, loops):
         out.append(f'phone not looping for {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
@@ -746,6 +796,25 @@ def _fmt_minutes(v):
     return str(int(round(v))) if isinstance(v, (int, float)) else str(v)
 
 
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _bridged_gap(gap, unbridged, base_metrics):
+    """(the gap the quarantine judges, note for the reason) - H-714: the CGM gap with the bridged stretches counted
+    as readings (`unbridged`) replaces the raw gap only when the base replay's agreement on the bridged loops is not
+    worse than on the rest of the day; otherwise the raw gap stays and the note says why."""
+    if not (_is_num(gap) and _is_num(unbridged)) or unbridged >= gap:
+        return gap, ''
+    bm = base_metrics if isinstance(base_metrics, dict) else {}
+    b, r = bm.get('agreement_bridged_pct'), bm.get('agreement_unbridged_pct')
+    if _is_num(b) and _is_num(r) and b >= r:
+        return unbridged, ''
+    if _is_num(b) and _is_num(r):
+        return gap, f'; bridged from the phone, but the bridged loops agree less with the phone than the rest ({b:.1f} % vs {r:.1f} %)'
+    return gap, '; bridged from the phone, agreement on the bridged loops not measured'
+
+
 def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, meta=None, entries=None,
                        loop_counts=None, thresholds=None):
     """The reasons `day` is quarantined ([] = it takes part in scoring). Pieces, each optional:
@@ -761,13 +830,16 @@ def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, 
             out.append(f'base agreement {pct:.1f} % (threshold {thr["agreement_pct_min"]:g} %): the replay would '
                        f'measure the emulator, not the settings')
     gap = None
+    bridge_note = ''
     if entries is not None:
         start, end = day_bounds(day)
         gap = max([m for _, _, m in cgm_gaps(entries, start, end)], default=0)
     elif isinstance(meta, dict):
-        gap = ((meta.get('character') or {}).get('cgm_gap_min'))
-    if isinstance(gap, (int, float)) and not isinstance(gap, bool) and gap > thr['cgm_gap_max_min']:
-        out.append(f'CGM gap {_fmt_minutes(gap)} min (threshold {thr["cgm_gap_max_min"]:g} min)')
+        ch = meta.get('character') or {}
+        gap = ch.get('cgm_gap_min')
+        gap, bridge_note = _bridged_gap(gap, ch.get('cgm_gap_unbridged_min'), base_metrics)
+    if _is_num(gap) and gap > thr['cgm_gap_max_min']:
+        out.append(f'CGM gap {_fmt_minutes(gap)} min (threshold {thr["cgm_gap_max_min"]:g} min){bridge_note}')
     for when, key, old, new in history_hits(settings, day, searched_keys):
         out.append(f'profile_history: {key} changed {_fmt(old)}->{_fmt(new)} inside the day and {key} is a searched key')
     counts = loop_counts.values() if isinstance(loop_counts, dict) else (loop_counts or [])
