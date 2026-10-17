@@ -1,0 +1,96 @@
+<title>Hindcast Iteration 2</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+:root{--bg:#f7f6f2;--fg:#1d1f22;--mute:#6b6f76;--line:#dcd9d1;--card:#ffffff;--acc:#2b6cb0;--ok:#2f855a;--warn:#b7791f;--low:#c53030;--soft:#eef2f8}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#16181c;--fg:#e8e6e1;--mute:#9a9ea6;--line:#2c3038;--card:#1e2126;--acc:#63a4ff;--ok:#68d391;--warn:#f6c15b;--low:#fc8181;--soft:#1f2733;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#16181c;--fg:#e8e6e1;--mute:#9a9ea6;--line:#2c3038;--card:#1e2126;--acc:#63a4ff;--ok:#68d391;--warn:#f6c15b;--low:#fc8181;--soft:#1f2733;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif;margin:0;padding-block:28px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+main{max-width:860px;margin:0 auto}
+h1{font-size:1.6rem;margin:0 0 4px;text-wrap:balance}
+h2{font-size:1.15rem;margin:30px 0 8px;text-wrap:balance}
+p,li{max-width:70ch}
+.sub{color:var(--mute);margin:0 0 18px}
+.box{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}
+.box.goal{border-left:4px solid var(--acc)}
+.box.stop{border-left:4px solid var(--warn)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
+.card .k{font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.card .v{font-size:1.35rem;font-weight:600;margin-top:2px}
+.card .n{font-size:.8rem;color:var(--mute)}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--card);margin:10px 0}
+table{border-collapse:collapse;width:100%;font-size:.86rem}
+th,td{padding:6px 9px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--mute);font-size:.74rem;letter-spacing:.04em;text-transform:uppercase}
+td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.tag{display:inline-block;font-size:.72rem;padding:1px 7px;border-radius:10px;border:1px solid var(--line);color:var(--mute);white-space:nowrap}
+.tag.ok{color:var(--ok);border-color:var(--ok)}
+.tag.warn{color:var(--warn);border-color:var(--warn)}
+a{color:var(--acc)}
+ul{padding-left:1.2em}
+.foot{color:var(--mute);font-size:.84rem;margin-top:26px;border-top:1px solid var(--line);padding-top:12px}
+code{font-size:.88em;background:var(--soft);padding:0 4px;border-radius:3px}
+</style>
+<main>
+<h1>Hindcast iteration 2</h1>
+<p class="sub">17 October 2026, late morning. Seven studies re-judged on the cleaned day set, two of them new. Nothing applied, nothing on GitHub.</p>
+
+<div class="box goal"><p><strong>End goal</strong> (yours, this morning): a more aggressive and quicker loop, fully closed without manual boluses, with glucose between 3.9 and 10 mmol/l more than 90 % of the time. Hindcast can rank what the loop would have asked for; the time in that range is observed on the phone only, never computed here.</p></div>
+
+<h2>Where the loop stands (observed, 42 days)</h2>
+<div class="cards">
+<div class="card"><div class="k">3.9–10 mmol/l</div><div class="v">86.2 %</div><div class="n">median; 15 of 42 days above 90 %</div></div>
+<div class="card"><div class="k">Below 3.9</div><div class="v">1.4 %</div><div class="n">mean of the days</div></div>
+<div class="card"><div class="k">Manual boluses</div><div class="v">2 / day</div><div class="n">median; 4 days without one</div></div>
+<div class="card"><div class="k">Carb entries</div><div class="v">0</div><div class="n">UAM only</div></div>
+<div class="card"><div class="k">SMB insulin</div><div class="v">18 U / day</div><div class="n">median</div></div>
+<div class="card"><div class="k">Loop hours</div><div class="v">20 h / day</div><div class="n">median; 10 days under 16 h</div></div>
+</div>
+<p>Full per-day table: <a href="https://claude.ai/artifact/NR5CVNZpsHwhvBnoX3sPba">observed baseline</a>.</p>
+
+<h2>What changed in the method this morning</h2>
+<ul>
+<li><strong>Partial days are not scored.</strong> Oct 3 (the phone looped 3.5 h, TDD 7.6 U) alone had made 68 of 96 aggressive variants infeasible through the 15 %-of-TDD rule. A day the phone looped less than 16 h is now listed with its values but left out of every verdict. That removes 10 of 42 days (Sep 10, 20, 24, 25; Oct 3, 5, 9, 14, 15, 16). The search set is now 8 days: Oct 4, 6, 7, 8, 10, 11, 12, 13.</li>
+<li><strong>Envelope-limited is its own verdict.</strong> A variant that passes every safety check but moves more than 1 U in a 3 h window on some days is listed with those days instead of being hidden among the infeasible ones.</li>
+<li><strong>An "earlier" step must beat the noise floor</strong> on rises; otherwise it is a tie. No negative step is ever printed as a step.</li>
+</ul>
+
+<h2>Toward the goal: no step up is feasible on these days</h2>
+<div class="box stop">
+<p>Every variant that asks for more insulin on rises also adds insulin in the two hours before one of the recorded lows of Oct 4, 6, 7 or 8, where your own settings had already dosed. The pre-hypo rule allows at most the base replay's own noise there (0.05 to 0.11 U), so all of them fail. Levers that act only far above target fail the same way: higher_ISFrange_weight 0.5 adds 0.71 U before the Oct 4 low, smb_delivery_ratio_max 0.6 adds 0.70 U, dura_ISF_weight 1.1 adds 0.35 U before the Oct 7 low.</p>
+</div>
+<div class="tbl"><table>
+<thead><tr><th>Study</th><th>Variants</th><th>Result</th><th>Page</th></tr></thead>
+<tbody>
+<tr><td><code>oct_earlier</code><br><span class="tag">question earlier, 7 levers</span></td><td class="num">92</td><td>0 steps. 17 feasible, all inside the rise floor of 0.31 U/day (largest +0.20 U/day: smb_delivery_ratio 0.25). 12 envelope-limited, every one asking less on rises. 62 infeasible: 48 before a recorded low, 47 beyond the envelope.</td><td><a href="https://claude.ai/artifact/8Xqz8pEAU8brgoWA7nifJw">open</a></td></tr>
+<tr><td><code>oct_aggressive</code><br><span class="tag">larger steps, 8 levers</span></td><td class="num">97</td><td>88 infeasible, all of them before a recorded low on Oct 4 and/or Oct 6, most also 1.2 to 6.7 U beyond the envelope in 3 h. 2 ties and 2 envelope-limited, all asking less.</td><td><a href="https://claude.ai/artifact/BJc8D3joL7iW3SjyiTp8zh">open</a></td></tr>
+</tbody></table></div>
+<p>"Quicker" (SMB interval 2, 3 or 5 min) is beyond what a replay can judge: 3 to 7 U more in a 3 h window on Oct 4 and 6. Only a real, staged application could tell.</p>
+
+<h2>What the data does support (campaign-1 studies, re-judged)</h2>
+<div class="tbl"><table>
+<thead><tr><th>Lever</th><th>Phone</th><th>Proposed</th><th>Verdict</th><th>On rises, 8 search days</th><th>Hold-out</th></tr></thead>
+<tbody>
+<tr><td>bgAccel_ISF_weight <a href="https://claude.ai/artifact/RxYnSWrvAQ3sznvAKMzGB1">tier A</a></td><td class="num">0.09</td><td class="num">0.08</td><td><span class="tag ok">recommended for review</span></td><td class="num">−0.38 U/day, 2.0× floor</td><td>14/14 days, top-3 on 100 % of folds</td></tr>
+<tr><td>activity_scale_factor <a href="https://claude.ai/artifact/FwjnFqDXfPrRqizB1qHMRw">tier B</a></td><td class="num">1.1</td><td class="num">1.25</td><td><span class="tag ok">recommended for review</span></td><td class="num">−0.62 U/day, 3.6× floor</td><td>14/14 days, 96 % of folds</td></tr>
+<tr><td>pp_ISF_weight <a href="https://claude.ai/artifact/FwjnFqDXfPrRqizB1qHMRw">tier B</a></td><td class="num">0.018</td><td class="num">0.012</td><td><span class="tag warn">candidate only (was recommended for review)</span></td><td class="num">−0.38 U/day, 2.6× floor</td><td>top-3 on 64 % of folds, needs 80 %</td></tr>
+<tr><td>carb_ratio scale <a href="https://claude.ai/artifact/82dR3x7qDFLXTuXo9VG87C">profile, weak evidence</a></td><td class="num">1.0</td><td class="num">1.15</td><td><span class="tag ok">recommended for review</span></td><td class="num">−0.09 U/day, 0.5× floor: tiny</td><td>12/14 days, 91 % of folds</td></tr>
+<tr><td>7-lever point <a href="https://claude.ai/artifact/W6Q8Fao1bbuZNgvTiMdES1">combined</a></td><td colspan="2">smb_delivery_ratio 0.2→0.15, _min 0.1→0.05, bgAccel 0.09→0.08, autoISF_min 0.3→0.6, maxSMBBasalMinutes 240→90, lower_ISFrange_weight 0→0.5</td><td><span class="tag ok">recommended for review</span> (was unstable with the partial days in)</td><td class="num">−0.77 U/day rises, −0.14 U/day other loops, 43 fewer zero temps over 8 days</td><td>22/22 days, 97 % of 30 folds</td></tr>
+</tbody></table></div>
+<p>All of these ask for <em>less</em> insulin on rises, with no extra insulin before a recorded low and no envelope breach. The 7-lever point is not simply gentler: autoISF_min 0.3→0.6 lets the ISF factor fall less, so less insulin reduction when glucose is low or falling, and it sets fewer zero temps. What glucose would have done under any of them the replay cannot say. The caps study (<a href="https://claude.ai/artifact/LxY1xgwKNsFApt5pErSwXR">max_iob, max_basal</a>) found nothing that binds.</p>
+
+<h2>Step 1: your call</h2>
+<ol>
+<li><strong>Apply one gentler lever</strong> (bgAccel_ISF_weight 0.08 is the smallest and most consistent; activity_scale_factor 1.25 the largest single change; the 7-lever point the largest change) and observe a week. If the new days show rises without a low in the following two hours, the pre-hypo rule stops binding and the next search can take a step up from the new base.</li>
+<li><strong>Apply nothing and let more days accumulate.</strong> The blocking days are 3 of 8; the days that get frozen after them decide on their own whether a step up becomes feasible.</li>
+</ol>
+<p>Either way: tell me the date and time if you change a setting, so it goes into the profile history and the replay keeps its base right.</p>
+
+<h2>Open</h2>
+<ul>
+<li>Manual-bolus coverage (how much of each manual bolus the loop would already have given as SMBs) exists since this morning but only the newest trial rows carry it, so no number yet. 15 manual boluses on the 8 search days, observed.</li>
+<li>Oct 17 is frozen once the day is final.</li>
+</ul>
+
+<p class="foot">Hindcast replays the loop's decisions under other settings over the glucose and insulin history that the phone's own settings produced. It says where and how much the loop would have asked differently; it cannot say what glucose would have done. A variant that boluses earlier is charged for its bolus and for the later ones the phone actually gave, so deltas overstate aggressive settings and understate gentle ones. The base replay disagrees with the phone in about 4 % of loops; differences smaller than that floor are ties. Nothing here changes the phone; settings are for you and your care team to review. This is one person's insulin dosing, not medical advice.</p>
+</main>

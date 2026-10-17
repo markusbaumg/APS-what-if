@@ -48,6 +48,24 @@ the frozen days. Markus gets the same table as a private artifact page.
 Days on which the phone looped less than 16 h are "partial days": they are listed with their observed values
 but not scored by any study, because their TDD and 3 h windows are only a fraction of the envelope's.
 
+## Where the loop stands (iteration 2, 2026-10-17)
+
+Observed over 42 days (Aug 30 - Oct 16): glucose between 3.9 and 10 mmol/l 86.2 % of the time (median; 15 of
+42 days above 90 %), below 3.9 on 1.4 % (mean), 2 manual boluses per day (median; 4 days without one), 0 carb
+entries, SMB 18 U per day (median). The phone looped 20 h per day (median); 10 days looped less than 16 h and are
+not scored.
+
+Replay (search days Oct 4, 6, 7, 8, 10, 11, 12, 13; details in `CAMPAIGN_2026-10-17.md`, "Iteration 2 results"):
+**no step toward "more" is feasible on these days.** Every variant that asks for more insulin on rises also adds
+insulin in the two hours before one of the recorded lows of Oct 4, 6, 7 or 8, where the phone's own settings had
+already dosed. Levers that act only far above target fail the same way. What the data supports are gentler
+single levers (bgAccel_ISF_weight 0.09 -> 0.08, activity_scale_factor 1.1 -> 1.25) and one 7-lever point, all
+asking for less on rises with nothing extra before a low.
+
+**Step 1 (proposed, not applied):** either apply one of the gentler levers and observe a week, so that days
+without a low after a rise unlock a step up from the new base; or apply nothing and freeze more days, since the
+blocking days are 3 of the 8. Markus decides; the method waits for observed days either way.
+
 ## Non-goals
 
 Hindcast does not change the phone, does not post anywhere by itself, and never claims a glucose outcome
