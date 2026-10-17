@@ -119,6 +119,11 @@ WEAK_EVIDENCE = ('weak evidence: this study varies keys that are locked by defau
                  'keeps the glucose and insulin history the phone\'s own profile and caps produced; it cannot judge a '
                  'different profile or cap, only say how often and by how much the loop would have decided differently. '
                  'Unlocked by the person whose data this is (reason: %s); every proposal is reviewed by hand.')
+NO_GLUCOSE_RESPONSE = ('The replay has no glucose response: every variant is replayed over the glucose the phone\'s '
+                       'own profile and caps produced, so this page shows only where and how much the loop would have '
+                       'decided differently, never what a different profile or cap would have done to glucose.')
+                                                         # follows WEAK_EVIDENCE on the page (report.unlock_caveat)
+                                                         # and on a card ('this page' read as 'this card')
 STATUS_MAX_BYTES = 2048
 ROUND_MAX_BYTES_PER_VARIANT = 2048
 TRIAL_LINE_MAX_BYTES = 4096
@@ -895,6 +900,7 @@ class Candidate(Document):
     effect: dict[str, float] = field(default_factory=dict)          # rise_vs_base_U, rest_vs_base_U, changed_vs_base, ...
     flags: list[str] = field(default_factory=list)
     tie_with: list[str] = field(default_factory=list)               # vhashes it cannot be told from
+    validation: Optional[dict[str, Any]] = None                      # validate round (H-308): metrics.VALIDATION_KEYS
 
     def _check(self, problems):
         if not _SHA_RE.match(self.vhash):
@@ -913,6 +919,7 @@ class TopItem(Document):
     why: str
     rank: Optional[int] = None
     effect: dict[str, float] = field(default_factory=dict)          # e.g. rise_vs_base_U, rest_vs_base_U, changed_vs_base
+    validation: Optional[str] = None                                 # validate round: 'hold-out 2 of 8, direction 14/16, LODO 1-3'
 
     def _check(self, problems):
         if not _SHORT_SHA_RE.match(self.vhash):
@@ -921,6 +928,8 @@ class TopItem(Document):
             problems.append(f'top {self.variant}: why must be 1..120 characters')
         if len(self.effect) > 4:
             problems.append(f'top {self.variant}: at most 4 effect numbers in status.json')
+        if self.validation is not None and not 1 <= len(self.validation) <= 80:
+            problems.append(f'top {self.variant}: validation must be 1..80 characters')
 
 
 @dataclass
@@ -945,8 +954,10 @@ class Status(Document):
     pid: Optional[int] = None
     round: Optional[int] = None
     stale_context: list[str] = field(default_factory=list)
-    floor: dict[str, float] = field(default_factory=dict)                 # over all days: max |base - phone| per component
-                                                                          # (smb_U, ins_req_U, tbr_U, loops) + min agreement_pct
+    floor: dict[str, float] = field(default_factory=dict)                 # worst day over the scored days (search +
+                                                                          # hold-out, never quarantined): max |base -
+                                                                          # phone| per component + min agreement_pct;
+                                                                          # Round.floors covers the search days only
     days: dict[str, str] = field(default_factory=dict)                    # day -> 'search' | 'holdout' | 'quarantined: <why>'
     dead_parameters: list[str] = field(default_factory=list)
     top: list[TopItem] = field(default_factory=list)                      # review order (explore) or front, <= 5
@@ -976,9 +987,11 @@ class Round(Document):
     trials: int = 0
     variants: list[Candidate] = field(default_factory=list)
     dead_parameters: list[DeadParameter] = field(default_factory=list)
-    floors: dict[str, dict[str, float]] = field(default_factory=dict)
+    floors: dict[str, dict[str, float]] = field(default_factory=dict)   # day -> floors, the scored SEARCH days only
+                                                                          # (Status.floor: search + hold-out, worst day)
     front: list[str] = field(default_factory=list)                        # vhashes in review order / Pareto front
     notes: list[str] = field(default_factory=list)
+    validation: Optional[dict[str, Any]] = None          # validate round (H-308): top, hold-out days, Kendall tau, counts
 
     def _check(self, problems):
         if self.round < 0:

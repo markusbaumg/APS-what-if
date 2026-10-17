@@ -86,6 +86,7 @@
     '#view-scenarios figure.chart .plot { height: auto; }',
     '#view-scenarios figure.chart .plot:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }',
     '#view-scenarios .sc-badges { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: 0.82rem; color: var(--ink-2); }',
+    '#view-scenarios .sc-badge-day { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; max-width: 100%; }',
     '#view-scenarios .sc-note { font-size: 0.84rem; color: var(--ink-2); max-width: 90ch; }',
     '#view-scenarios .sc-msg { font-size: 0.86rem; color: var(--ink-2); padding: 6px 0; overflow-wrap: anywhere; }',
     '#view-scenarios .sc-tip { font-size: 12px; line-height: 1.35; color: var(--ink); font-variant-numeric: tabular-nums; }',
@@ -752,10 +753,14 @@
     days.forEach(function (d) {
       var dd = dayOf(d) || {};
       var bits = [];
-      if (dd.role && dd.role !== 'search') bits.push(h('span', { class: 'chip role', text: roleText(dd.role) }));
-      (dd.tags || []).forEach(function (x) { bits.push(h('span', { class: 'chip user', text: x })); });
+      // one shared pill style with the Parameters view's verdict pills (page.css .pill); colour only for a confounder
+      if (dd.role && dd.role !== 'search') bits.push(h('span', { class: 'pill', text: roleText(dd.role) }));
+      (dd.tags || []).forEach(function (x) { bits.push(h('span', { class: 'pill', text: x })); });
       (dd.confounders || []).forEach(function (c) { bits.push(h('span', { class: 'pill warning', text: c })); });
-      if (bits.length || days.length > 1 || state.mode === 'days') f.badges.appendChild(h('span', { class: 'sc-badges' }, h('b', { text: d }), bits.length ? bits : h('span', { class: 'muted', text: 'no confounders recorded' })));
+      var any = bits.length > 0;
+      if (!any) bits.push(h('span', { class: 'pill', text: 'no confounders recorded' }));
+      if (any || days.length > 1 || state.mode === 'days')
+        f.badges.appendChild(h('span', { class: 'sc-badge-day' }, h('b', { text: d }), bits));
     });
     f.badges.hidden = !f.badges.firstChild;
   }

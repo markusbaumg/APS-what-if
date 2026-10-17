@@ -36,12 +36,18 @@ One run, in order:
        trial without an answer after --trial-timeout (600 s) is a failed row and the pool is restarted.
        As soon as the base rows of the round are in, the base-agreement rule of the quarantine is applied to their
        days (after_base_wave): a day below the floor is quarantined before any of its variants is replayed.
-    5. After each round: days.quarantine_from_trials / apply_quarantine (a quarantined day leaves the search days:
+    5. The validate phase (H-308) is planned like any other: once the search phases are settled, search.next_batch
+       hands out the base replays of the hold-out days and the top-N of the search review order on them, as their
+       own round(s); a study that finished before H-308 (validate 'skipped' in study.json) is set back to pending
+       and a re-run replays only that phase. The sentinel runs once on every hold-out day for the whole study, never on a
+       quarantined day (Guards.PER_DAY_PHASES).
+       The closing line names how many variants the validate round recommended for review.
+    6. After each round: days.quarantine_from_trials / apply_quarantine (a quarantined day leaves the search days:
        study.json role 'quarantined' with the reason; the next round's plan no longer schedules it), round.json +
        status.json (round.produce: verdicts, dead parameters, floors), the text of the would-be campaign comment
        (gh.round_body with the study's linter) into round_comment.md - nothing is posted, the skill posts it - and
        tier 1 (export.build_tier1 -> report/tier1.json).
-    6. The loop ends when every built phase is settled, the budget (--hours / --until HH:MM local / study.json
+    7. The loop ends when every built phase is settled, the budget (--hours / --until HH:MM local / study.json
        budget, the smallest; `--hours 0` is refused, exit 3) is used up, STOP / Ctrl-C, a guard, or a round that
        makes no progress (nothing to hand out, or the same keys again after a round without a done or failed row:
        exit 2, the reason names the held days and why, e.g. not frozen, base failed 3 times). Tier 1 is also
@@ -313,17 +319,23 @@ class Orchestrator:
 
     # ---- between rounds
     def mirror_phases(self, p):
+        """study.json phase states from the plan: skipped / done; a phase an earlier build marked skipped that is
+        built now and has work (the validate phase of a study run before H-308) goes back to pending."""
         for ph in p.phases:
             want = 'skipped' if ph.skipped else ('done' if ph.complete else None)
+            if want is None and self.study.phases[ph.index].state == 'skipped':
+                want = 'pending'
             if want and self.study.phases[ph.index].state != want:
                 self.sd.update_phase_state(ph.index, want)
                 self.study.phases[ph.index].state = want
 
     def after_base_wave(self, tasks):
         """pool.run_tasks' wave filter: the base rows of this round are recorded; the base-agreement rule of the
-        quarantine (days.quarantine_reasons with the base metrics only) is applied to their days right away, and the
-        variants of a day it quarantines are dropped from the round (the controls still run). The other rules
-        (CGM gap, profile_history, loop counts) stay per round (quarantine())."""
+        quarantine (days.quarantine_reasons with the base metrics only) is applied to their days right away, and
+        every task of a day it quarantines is dropped from the round - its variants and its controls (no sentinel
+        runs on a day quarantined in the same round). When that drops the round's null, it moves to the first
+        sentinel left in the wave. The other rules (CGM gap, profile_history, loop counts) stay per round
+        (quarantine())."""
         from hindcast import days as dy
         if not self._round_base:
             return tasks
@@ -344,7 +356,16 @@ class Orchestrator:
             self.log(f'{self.sd.name}: {day} quarantined after its base replay (listed, excluded from scoring; its '
                      f'variants are not replayed): {"; ".join(why)}')
         gone = {d.day for d in self.study.days if d.role == dy.QUARANTINE_ROLE}
-        return [t for t in tasks if st.is_control(t) or t.day not in gone]
+        kept = [t for t in tasks if t.day not in gone]
+        lost_null = [t for t in tasks if t.day in gone and t.control == 'null']
+        if lost_null and not any(t.control == 'null' for t in kept):
+            i = next((i for i, t in enumerate(kept) if t.control == 'sentinel'), None)
+            if i is not None and getattr(self, 'guards', None) is not None:
+                s = kept[i]
+                n = self.guards.null_task(s.day, s.phase, s.round, (lost_null[0].meta or {}).get('instance', ''))
+                if n is not None:
+                    kept.insert(i + 1, n)
+        return kept
 
     def blocked_days(self):
         """{day: freeze.blocked_reason} for the study's search and hold-out days that cannot be replayed now (not
@@ -523,6 +544,20 @@ class Orchestrator:
             except Exception as e:                           # the page is regenerated by `hc report` anyway
                 self.log(f'report not rendered ({type(e).__name__}: {e}); run `hc report {self.sd.name}`')
 
+    def validation_summary(self):
+        """'validate: 3 of 8 validated variants recommended for review on 16 hold-out days' from round.json, or
+        None when the study has no validate phase or the round carries no validation."""
+        if not any(ph.kind == 'validate' for ph in self.study.phases):
+            return None
+        rnd = self.sd.read_round()
+        v = getattr(rnd, 'validation', None) if rnd is not None else None
+        if not v:
+            return 'validate: no validation yet (no hold-out rows of the validated variants); 0 recommended for review'
+        tau = v.get('tau')
+        return (f'validate: {v.get("recommended_for_review", 0)} of {v.get("validated", 0)} validated variants '
+                f'recommended for review on {len(v.get("holdout_days") or [])} hold-out days'
+                + (f', Kendall tau {tau:+.2f}' if isinstance(tau, (int, float)) else ''))
+
     def control_notes(self):
         """'sentinel equals base on <day> (n checks)' / 'null ...' / '... differs from base ...' from the rows."""
         latest = st.StudyDir.latest_by_key(self.sd.trials()).values()
@@ -625,6 +660,10 @@ class Orchestrator:
                     self.between_rounds(self)
             self.mirror_phases(search.plan(self.study, self.sd.trials(), settings=self.settings,
                                            key_of=self.runner.key_of))
+            if exit_code == EXIT_OK and reason.startswith('finished'):
+                vs = self.validation_summary()
+                if vs:
+                    reason = f'{reason}; {vs}'
         except KeyboardInterrupt:                            # between rounds (inside a round the Runner catches it)
             exit_code, reason = EXIT_OK, 'interrupted (Ctrl-C); re-run resumes'
         except st.GuardStop as e:                            # the Runner's idle() between rounds (disk)

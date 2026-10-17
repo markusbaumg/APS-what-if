@@ -314,9 +314,12 @@ def test_single_file_inlines_base_orig_and_top(tmp_path):
     top1 = 'series/2026-09-06/bd3c184c0eb117ac77f3dc39a545561816c609d3.json'
     assert set(inlined) == {'series/2026-09-06/orig.json',
                             'series/2026-09-06/%s.json' % contracts.BASE_VHASH, top1}
-    for path, body in inlined.items():
-        doc = json.loads(body)
-        assert export.validate_series(doc) == []
+    packed = {path: json.loads(body) for path, body in inlined.items()}
+    for path, doc in report.unpack_inline(packed).items():          # page.js expands the packed copies the same way
+        with open(os.path.join(FIXTURE, *path.split('/')), encoding='utf-8') as fh:
+            src = json.load(fh)
+        assert export.validate_series(src) == []
+        assert doc == {k: v for k, v in src.items() if k not in report.INLINE_DROP_FIELDS}
     assert sorted(res.inlined) == sorted(inlined) and res.tier2 == {}
     data = _tier1(text)
     assert data['page']['single_file'] is True and sorted(data['page']['inlined']) == sorted(inlined)
@@ -962,3 +965,229 @@ def test_source_label_and_scrub():
     doc = report.scrub_private({'note': 'from https://ns.example.org/api/v1 and other.example.net', 'n': 1}, private)
     assert doc == {'note': 'from Nightscout and Nightscout', 'n': 1}
     assert report.private_problems('<p>NS.EXAMPLE.ORG</p>', private) == ['ns.example.org']
+
+
+def _settings_host():
+    """The host of nightscout.url in the real ns_settings.json (looked up, never written into a test)."""
+    settings = report.load_settings(contracts.NS_SETTINGS_PATH)
+    return report._host_of(((settings.get('nightscout') or {}).get('url')) or '')
+
+
+@needs_fixture
+@pytest.mark.parametrize('single_file', [False, True])
+def test_page_never_carries_the_settings_host(tmp_path, single_file):
+    """The settings file is read at render time (settings_path, no settings dict): its Nightscout host appears
+    nowhere on the page - tier-1 JSON, page.host, inlined tier-2 copies, the views."""
+    host = _settings_host()
+    if not host:
+        pytest.skip('ns_settings.json names no nightscout.url')
+    sd = tmp_path / 'study'
+    shutil.copytree(FIXTURE, sd)
+    with open(sd / 'study.json', encoding='utf-8') as fh:
+        doc = json.load(fh)
+    doc['source'], doc['host'] = 'https://%s/' % host, host
+    doc['notes'] = list(doc.get('notes') or []) + ['replayed from https://%s/api/v1' % host]
+    with open(sd / 'study.json', 'w', encoding='utf-8') as fh:
+        json.dump(doc, fh)
+    res = report.render_report(str(sd), out_dir=str(tmp_path / 'out'), single_file=single_file, variants='all',
+                               settings_path=contracts.NS_SETTINGS_PATH, frozen_dir=str(tmp_path / 'nf'),
+                               generated=GENERATED, log=lambda *_: None)
+    with open(res.path, encoding='utf-8') as fh:
+        page = fh.read()
+    assert host.lower() not in page.lower()
+    data = _tier1(page)
+    assert host.lower() not in json.dumps(data).lower()
+    assert data['page']['host'] == '' and data['study']['host'] == ''
+    for p in res.tier2:                                       # the copies next to the page carry no host either
+        with open(os.path.join(res.out_dir, *p.split('/')), encoding='utf-8') as fh:
+            assert host.lower() not in fh.read().lower()
+
+
+@needs_fixture
+def test_single_file_pack_round_trip_and_slim_tier1(tmp_path):
+    res = _render(tmp_path, single_file=True, variants='all')
+    text = open(res.path, encoding='utf-8').read()
+    packed = {p: json.loads(b) for p, b in
+              re.findall(r'<script type="application/json" data-tier2="([^"]+)">(.*?)</script>', text, re.S)}
+    assert len(packed) == 6
+    refs = [v for d in packed.values() for v in d.values() if isinstance(v, dict) and '$ref' in v]
+    assert refs, 'the variants share arrays with the orig / base documents of the day'
+    assert all(r['$ref'] in packed for r in refs)
+    assert not any(k in d for d in packed.values() for k in report.INLINE_DROP_FIELDS)
+    orig = packed['series/2026-09-06/orig.json']
+    assert not any(isinstance(v, dict) and '$ref' in v for v in orig.values()), 'the orig document is complete'
+    for path, doc in report.unpack_inline(packed).items():
+        with open(os.path.join(FIXTURE, *path.split('/')), encoding='utf-8') as fh:
+            src = json.load(fh)
+        assert doc == {k: v for k, v in src.items() if k not in report.INLINE_DROP_FIELDS}, path
+    # the dropped fields are the ones no view reads
+    views = ''.join(open(os.path.join(TEMPLATES, n), encoding='utf-8').read() for n in ('page.js',)) + \
+        ''.join(open(f, encoding='utf-8').read() for f in sorted(
+            os.path.join(report.VIEWS_DIR, n) for n in os.listdir(report.VIEWS_DIR) if n.endswith('.js')))
+    for k in report.INLINE_DROP_FIELDS:
+        assert not re.search(r"""[.'"]%s\b(?!_)""" % re.escape(k), views), k
+    # tier 1: slim trial rows, metrics on the base rows only, rounds without the per-variant copy
+    data = _tier1(text)
+    for r in data['trials']:
+        assert set(r) <= set(report.PAGE_TRIAL_KEYS) | {'metrics'}
+        assert ('metrics' in r) == bool(r.get('control') or r['vhash'] == contracts.BASE_VHASH)
+    assert all('variants' not in r for r in data['rounds']) and data['rounds'][0]['front']
+
+
+def test_pack_inline_keeps_unlike_arrays_and_types():
+    n = report.INLINE_REF_MIN
+    o = {'kind': 'orig', 'day': 'd', 'vhash': contracts.BASE_VHASH, 't': list(range(n)), 'smb': [0] * n}
+    b = {'kind': 'series', 'day': 'd', 'vhash': contracts.BASE_VHASH, 't': list(range(n)), 'smb': [0.0] * n,
+         'changed': [False] * n, 'autosens': [1] * n}
+    v = {'kind': 'series', 'day': 'd', 'vhash': 'v' * 40, 't': list(range(n)), 'smb': [0.0] * (n - 1) + [0.5],
+         'changed': [True] * n}
+    docs = {'o': o, 'b': b, 'v': v}
+    packed = report.pack_inline(docs)
+    assert packed['o'] == o and packed['b']['t'] == {'$ref': 'o'}
+    assert isinstance(packed['b']['smb'], list), '0.0 is not the int 0 of the orig document'
+    assert packed['v']['smb'] == {'$ref': 'b', '$diff': [n - 1, 0.5]}
+    assert isinstance(packed['v']['changed'], list), 'every entry differs: the array is kept'
+    un = report.unpack_inline(packed)
+    assert un['v'] == v and un['b'] == {k: x for k, x in b.items() if k != 'autosens'}
+
+
+def _unlocked_copy(tmp_path):
+    sd = tmp_path / 'study'
+    shutil.copytree(FIXTURE, sd)
+    with open(sd / 'study.json', encoding='utf-8') as fh:
+        doc = json.load(fh)
+    doc['unlocked'] = ['profile sens']
+    doc['unlock_reason'] = 'a profile scale study, reviewed by hand'
+    with open(sd / 'study.json', 'w', encoding='utf-8') as fh:
+        json.dump(doc, fh)
+    return sd
+
+
+@needs_fixture
+def test_unlocked_study_shows_the_weak_evidence_caveat(tmp_path):
+    plain = open(_render(tmp_path, out_name='plain').path, encoding='utf-8').read()
+    assert 'id="weak-evidence"' not in plain and _tier1(plain)['page']['caveat'] is None
+    sd = _unlocked_copy(tmp_path)
+    res = report.render_report(str(sd), out_dir=str(tmp_path / 'out'), settings=_settings(),
+                               frozen_dir=str(tmp_path / 'nf'), generated=GENERATED, log=lambda *_: None)
+    page = open(res.path, encoding='utf-8').read()
+    band = re.search(r'<div class="honesty-band">(.*?)</div>\s*</div>', page, re.S).group(1)
+    assert 'id="honesty"' in band and 'id="weak-evidence"' in band, 'next to the honesty paragraph'
+    caveat = _tier1(page)['page']['caveat']
+    assert 'profile sens' in caveat and 'cannot judge a different profile' in caveat
+    assert 'no glucose response' in caveat and report.NO_GLUCOSE_RESPONSE in caveat
+    assert '<strong>Weak evidence:</strong>' in band and report._escape(caveat.partition(':')[2]) in band
+    lint.lint_text(caveat, 'line')
+
+
+def test_validation_lines_quote_tau_as_a_caveat():
+    v = {'top': 3, 'validated': 3, 'search_days': 7, 'holdout_days': ['2026-09-10', '2026-09-11'], 'folds': 9,
+         'tau': 0.333, 'recommended_for_review': 1, 'sign_share': 0.75}
+    lines = report.validation_lines(v)
+    assert lines[0] == 'Hold-out validation: 3 validated, 1 recommended for review, Kendall tau +0.33 over 9 days.'
+    assert any('a caveat on how stable the order is, not a statistic' in x for x in lines)
+    assert any('9 leave-one-day-out folds over the 7 search and 2 hold-out days' in x for x in lines)
+    assert report.validation_lines(None) == [] and report.validation_lines({}) == []
+    assert 'Kendall tau not computed' in report.validation_lines(dict(v, tau=None))[0]
+    for x in lines:
+        lint.lint_text(x, 'line')
+
+
+@needs_fixture
+def test_parameters_carry_the_validation_panel(tmp_path):
+    sd = tmp_path / 'study'
+    shutil.copytree(FIXTURE, sd)
+    with open(sd / 'round.json', encoding='utf-8') as fh:
+        rnd = json.load(fh)
+    rnd['validation'] = {'top': 2, 'validated': 2, 'search_days': 1, 'holdout_days': ['2026-09-07'], 'folds': 2,
+                         'tau': 1.0, 'recommended_for_review': 1, 'sign_share': 0.75}
+    target = next(c for c in rnd['variants'] if c['verdict'] != 'base')
+    target['validation'] = {'search_rank': 1, 'holdout_rank': 1, 'holdout_total': 2, 'component': 'rest_vs_base_U',
+                            'direction': -1, 'holds': 1, 'holdout_days': 1, 'flip_days': [], 'missing_days': [],
+                            'lodo_min': 1, 'lodo_max': 1, 'lodo_folds': 2, 'lodo_unranked': 0,
+                            'feasible_all_days': True, 'infeasible_days': [], 'recommended_for_review': True,
+                            'reasons': []}
+    with open(sd / 'round.json', 'w', encoding='utf-8') as fh:
+        json.dump(rnd, fh)
+    res = report.render_report(str(sd), out_dir=str(tmp_path / 'out'), settings=_settings(),
+                               frozen_dir=str(tmp_path / 'nf'), generated=GENERATED, log=lambda *_: None)
+    ps = _tier1(open(res.path, encoding='utf-8').read())['parameters']
+    assert ps['validation']['validated'] == 2
+    assert ps['validation_lines'][0].startswith('Hold-out validation: 2 validated, 1 recommended for review')
+    row = next(v for v in ps['variants'] if v['vhash'] == target['vhash'])
+    assert row['validation']['line'].startswith('hold-out: rank 1 of 2')
+    js = open(os.path.join(report.VIEWS_DIR, 'parameters.js'), encoding='utf-8').read()
+    assert 'validation_lines' in js and 'v.validation.line' in js
+
+
+def test_scenario_badges_use_the_shared_pill():
+    js = open(os.path.join(report.VIEWS_DIR, 'scenarios.js'), encoding='utf-8').read()
+    body = js[js.index('function badgesFor'):]
+    body = body[:body.index('\n  }\n')]
+    assert "class: 'chip" not in body and body.count("class: 'pill") >= 4
+    css = open(os.path.join(TEMPLATES, 'page.css'), encoding='utf-8').read()
+    assert re.search(r'^\.pill \{', css, re.M)
+    pjs = open(os.path.join(report.VIEWS_DIR, 'parameters.js'), encoding='utf-8').read()
+    assert "'pill serious' : 'pill'" in pjs                   # the verdict pills: the same class
+
+
+# ----------------------------------------------------------------------------- scored days, floor multiples, caveats
+
+def _base_row(day, agreement, extra_rise=0.0):
+    from hindcast.tests.test_round import mk
+    m = dict(mk(base=True), agreement_pct=agreement, loops=280, smb_exact_pct=agreement - 5,
+             rise_emul_U=3.0 + extra_rise)
+    return types.SimpleNamespace(status='done', metrics=m, control='base', vhash=contracts.BASE_VHASH, day=day,
+                                 freeze_sha='')
+
+
+def test_overview_floor_leaves_quarantined_days_out_but_lists_them():
+    """DESIGN.md 5.4 phase 0: a quarantined day is listed with its reason, never the worst day of the banner."""
+    S = types.SimpleNamespace
+    study = S(days=[S(day='2026-09-01', role='search', quarantine_reason=None),
+                    S(day='2026-09-02', role='holdout', quarantine_reason=None),
+                    S(day='2026-09-24', role='quarantined', quarantine_reason='cgm gap 3 h')])
+    rows = [_base_row('2026-09-01', 97.0, 0.1), _base_row('2026-09-02', 96.0, 0.2), _base_row('2026-09-24', 75.0, 3.0)]
+    ov = report.overview_numbers(study, rows, [], {'2026-09-01': 24.0, '2026-09-02': 24.0})
+    s = ov['summary']
+    assert s['agreement_min_day'] == '2026-09-02' and s['agreement_min_pct'] == 96.0
+    assert s['floor_rise_max_U'] == pytest.approx(0.2) and s['tie_rise_U'] == pytest.approx(0.4)
+    assert s['scored_days_with_base'] == 2 and s['search_days_with_base'] == 1 and s['days_with_base'] == 3
+    assert s['quarantined'] == [{'day': '2026-09-24', 'reason': 'cgm gap 3 h'}]
+    assert '75.0 %' not in ov['banner'] and '2026-09-24' in ov['banner']
+    assert 'cover the 2 scored days (search and hold-out' in ov['banner']
+    assert 'cover the 1 scored search day only' in ov['banner'] and 'listed, not scored' in ov['banner']
+    assert ov['days']['2026-09-24']['has_base'], 'the day card still shows its numbers'
+    lint.lint_text(ov['banner'], 'line')
+    # the same day set as status.json's floor (study.build_status: search + hold-out)
+    from hindcast import study as st
+    floor = st.aggregate_floor(rows, {'2026-09-01', '2026-09-02'})
+    assert floor['agreement_pct'] == s['agreement_min_pct']
+    only_q = report.overview_numbers(study, rows[2:], [], {})
+    assert only_q['summary']['scored_days_with_base'] == 0 and 'No scored day' in only_q['banner']
+    js = open(os.path.join(report.TEMPLATES_DIR, 'page.js'), encoding='utf-8').read()
+    assert 's.quarantined' in js and 'quarantined, not scored' in js
+
+
+def test_fallback_why_prints_the_floor_multiple_not_the_review_score():
+    s = types.SimpleNamespace(floor_multiples={'rise_vs_base_U': 3.25}, review_component='rise_vs_base_U',
+                              review_score=9.9)
+    assert report._floor_multiple_of(s) == 3.25
+    s.floor_multiples = {}
+    assert report._floor_multiple_of(s) == 9.9
+    src = open(report.__file__, encoding='utf-8').read()
+    assert "{s.review_score:.1f} x floor" not in src
+
+
+def test_validation_block_carries_the_caveat_of_a_recommended_variant():
+    from hindcast import metrics as hm
+    v = {'search_rank': 1, 'holdout_rank': 1, 'holdout_total': 2, 'holds': 3, 'holdout_days': 3,
+         'inside_floor_days': 1, 'lodo_min': 1, 'lodo_max': 2, 'recommended_for_review': True, 'reasons': []}
+    out = report._validation_of(types.SimpleNamespace(validation=v))
+    assert out['caveat'] == hm.validation_caveat(v) and out['caveat'].startswith('caveat: inside 2 x floor on 1')
+    assert report._validation_of(types.SimpleNamespace(validation=dict(v, recommended_for_review=False)))['caveat'] is None
+    for k in hm.VALIDATION_KEYS:
+        assert k in report._validation_of.__doc__, k
+    js = open(os.path.join(report.VIEWS_DIR, 'parameters.js'), encoding='utf-8').read()
+    assert 'v.validation.caveat' in js
+    assert report.NO_GLUCOSE_RESPONSE == contracts.NO_GLUCOSE_RESPONSE

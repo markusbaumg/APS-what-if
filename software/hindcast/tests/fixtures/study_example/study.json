@@ -3,8 +3,8 @@
  "created": "2026-09-08T01:22:00Z",
  "source": "https://ns.vivikusi.ch",
  "host": "ns.vivikusi.ch",
- "settings_sha": "0b8122b09d9509aad1af5ebe97203241f384dade",
- "code_sha": "419bdb8ddbba000cf7770f1d050037c8921f64f6",
+ "settings_sha": "f07cdfacbbab735a47257a8ac12a81124ad2c0c9",
+ "code_sha": "b34f29b9699f4d24a2145d4f9f1ea19b70b05b4a",
  "days": [
   {
    "day": "2026-09-06",
@@ -33,8 +33,8 @@
  "objective_version": 1,
  "contract_version": 1,
  "core_versions": {
-  "emulator_core.py": "2026-10-16 12:00",
-  "determine_basal.py": "2026-10-16 13:00",
+  "emulator_core.py": "2026-10-17 00:30",
+  "determine_basal.py": "2026-10-17 00:30",
   "emulator_optimize.py": "2026-10-16 12:00"
  },
  "constraints": [],
@@ -84,5 +84,6 @@
   "Fixture study built by hindcast/tests/make_fixtures.py from results/example_2026-09-06 (the documented emulator_optimize run): the result CSVs are read, nothing is replayed, no network.",
   "freeze_sha is empty: the example run replayed the live Nightscout source through emulator_optimize, not a frozen day.",
   "The window is 2026-09-06T06:00:00Z..2026-09-06T12:00:00Z, not a whole day; the floors are those of this window."
- ]
+ ],
+ "unlocked": []
 }

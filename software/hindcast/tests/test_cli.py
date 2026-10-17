@@ -252,3 +252,82 @@ def test_hc_skill_is_wired(capsys):
         assert word in out
     assert hc('skill', 'vocabulary', '--check') == 0
     capsys.readouterr()
+
+
+# ----------------------------------------------------------------------------- --unlock forms, hc study requarantine
+
+@pytest.mark.parametrize('form', [['profile', 'sens', 'profile', 'carb_ratio', 'profile', 'current_basal'],
+                                  ['profile sens', 'profile carb_ratio', 'profile current_basal'],
+                                  ['profile sens profile carb_ratio', 'profile current_basal']])
+def test_unlock_accepts_unquoted_and_quoted_keys(form):
+    import argparse
+    assert cli.unlock_args(argparse.Namespace(unlock=[form], unlock_reason='x')) == (TIER_C_LOCKED, 'x')
+
+
+@pytest.mark.parametrize('form, token', [(['sens carb_ratio'], 'sens'), (['profile'], 'profile'),
+                                         (['profile', 'sens', 'carb_ratio'], 'carb_ratio'),
+                                         (['profile', 'profile', 'sens'], 'profile')])
+def test_unlock_error_names_the_token_and_the_form(tmp_path, capsys, form, token):
+    rc = hc('study', 'new', 'u', '--days', '2026-09-06', '--tier', 'C', '--unlock', *form, '--unlock-reason', 'x',
+            studies_dir=tmp_path)
+    err = capsys.readouterr().err
+    assert rc == 3 and f'"{token}"' in err
+    assert '--unlock profile sens profile carb_ratio' in err and 'space-separated, unquoted' in err
+    assert not (tmp_path / 'u').exists()
+
+
+def test_unlock_help_says_space_separated_unquoted(capsys):
+    with pytest.raises(SystemExit):
+        hc('study', 'new', '--help')
+    out = ' '.join(capsys.readouterr().out.split())
+    assert 'space-separated and unquoted' in out and '--unlock profile sens profile carb_ratio' in out
+
+
+def test_study_requarantine_is_wired(tmp_path, capsys):
+    from hindcast import days, freeze
+    with pytest.raises(SystemExit) as info:
+        hc('study', 'requarantine', '--help')
+    assert info.value.code == 0 and '--dry' in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        hc('study', '--help')
+    assert 'requarantine' in capsys.readouterr().out
+    assert 'hc study requarantine' in cli.__doc__
+
+    sdays = [c.StudyDay('2026-10-04'),
+             c.StudyDay('2026-10-05', role='quarantined', quarantine_reason='was search: CGM gap 346 min (threshold 120 min)')]
+    study = c.Study(name='rq', created='2026-10-17T00:00:00Z', source='ns:', host='h', settings_sha='0' * 40,
+                    code_sha='0' * 40, days=sdays,
+                    space={'profile autoISF_max': c.SpaceParam('float', 1.1, 1.8, 0.05)})
+    sd = st.StudyDir(str(tmp_path / 'rq'))
+    os.makedirs(sd.path)
+    sd.write_study(study)
+    frozen = str(tmp_path / 'frozen')
+    host = days.host_of('ns:', SETTINGS)
+    for d, gap in {'2026-10-04': 20, '2026-10-05': 75}.items():
+        c.write_json_atomic(freeze.meta_path(d, host, frozen), {'day': d, 'character': {'cgm_gap_min': gap}})
+    assert hc('study', 'requarantine', 'rq', '--dry', '--frozen-dir', frozen, studies_dir=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert '2026-10-05 released' in out and 'dry run, nothing written' in out
+    assert sd.load_study(SETTINGS).days[1].role == 'quarantined'
+    assert hc('study', 'requarantine', 'rq', '--frozen-dir', frozen, studies_dir=tmp_path) == 0
+    capsys.readouterr()
+    assert sd.load_study(SETTINGS).days[1].role == 'search'
+    assert hc('study', 'requarantine', 'missing', studies_dir=tmp_path) == 3
+
+
+def test_hc_help_lists_the_usage_block(capsys):
+    assert hc('help') == 0
+    out = capsys.readouterr().out
+    assert 'hc study requarantine <name> [--dry]' in out and '--unlock profile sens' in out
+    assert hc('help', 'study', 'requarantine') == 0
+    assert '--dry' in capsys.readouterr().out
+
+
+def test_unlock_errors_use_one_wording_for_the_key():
+    """--unlock names a key '<array> <item>' in both refusals, never 'VDF group'."""
+    for words in (['sens', 'profile', 'carb_ratio'], ['profile sens profile']):
+        with pytest.raises(st.StudyError) as e:
+            cli.unlock_words([words])
+        msg = str(e.value)
+        assert '<array> <item>' in msg and 'VDF group' not in msg and 'group' not in msg
+    assert cli.unlock_words([['profile sens', 'profile carb_ratio']]) == ['profile sens', 'profile carb_ratio']

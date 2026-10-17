@@ -17,6 +17,9 @@ Layers
     floors_from_base(...)      floor_X = |X_base - X_phone| per component; floor_loops = changed_loops(base).
     rank_variants(...)         feasibility, ties, Pareto front / review order / scalar, recommended_for_review,
                                and the printed ranking-rule text (section 5.3).
+    validate_variants(...)     the validate phase (H-308): hold-out rank, per-day direction, leave-one-day-out rank
+                               range over search + hold-out days, Kendall tau, and the rule that decides what is
+                               recommended for review once a study has hold-out rows of its validated top-N.
 
 Change counts (per (variant, day); a loop "changes" when SMB, insulinReq (0.05 U) or the rate (0.05 U/h) differ,
 `changed_flags()`); the two *_vs_base counts are different quantities and both names are part of the contract:
@@ -605,6 +608,65 @@ def tie_with_base(metrics: dict, floors: dict) -> bool:
     return bool(ties) and all(ties.values())
 
 
+def floor_multiple(per_day: Dict[str, dict], floors: Dict[str, dict], component: str,
+                   days: Optional[Iterable[str]] = None) -> Optional[float]:
+    """THE floor multiple of one component of one variant (every 'x floor' a verdict `why`, a card or a page prints
+    for a component comes from here): |X_d| / effective floor of day d, averaged over the days that have both a
+    metric and a floor (DESIGN.md 5.4 phase 1: mean |effect| / floor across days). `per_day` = day -> metrics,
+    `floors` = day -> floors_from_base() of the scored (non-quarantined) days only; `days` restricts further.
+    None when no day has both."""
+    fkey = FLOOR_COMPONENTS[component]
+    ratios = []
+    for d in (sorted(per_day) if days is None else days):
+        m, f = per_day.get(d), floors.get(d)
+        if m is None or f is None:
+            continue
+        v = m.get(component)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        ratios.append(abs(v) / effective_floor(f.get(fkey), fkey))
+    return statistics.fmean(ratios) if ratios else None
+
+
+def floor_band(floors: Dict[str, dict], component: str, days: Optional[Iterable[str]] = None) -> Optional[Tuple[float, float]]:
+    """(smallest, largest) effective floor of `component` over `days` (default: every day of `floors`), or None."""
+    fkey = FLOOR_COMPONENTS[component]
+    vals = [effective_floor(floors[d].get(fkey), fkey) for d in (sorted(floors) if days is None else days) if d in floors]
+    return (min(vals), max(vals)) if vals else None
+
+
+def tie_every_day(per_day: Dict[str, dict], floors: Dict[str, dict], component: str,
+                  days: Optional[Iterable[str]] = None) -> Optional[bool]:
+    """is the component inside TIE_FACTOR x that day's floor on every day with a metric and a floor (None: no day)"""
+    fkey = FLOOR_COMPONENTS[component]
+    seen = []
+    for d in (sorted(per_day) if days is None else days):
+        m, f = per_day.get(d), floors.get(d)
+        if m is None or f is None or not isinstance(m.get(component), (int, float)):
+            continue
+        seen.append(is_tie(m[component], f.get(fkey), fkey))
+    return all(seen) if seen else None
+
+
+def study_floor(floors_by_day: Dict[str, dict], days: Optional[Iterable[str]] = None) -> Dict[str, float]:
+    """The study-level floor (status.json `floor`, "worst day"): max |base - phone| per component and the smallest
+    agreement_pct over `floors_by_day` (day -> floors_from_base()). Pass only the scored days: quarantined days
+    are listed, not scored (DESIGN.md 5.4 phase 0), so they never widen the floor; `days` restricts further."""
+    agg: Dict[str, float] = {}
+    keep = None if days is None else set(days)
+    for d, f in sorted(floors_by_day.items()):
+        if keep is not None and d not in keep:
+            continue
+        for k, v in f.items():
+            if v is None or k == 'loops':
+                continue
+            if k == 'agreement_pct':
+                agg[k] = v if k not in agg else min(agg[k], v)
+            else:
+                agg[k] = v if k not in agg else max(agg[k], v)
+    return agg
+
+
 def effect_over_floor(metrics: dict, floors: dict, components: Sequence[str] = REVIEW_COMPONENTS) -> Tuple[float, str]:
     """(|effect| / floor on the component where that ratio is largest, that component)"""
     best, which = 0.0, components[0]
@@ -619,6 +681,43 @@ def effect_over_floor(metrics: dict, floors: dict, components: Sequence[str] = R
 
 
 # ----------------------------------------------------------------------------- H-202: feasibility, aggregation
+def share_pct(x, dp: Optional[int] = None) -> str:
+    """A share 0..1 as the public sentences print it: '80 %' (a space before the sign). dp None = as configured
+    (format g: 0.8 -> '80 %', 0.825 -> '82.5 %'), else rounded to `dp` decimals (measured shares: 0.833 -> '83 %')."""
+    v = float(x) * 100.0
+    return (f'{v:g}' if dp is None else f'{v:.{dp}f}') + ' %'
+
+
+def recommend_config(objective: Optional[dict] = None) -> dict:
+    """objective.recommend with the defaults filled in: {fold_top, fold_share, sign_share, holdout_top}. Also takes
+    a dict that already is such a config (round.json's study-level validation block carries the four keys)."""
+    src = objective or {}
+    if 'recommend' in src or not any(k in src for k in DEFAULT_OBJECTIVE['recommend']):
+        return dict(_objective(src)['recommend'])
+    cfg = dict(DEFAULT_OBJECTIVE['recommend'])
+    cfg.update({k: src[k] for k in cfg if src.get(k) is not None})
+    return cfg
+
+
+RULE5_TIE = 'A tie with base is never recommended for review.'
+
+
+def recommend_rule_text(objective: Optional[dict] = None, validate: bool = True) -> str:
+    """DESIGN.md 5.3 rule 5 as one clause, from the configured numbers (recommend_config): the ONE sentence builder
+    behind ranking_rule_text, report.validation_lines, round.py's 'recommended' why and the cards, so no surface
+    states another rule. validate: the H-308 rule (feasible on every search and hold-out day, the sign over the
+    hold-out days); otherwise the H-202 rule of recommend() (feasible on all days, the sign over all days)."""
+    rec = recommend_config(objective)
+    if validate:
+        return (f'feasible on every search and hold-out day, in the top {rec["fold_top"]} on at least'
+                f' {share_pct(rec["fold_share"])} of the leave-one-day-out folds, the same sign of the primary effect'
+                f' on at least {share_pct(rec["sign_share"])} of the hold-out days, and within the top'
+                f' {rec["holdout_top"]} on the hold-out days')
+    return (f'feasible on all days, top-{rec["fold_top"]} on at least {share_pct(rec["fold_share"])} of the'
+            f' leave-one-day-out folds, the same sign of the primary effect on at least {share_pct(rec["sign_share"])}'
+            f' of days, and within the top {rec["holdout_top"]} on the hold-out days')
+
+
 def _objective(objective: Optional[dict]) -> dict:
     cfg = {k: dict(v) for k, v in DEFAULT_OBJECTIVE.items()}
     for k, v in (objective or {}).items():
@@ -743,6 +842,7 @@ class VariantSummary:
     recommend_reasons: List[str] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
     missing_days: List[str] = field(default_factory=list)
+    floor_multiples: Dict[str, Optional[float]] = field(default_factory=dict)   # REVIEW_COMPONENTS -> floor_multiple()
 
     def to_dict(self):
         return asdict(self)
@@ -829,7 +929,8 @@ def rank_variants(rows: Iterable[dict], question: str = 'explore', objective: Op
             infeasible_reasons=reasons, tie_with_base=bool(ties) and all(ties.values()), tie_days=ties,
             review_score=statistics.fmean(scores) if scores else 0.0, review_component=comp,
             mean=agg['mean'], sign_frac=agg['sign_frac'], flags=sorted(vflags),
-            missing_days=[d for d in all_days if d not in by_day])
+            missing_days=[d for d in all_days if d not in by_day],
+            floor_multiples={k: floor_multiple(by_day, floors, k, all_days) for k in REVIEW_COMPONENTS})
     feasible = [n for n, v in variants.items() if v.feasible]
     infeasible = [n for n, v in variants.items() if not v.feasible]
     front: List[str] = []
@@ -865,9 +966,11 @@ def leave_one_day_out(rows: Sequence[dict], question: str = 'explore', objective
 
 def recommend(ranking: Ranking, folds: Dict[str, List[str]], holdout_order: Optional[Sequence[str]] = None,
               objective: Optional[dict] = None) -> Dict[str, Tuple[bool, List[str]]]:
-    """DESIGN.md 5.3 rule 5 for every variant of `ranking`: recommended for review only if feasible on all days,
-    top-3 on >= 80 % of the leave-one-day-out folds, same sign of the primary effect on >= 80 % of days, and rank on
-    the hold-out days within the top 5 (holdout_order None = no hold-out days reserved -> that condition fails,
+    """DESIGN.md 5.3 rule 5 for every variant of `ranking`: recommended for review only if not a tie with base
+    (rule 4: a tie is never recommended for review), feasible on all days,
+    top-fold_top on >= fold_share of the leave-one-day-out folds, same sign of the primary effect on >= sign_share
+    of days, and rank on the hold-out days within the top holdout_top (objective.recommend, defaults 3, 80 %, 80 %,
+    5; recommend_rule_text(validate=False) states it) (holdout_order None = no hold-out days reserved -> that condition fails,
     with the reason named).  Sets `recommended_for_review` / `recommend_reasons` on the summaries and returns them."""
     cfg = _objective(objective or ranking.objective)['recommend']
     out = {}
@@ -875,10 +978,13 @@ def recommend(ranking: Ranking, folds: Dict[str, List[str]], holdout_order: Opti
         reasons = []
         if not v.feasible:
             reasons.append('not feasible on every day')
+        if v.tie_with_base:
+            reasons.append(TIE_REASON)
         if folds:
             share = sum(1 for order in folds.values() if name in order[:cfg['fold_top']]) / len(folds)
             if share < cfg['fold_share'] - 1e-9:
-                reasons.append(f'top-{cfg["fold_top"]} on {share:.0%} of the leave-one-day-out folds (needs {cfg["fold_share"]:.0%})')
+                reasons.append(f'top-{cfg["fold_top"]} on {share_pct(share, 0)} of the leave-one-day-out folds'
+                               f' (needs {share_pct(cfg["fold_share"])})')
         else:
             reasons.append('fewer than two days: no leave-one-day-out folds')
         primary = v.review_component if ranking.question == 'explore' else 'rise_vs_base_U'
@@ -886,7 +992,7 @@ def recommend(ranking: Ranking, folds: Dict[str, List[str]], holdout_order: Opti
         if len(v.days) < 2:
             reasons.append('fewer than two days: sign stability not testable')
         elif sign < cfg['sign_share'] - 1e-9:
-            reasons.append(f'same sign of {primary} on {sign:.0%} of days (needs {cfg["sign_share"]:.0%})')
+            reasons.append(f'same sign of {primary} on {share_pct(sign, 0)} of days (needs {share_pct(cfg["sign_share"])})')
         if holdout_order is None:
             reasons.append('no hold-out days')
         elif name not in list(holdout_order)[:cfg['holdout_top']]:
@@ -897,12 +1003,235 @@ def recommend(ranking: Ranking, folds: Dict[str, List[str]], holdout_order: Opti
     return out
 
 
+# ----------------------------------------------------------------------------- H-308: the validate phase
+DEFAULT_VALIDATE_TOP = 8                               # validate: top-N of the search review order when phase.top is None
+VALIDATE_SIGN_SHARE = DEFAULT_OBJECTIVE['recommend']['sign_share']   # the default of objective.recommend.sign_share
+FLIP_DAYS_MAX = 10                                     # hold-out days listed by name per variant (round.json size)
+TIE_REASON = 'indistinguishable from base within the noise floor on every component and every day'
+VALIDATION_KEYS = ('search_rank', 'holdout_rank', 'holdout_total', 'component', 'direction', 'holds', 'holdout_days',
+                   'flip_days', 'missing_days', 'lodo_min', 'lodo_max', 'lodo_folds', 'lodo_unranked',
+                   'fold_top', 'fold_share', 'holdout_top', 'inside_floor_days', 'tie_with_base',
+                   'feasible_all_days', 'infeasible_days', 'recommended_for_review', 'reasons')
+
+
+def kendall_tau(order_a: Sequence[str], order_b: Sequence[str]) -> Optional[float]:
+    """Kendall's tau (tau-a; two strict orders have no ties) between two orders over the items both contain:
+    (concordant - discordant) / (n (n - 1) / 2); None for fewer than two common items."""
+    in_b = {x: i for i, x in enumerate(order_b)}
+    common = [x for x in order_a if x in in_b]
+    n = len(common)
+    if n < 2:
+        return None
+    conc = disc = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            if in_b[common[i]] < in_b[common[j]]:
+                conc += 1
+            else:
+                disc += 1
+    return (conc - disc) / (n * (n - 1) / 2)
+
+
+def _sign(v) -> int:
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return 0
+    return (v > 0) - (v < 0)
+
+
+@dataclass
+class Validation:
+    """The validate round of one study (H-308): the top-N of the search review order replayed on the hold-out days.
+
+    validated        variant names, the top-N of the search order (feasible on the search days), in that order
+    search_rank      name -> rank in the search order
+    holdout_order    the order of rank_variants over the hold-out days (validated variants only)
+    scored_days      search + hold-out days; the leave-one-day-out folds run over these
+    folds            left-out day -> order over the other scored days
+    per_variant      name -> dict with VALIDATION_KEYS (what round.json's Candidate.validation carries)
+    tau              Kendall tau between the search order and the hold-out order of the validated variants"""
+    top: int
+    search_days: List[str]
+    holdout_days: List[str]
+    scored_days: List[str]
+    validated: List[str]
+    search_rank: Dict[str, int]
+    holdout_ranking: Optional['Ranking']
+    holdout_order: List[str]
+    full_ranking: Optional['Ranking']
+    folds: Dict[str, List[str]]
+    per_variant: Dict[str, dict]
+    tau: Optional[float]
+    sign_share: float = VALIDATE_SIGN_SHARE
+    fold_top: int = DEFAULT_OBJECTIVE['recommend']['fold_top']
+    fold_share: float = DEFAULT_OBJECTIVE['recommend']['fold_share']
+    holdout_top: int = DEFAULT_OBJECTIVE['recommend']['holdout_top']
+
+    @property
+    def recommended(self) -> List[str]:
+        return [n for n in self.validated if self.per_variant.get(n, {}).get('recommended_for_review')]
+
+    def summary(self) -> dict:
+        """The study-level numbers (round.json `validation`), with the rule-5 config the validation ran with
+        (fold_top, fold_share, sign_share, holdout_top) so report.validation_lines phrases the rule from them."""
+        return {'top': self.top, 'validated': len(self.validated), 'search_days': len(self.search_days),
+                'holdout_days': list(self.holdout_days), 'folds': len(self.folds),
+                'tau': None if self.tau is None else round(self.tau, 3),
+                'recommended_for_review': len(self.recommended), 'sign_share': self.sign_share,
+                'fold_top': self.fold_top, 'fold_share': self.fold_share, 'holdout_top': self.holdout_top}
+
+
+def validation_line(v: Optional[dict]) -> Optional[str]:
+    """'hold-out: rank 2 of 8, direction holds on 14/16 days, LODO range 1-3' (cards, status.json top), or None."""
+    if not v:
+        return None
+    rank = (f'rank {v["holdout_rank"]} of {v["holdout_total"]}' if v.get('holdout_rank') is not None
+            else 'not ranked')
+    lodo = (f'LODO range {v["lodo_min"]}-{v["lodo_max"]}' if v.get('lodo_min') is not None else 'LODO not ranked')
+    return f'hold-out: {rank}, direction holds on {v.get("holds", 0)}/{v.get("holdout_days", 0)} days, {lodo}'
+
+
+def validate_variants(rows: Sequence[dict], question: str = 'explore', objective: Optional[dict] = None,
+                      search_days: Sequence[str] = (), holdout_days: Sequence[str] = (), top: Optional[int] = None,
+                      base_variant: str = BASE_VARIANT, sign_share: Optional[float] = None) -> Validation:
+    """H-308 on trials.jsonl-like rows: the top-N feasible variants of the search review order (rank_variants over
+    `search_days`; N = `top`, default DEFAULT_VALIDATE_TOP) replayed on `holdout_days` (the scored, non-quarantined
+    hold-out days):
+
+    hold-out rank        rank_variants over the hold-out days, the validated variants (and base) only
+    direction            per hold-out day the sign of the variant's review component (rise or rest vs base, the one
+                         its search review order used; 'rise_vs_base_U' for earlier / gentler) against the sign of its
+                         search mean; a day holds when the signs are equal and not 0, a day without a done row is
+                         missing (it does not hold)
+    leave-one-day-out    one fold per scored day (search + hold-out). Leaving out a search day ranks EVERY variant
+                         over the other search days (the only days all of them were replayed on); leaving out a
+                         hold-out day ranks the validated variants over the search days plus the other hold-out days.
+                         A fold that does not rank the variant (infeasible on a day it contains) does not count as top
+    tau                  Kendall tau between the search order and the hold-out order (validated variants on both)
+
+    recommended_for_review = DESIGN.md 5.3 rule 5 with the objective's `recommend` config (fold_top, fold_share,
+    sign_share, holdout_top; defaults 3, 80 %, 80 %, 5): not a tie with base (rule 4: inside the noise floor on every
+    component and every search day is never recommended for review), feasible on every search AND hold-out day,
+    top-`fold_top` on >= `fold_share` of the leave-one-day-out folds, the same sign of the primary effect on >=
+    `sign_share` of the hold-out days, and a hold-out rank within the top `holdout_top`. Every condition that fails
+    is named in `reasons`. `inside_floor_days` is a caveat, not a condition: on how many of the hold-out days on
+    which the direction holds the effect stays inside TIE_FACTOR x that day's floor. `sign_share` overrides the
+    objective's value."""
+    cfg = _objective(objective)
+    rec = cfg['recommend']
+    share_needed = float(rec['sign_share'] if sign_share is None else sign_share)
+    fold_top, fold_needed, holdout_top = int(rec['fold_top']), float(rec['fold_share']), int(rec['holdout_top'])
+    top = int(top or DEFAULT_VALIDATE_TOP)
+    rows = list(rows)
+    search_days = sorted(search_days)
+    holdout_days = sorted(d for d in holdout_days if d not in set(search_days))
+    search = rank_variants(rows, question, objective, search_days, base_variant)
+    validated = list(search.order[:top])
+    search_rank = {n: search.variants[n].rank for n in validated}
+    keep = set(validated) | {base_variant}
+    vrows = [r for r in rows if r['variant'] in keep]
+    scored = sorted(set(search_days) | set(holdout_days))
+    holdout_ranking = rank_variants(vrows, question, objective, holdout_days, base_variant) if holdout_days else None
+    holdout_order = list(holdout_ranking.order) if holdout_ranking is not None else []
+    holdout_floors = holdout_ranking.floors if holdout_ranking is not None else {}
+    full = rank_variants(vrows, question, objective, scored, base_variant) if holdout_days else None
+    folds: Dict[str, List[str]] = {}
+    if holdout_days:
+        if len(search_days) >= 2:
+            for d in search_days:
+                folds[d] = rank_variants(rows, question, objective, [x for x in search_days if x != d], base_variant).order
+        for d in holdout_days:
+            folds[d] = rank_variants(vrows, question, objective, [x for x in scored if x != d], base_variant).order
+    table, _ = _rows_by_variant_day(vrows, base_variant, holdout_days)
+    per: Dict[str, dict] = {}
+    for name in validated:
+        sv = search.variants[name]
+        comp = sv.review_component if question == 'explore' else 'rise_vs_base_U'
+        fkey = FLOOR_COMPONENTS[comp]
+        want = _sign(sv.mean.get(comp))
+        by_day = table.get(name, {})
+        flips, missing, holds, inside = [], [], 0, 0
+        for d in holdout_days:
+            m = by_day.get(d)
+            if m is None:
+                missing.append(d)
+            elif want != 0 and _sign(m.get(comp)) == want:
+                holds += 1
+                if d in holdout_floors and is_tie(m.get(comp) or 0.0, holdout_floors[d].get(fkey), fkey):
+                    inside += 1
+            else:
+                flips.append(d)
+        ranks = [order.index(name) + 1 for order in folds.values() if name in order]
+        unranked = len(folds) - len(ranks)
+        in_top = sum(1 for order in folds.values() if name in order[:fold_top])
+        fold_share = in_top / len(folds) if folds else None
+        fv = full.variants.get(name) if full is not None else None
+        infeasible_days = sorted(fv.infeasible_reasons) if fv is not None else []
+        feasible_all = fv is not None and fv.feasible
+        n_hold = len(holdout_days)
+        hr = (holdout_order.index(name) + 1) if name in holdout_order else None
+        reasons = []                                 # one entry per failed condition (details in brackets)
+        if sv.tie_with_base:
+            reasons.append(TIE_REASON)
+        if not holdout_days:
+            reasons.append('no hold-out days')
+        if missing:
+            reasons.append(f'not replayed on {len(missing)} of {n_hold} hold-out days yet')
+        if fv is not None and not feasible_all:
+            reasons.append(f'not feasible on {len(infeasible_days)} day(s): {", ".join(infeasible_days[:4])}'
+                           + (' ...' if len(infeasible_days) > 4 else ''))
+        if folds:
+            if fold_share < fold_needed - 1e-9:
+                reasons.append(f'top-{fold_top} on {share_pct(fold_share, 0)} of the {len(folds)} leave-one-day-out'
+                               f' folds (needs {share_pct(fold_needed)}'
+                               + (f'; not ranked in {unranked}' if unranked else '') + ')')
+        elif holdout_days:
+            reasons.append('fewer than two scored days: no leave-one-day-out folds')
+        if n_hold:
+            if holds / n_hold < share_needed - 1e-9:
+                reasons.append(f'direction holds on {holds} of {n_hold} hold-out days (needs {share_pct(share_needed)})')
+                if flips:
+                    reasons.append(f'direction flips on {len(flips)} of {n_hold} hold-out days')
+            if hr is None:
+                reasons.append('not ranked on the hold-out days')
+            elif hr > holdout_top:
+                reasons.append(f'hold-out rank {hr} (needs within the top {holdout_top})')
+        ok = not reasons
+        per[name] = {'search_rank': search_rank[name], 'holdout_rank': hr, 'holdout_total': len(holdout_order),
+                     'component': comp, 'direction': want, 'holds': holds, 'holdout_days': n_hold,
+                     'flip_days': flips[:FLIP_DAYS_MAX], 'missing_days': len(missing),
+                     'lodo_min': min(ranks) if ranks else None, 'lodo_max': max(ranks) if ranks else None,
+                     'lodo_folds': len(folds), 'lodo_unranked': unranked, 'fold_top': fold_top,
+                     'fold_share': None if fold_share is None else round(fold_share, 3), 'holdout_top': holdout_top,
+                     'inside_floor_days': inside, 'tie_with_base': bool(sv.tie_with_base),
+                     'feasible_all_days': feasible_all,
+                     'infeasible_days': infeasible_days[:FLIP_DAYS_MAX], 'recommended_for_review': ok,
+                     'reasons': reasons}
+    tau = kendall_tau(validated, holdout_order)
+    return Validation(top=top, search_days=search_days, holdout_days=holdout_days, scored_days=scored,
+                      validated=validated, search_rank=search_rank, holdout_ranking=holdout_ranking,
+                      holdout_order=holdout_order, full_ranking=full, folds=folds, per_variant=per, tau=tau,
+                      sign_share=share_needed, fold_top=fold_top, fold_share=fold_needed, holdout_top=holdout_top)
+
+
+def validation_caveat(v: Optional[dict]) -> Optional[str]:
+    """The caveat line of a variant recommended for review (H-308): on how many of the hold-out days on which the
+    direction holds the effect stayed inside TIE_FACTOR x that day's floor; None when there is nothing to say."""
+    if not v or not v.get('holds'):
+        return None
+    k = int(v.get('inside_floor_days') or 0)
+    if not k:
+        return f'caveat: outside {TIE_FACTOR:g} x floor on every one of the {v["holds"]} holding hold-out days'
+    return f'caveat: inside {TIE_FACTOR:g} x floor on {k} of the {v["holds"]} holding hold-out days'
+
+
 def _fmt_floor(v):
     return f'{v:.2f}'
 
 
-def ranking_rule_text(question: str = 'explore', objective: Optional[dict] = None, floors: Optional[Dict[str, dict]] = None) -> str:
-    """the ranking rule as printed next to the leaderboard (DESIGN.md 5.3; vocabulary of section 3)"""
+def ranking_rule_text(question: str = 'explore', objective: Optional[dict] = None, floors: Optional[Dict[str, dict]] = None,
+                      validate: bool = False) -> str:
+    """the ranking rule as printed next to the leaderboard (DESIGN.md 5.3; vocabulary of section 3); `validate`: the
+    study has a validate round (H-308), whose rule decides recommended for review"""
     cfg = _objective(objective)
     env, feas, w = cfg['envelope'], cfg['feasible'], cfg['scalar_weights']
     lines = []
@@ -930,9 +1259,20 @@ def ranking_rule_text(question: str = 'explore', objective: Optional[dict] = Non
     lines.append(f'Floor per day and component = |base - phone|; a difference smaller than {TIE_FACTOR:g} x floor is a tie'
                  ' (grey). Variants inside the floor on every component are indistinguishable from base within the noise'
                  ' floor; parameters with every point inside the floor on all days are not testable on these days.')
-    lines.append('Recommended for review only if feasible on all days, top-3 on at least 80 % of the leave-one-day-out'
-                 ' folds, the same sign of the primary effect on at least 80 % of days, and within the top 5 on the'
-                 ' hold-out days. Settings are for you and your care team to review; nothing here changes the phone.')
+    if validate:
+        lines.append('Recommended for review only after the validate phase: one of the top N of the search review order'
+                     ' (replayed on the hold-out days, never seen by the search) that is '
+                     + recommend_rule_text(cfg, validate=True) + '. ' + RULE5_TIE + ' Settings are for'
+                     ' you and your care team to review; nothing here changes the phone.')
+    else:                                            # byte-identical to the H-202 text at the default config
+        lines.append('Recommended for review only if ' + recommend_rule_text(cfg, validate=False) + '. Settings are'
+                     ' for you and your care team to review; nothing here changes the phone.')
+    if validate:
+        n = len(floors or {})
+        over = f'over the {n} scored search {"day" if n == 1 else "days"}' if n else 'over the scored search days'
+        lines.append(f'Floors and every x floor multiple of the review order are computed {over} only (hold-out days'
+                     ' get their own floors in the hold-out ranking): quarantined days are listed, not scored. A'
+                     ' multiple is the mean over days of |effect| / that day\'s floor.')
     if floors:
         parts = []
         for d in sorted(floors):
@@ -952,13 +1292,14 @@ def leaderboard_rows(ranking: Ranking) -> List[dict]:
         v = ranking.variants[name]
         if not v.feasible:
             verdict, why = 'infeasible', '; '.join(f'{d}: {", ".join(r)}' for d, r in sorted(v.infeasible_reasons.items()))
+        elif v.tie_with_base:                        # rule 4 before rule 5: a tie is never recommended for review
+            verdict, why = 'tie', 'indistinguishable from base within the noise floor on every day'
         elif v.recommended_for_review:
             verdict, why = 'recommended', 'feasible on all days, stable across folds, days and hold-out'
-        elif v.tie_with_base:
-            verdict, why = 'tie', 'indistinguishable from base within the noise floor on every day'
         else:
+            fm = v.floor_multiples.get(v.review_component)
             verdict, why = 'candidate', (f'{v.review_component} {v.mean.get(v.review_component, 0.0):+.2f} U vs base,'
-                                         f' {v.review_score:.1f} x floor')
+                                         f' {(fm if fm is not None else v.review_score):.1f} x floor')
         out.append({'variant': name, 'rank': v.rank, 'params': v.params, 'days': v.days, 'verdict': verdict, 'why': why,
                     'pareto': v.pareto, 'scalar': v.scalar, 'review_score': v.review_score,
                     'review_component': v.review_component, 'feasible': v.feasible,
@@ -977,4 +1318,8 @@ __all__ = ['OBJECTIVE_VERSION', 'LoopSeries', 'trial_metrics', 'metrics_from_csv
            'tie_components', 'tie_with_base', 'effect_over_floor', 'feasibility_day', 'aggregate_days',
            'pareto_objectives', 'pareto_front', 'dominates', 'scalar_objective', 'rank_variants', 'leave_one_day_out',
            'recommend', 'ranking_rule_text', 'leaderboard_rows', 'Ranking', 'VariantSummary', 'DEFAULT_OBJECTIVE',
+           'kendall_tau', 'validate_variants', 'validation_line', 'validation_caveat', 'Validation',
+           'DEFAULT_VALIDATE_TOP', 'VALIDATE_SIGN_SHARE', 'VALIDATION_KEYS', 'TIE_REASON', 'floor_multiple',
+           'floor_band', 'tie_every_day', 'study_floor', 'share_pct', 'recommend_config', 'recommend_rule_text',
+           'RULE5_TIE',
            'FLOOR_COMPONENTS', 'REVIEW_COMPONENTS', 'TIE_FACTOR', 'BASE_VARIANT', 'QUESTIONS']

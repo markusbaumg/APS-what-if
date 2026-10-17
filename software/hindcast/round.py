@@ -16,20 +16,45 @@ What it does
     metrics.rank_variants() reads: the base replay (control 'base' or the empty vhash) is relabelled
     metrics.BASE_VARIANT, the sentinel and null controls are left out (they are checks against state leaks, not
     variants). The ranking of DESIGN.md 5.3 runs on the study's search days; a second ranking on the hold-out days
-    gives the hold-out rank; leave-one-day-out folds and metrics.recommend() give the recommended-for-review flag;
-    one ranking per day tag (the strata the user typed into study.json) gives the per-stratum ranks.
+    gives the hold-out rank; one ranking per day tag (the strata the user typed into study.json) gives the
+    per-stratum ranks.
+
+Validate round (H-308). When study.json has a `validate` phase and its validated variants have hold-out rows,
+metrics.validate_variants() decides recommended for review by DESIGN.md 5.3 rule 5 with the objective's
+`recommend` config (defaults in brackets): one of the top N (phase.top) of the search review order that is not a tie
+with base, feasible on every search AND hold-out day, in the top fold_top (3) on at least fold_share (80 %) of the
+leave-one-day-out folds over search + hold-out days, the same sign of the primary effect on at least sign_share
+(80 %) of the hold-out days, and within the top holdout_top (5) on the hold-out days. Every other validated
+variant keeps its candidate / tie verdict with the failed conditions appended to `why` ('direction holds on 8 of
+13 hold-out days (needs 80 %)', 'top-3 on 40 % of the 19 leave-one-day-out folds (needs 80 %)', ...). Every
+surface states the rule through metrics.recommend_rule_text() from the configured numbers. A variant
+recommended for review carries a caveat in `why`: on how many of the hold-out days on which its direction holds the
+effect stayed inside 2 x that day's floor. Candidate.validation carries the per-variant numbers
+(metrics.VALIDATION_KEYS), Round.validation the study-level ones (top, hold-out days, folds, Kendall tau, how many
+are recommended for review). Without a validate phase (or before its rows exist) the older metrics.recommend()
+rule (folds over the search days, hold-out top 5) still applies; without hold-out rows it never recommends.
+
+Floors. Every floor and every 'x floor' multiple is computed over the scored days only (search days, hold-out
+days for the hold-out ranking): quarantined days are listed, not scored (DESIGN.md 5.4 phase 0), so they neither
+widen a floor nor enter a stratum ranking. The multiple a `why` prints for a component is
+metrics.floor_multiple() (the mean over days of |effect| / that day's floor), the same function the card calls.
+round.json `floors` (and the review order's floors) cover the scored SEARCH days only, one entry per day; status.json
+`floor` (study.aggregate_floor) is the worst day over the scored search AND hold-out days. Both leave quarantined
+days out; they differ on purpose, and the page labels which day set each number covers.
 
 Verdict per variant (contracts.VERDICTS; the first rule that applies wins)
     base          the base replay itself (the floor)
     pending       some search day has no row yet and none failed: the variant is still being evaluated
     infeasible    metrics.feasibility_day() names a reason on some day (P, envelope E, maxBolus, cap >= 50 %, loop
                   count), or the replay failed on a day (the error text is the reason)
-    recommended   metrics.recommend(): feasible on all days, top-3 on >= 80 % of the leave-one-day-out folds, same
-                  sign of the primary effect on >= 80 % of days, within the top 5 on the hold-out days
+    tie           indistinguishable from base within TIE_FACTOR x floor on every component and every day (checked
+                  before the recommended verdict: a tie is never recommended for review, DESIGN.md 5.3 rule 4)
+    recommended   validate round: metrics.validate_variants() (see above); else metrics.recommend(): feasible on all
+                  days, top-3 on >= 80 % of the leave-one-day-out folds, same sign of the primary effect on >= 80 %
+                  of days, within the top 5 on the hold-out days
     dead          the variant moves exactly one searched parameter away from the phone's value and that parameter is
                   dead: every one-parameter point of it (at least DEAD_MIN_POINTS) stays inside DEAD_FLOOR_RATIO x
                   floor on every search day ("not testable on these days", H-304's rule, reported in dead_parameters)
-    tie           indistinguishable from base within TIE_FACTOR x floor on every component and every day
     candidate     everything else; `why` names the component, the direction and the size in floors
 
 `why` strings use the vocabulary of DESIGN.md section 3 (every one passes lint.lint_findings(..., 'line'); the
@@ -152,6 +177,7 @@ class VariantReport:
     per_day: Dict[str, dict] = field(default_factory=dict)        # day -> metrics (search and hold-out)
     review_score: float = 0.0
     review_component: str = M.REVIEW_COMPONENTS[0]
+    floor_multiples: Dict[str, Optional[float]] = field(default_factory=dict)   # metrics.floor_multiple per component
     pareto: bool = False
     scalar: Optional[float] = None
     strata_ranks: Dict[str, Optional[int]] = field(default_factory=dict)      # tag -> rank (None: not ranked there)
@@ -160,6 +186,7 @@ class VariantReport:
     holdout_total: int = 0
     recommended: bool = False
     recommend_reasons: List[str] = field(default_factory=list)
+    validation: Optional[Dict[str, Any]] = None                   # validate round: metrics.VALIDATION_KEYS
     dead_keys: List[str] = field(default_factory=list)            # the dead parameter(s) a 'dead' variant moves
     phone: Dict[str, Any] = field(default_factory=dict)           # searched key -> the phone's value
     flags: List[str] = field(default_factory=list)
@@ -196,6 +223,7 @@ class Analysis:
     trials: int
     warnings: List[str] = field(default_factory=list)
     phone: Dict[str, Any] = field(default_factory=dict)
+    validation: Optional[M.Validation] = None         # the validate round (None: no validate phase / no hold-out rows)
 
     @property
     def base(self):
@@ -291,15 +319,30 @@ def _component_words(component):
     return 'rising loops' if component == 'rise_vs_base_U' else 'the other loops'
 
 
+def floor_multiple_of(report, component=None, floors=None):
+    """The one 'x floor' multiple of one component of a report, for round.json's `why` and the card alike:
+    metrics.floor_multiple() as rank_variants stored it over the scored search days; when nothing was stored and
+    `floors` (day -> floors_from_base) is given, metrics.floor_multiple() over the report's search days; else the
+    review score (primary component) or 0."""
+    comp = component or report.review_component
+    fm = (report.floor_multiples or {}).get(comp)
+    if fm is None and floors is not None:
+        fm = M.floor_multiple(report.per_day, floors, comp, report.days)
+    if fm is None:
+        return report.review_score if comp == report.review_component else 0.0
+    return fm
+
+
 def candidate_why(report):
-    """The candidate verdict's `why`: direction, size and floors of the primary component, days."""
+    """The candidate verdict's `why`: direction, size and floor multiple (floor_multiple_of) of the primary
+    component, days."""
     comp = report.review_component
     v = report.mean.get(comp, 0.0) or 0.0
     other = 'rest_vs_base_U' if comp == 'rise_vs_base_U' else 'rise_vs_base_U'
     ov = report.mean.get(other)
     n = len(report.days)
     text = (f'would have asked for {abs(v):.2f} U {"more" if v > 0 else "less"} than base per day in '
-            f'{_component_words(comp)} ({report.review_score:.1f} x floor) over {n} day{"s" if n != 1 else ""}')
+            f'{_component_words(comp)} ({floor_multiple_of(report, comp):.1f} x floor) over {n} day{"s" if n != 1 else ""}')
     if _num(ov):
         text += f'; {_component_words(other)} {ov:+.2f} U'
     return text
@@ -315,8 +358,9 @@ def _infeasible_why(report):
     return 'infeasible: ' + ' | '.join(parts)
 
 
-def verdict_of(report, dead_keys, search_days):
-    """(verdict, why) by the rule of the module docstring."""
+def verdict_of(report, dead_keys, search_days, objective=None):
+    """(verdict, why) by the rule of the module docstring; `objective` (the study's) gives the rule-5 numbers of a
+    'recommended' why without a validate round (objective.recommend, as metrics.recommend() reads it)."""
     if report.vhash == BASE_VHASH:
         return 'base', 'the phone\'s own settings replayed: its distance from the phone is the floor of every component'
     missing = [d for d in search_days if d not in report.days]
@@ -326,17 +370,32 @@ def verdict_of(report, dead_keys, search_days):
         return 'pending', f'replayed on {len(report.days)} of {len(search_days)} search days; verdict pending'
     if not report.feasible:
         return 'infeasible', _infeasible_why(report)
-    if report.recommended:
-        return 'recommended', ('feasible on all days, in the top 3 on at least 80 % of the leave-one-day-out folds, '
-                               'same sign of the primary effect on at least 80 % of days, within the top 5 on the '
-                               'hold-out days: recommended for review')
+    tail = ''
+    if report.validation and report.validation.get('reasons'):
+        tail = '; hold-out: ' + '; '.join(report.validation['reasons'])
+    dead = None
     if dead_keys:
         key = dead_keys[0]
-        return 'dead', (f'moves only {key.split()[-1]}, which is not testable on these days (every one-parameter point '
+        dead = ('dead', f'moves only {key.split()[-1]}, which is not testable on these days (every one-parameter point '
                         f'inside {DEAD_FLOOR_RATIO:g} x floor)')
-    if report.tie_with_base:
-        return 'tie', 'indistinguishable from base within the noise floor on every component and every day'
-    return 'candidate', candidate_why(report)
+    if report.tie_with_base:                                 # rule 4 before rule 5: a tie is never recommended
+        return dead or ('tie', 'indistinguishable from base within the noise floor on every component and every day'
+                        + tail)
+    if report.recommended and report.validation:
+        v = report.validation
+        share = v.get('fold_share')
+        fold_top = v.get('fold_top', M.DEFAULT_OBJECTIVE['recommend']['fold_top'])
+        text = (f'search review order {v["search_rank"]}, feasible on every search and hold-out day, in the top '
+                f'{fold_top} on {M.share_pct(share if share is not None else 0, 0)} of {v["lodo_folds"]} '
+                f'leave-one-day-out folds, direction holds on {v["holds"]}/{v["holdout_days"]} hold-out days, '
+                f'hold-out rank {v["holdout_rank"]}: recommended for review')
+        cav = M.validation_caveat(v)
+        return 'recommended', text + (f'; {cav}' if cav else '')
+    if report.recommended:
+        return 'recommended', M.recommend_rule_text(objective, validate=False) + ': recommended for review'
+    if dead:
+        return dead
+    return 'candidate', candidate_why(report) + tail
 
 
 def _ties_between(analysis_order, reports, floors, days, scan=TIE_SCAN, limit=TIE_WITH_MAX):
@@ -362,6 +421,30 @@ def _ties_between(analysis_order, reports, floors, days, scan=TIE_SCAN, limit=TI
                 a.tie_with.append(vh2)
 
 
+def validate_phase(study):
+    """The study's validate phase (contracts.Phase) or None."""
+    return next((p for p in study.phases if p.kind == 'validate'), None)
+
+
+def validation_of(study, dicts, objective):
+    """metrics.validate_variants for the study's validate phase, or None when there is none, it has no days, or no
+    validated variant has a hold-out row yet."""
+    ph = validate_phase(study)
+    if ph is None:
+        return None
+    from hindcast import search                             # lazy: search imports round lazily too
+    try:
+        vdays = search.validation_days(study, ph)
+    except st.StudyError:
+        return None
+    if not vdays:
+        return None
+    val = M.validate_variants(dicts, study.question, objective, study.search_days(), vdays, ph.top)
+    if not any(d['day'] in set(vdays) and d['variant'] in set(val.validated) for d in dicts):
+        return None
+    return val
+
+
 def analyze(study, rows, settings=None, now=None):
     """The whole verdict step on a study's TrialRow list (or trial dicts): rankings, folds, strata, dead parameters,
     ties, one VariantReport per variant. `rows` are contracts.TrialRow objects (sd.trials()) or already the dicts
@@ -382,8 +465,19 @@ def analyze(study, rows, settings=None, now=None):
     if holdout_days and any(d['day'] in holdout_days for d in dicts):
         holdout_ranking = M.rank_variants(dicts, study.question, objective, holdout_days)
     M.recommend(ranking, folds, holdout_ranking.order if holdout_ranking else None, objective)
+    validation = validation_of(study, dicts, objective)
+    if validation is not None:                               # H-308: the validate rule replaces recommend()
+        holdout_ranking = validation.holdout_ranking
+        for name, v in ranking.variants.items():
+            pv = validation.per_variant.get(name)
+            v.recommended_for_review = bool(pv and pv['recommended_for_review'])
+            v.recommend_reasons = (list(pv['reasons']) if pv else
+                                   [f'not in the top {validation.top} of the search review order: not validated'])
     strata: Dict[str, List[str]] = {}
+    scored = set(search_days) | set(holdout_days)            # quarantined days are listed, not scored
     for d in study.days:
+        if d.day not in scored:
+            continue
         for tag in d.tags:
             strata.setdefault(tag, []).append(d.day)
     strata_rankings = {tag: M.rank_variants(dicts, study.question, objective, days) for tag, days in strata.items()
@@ -412,19 +506,22 @@ def analyze(study, rows, settings=None, now=None):
             rep.tie_with_base, rep.tie_days = v.tie_with_base, dict(v.tie_days)
             rep.mean, rep.sign_frac = dict(v.mean), dict(v.sign_frac)
             rep.review_score, rep.review_component = v.review_score, v.review_component
+            rep.floor_multiples = dict(v.floor_multiples)
             rep.pareto, rep.scalar, rep.rank = v.pareto, v.scalar, v.rank
             rep.recommended, rep.recommend_reasons = v.recommended_for_review, list(v.recommend_reasons)
             rep.flags = list(v.flags)
         if holdout_ranking is not None and name != M.BASE_VARIANT:
             rep.holdout_rank = _rank_in(holdout_ranking.order, name)
             rep.holdout_total = len(holdout_ranking.order)
+        if validation is not None and name in validation.per_variant:
+            rep.validation = dict(validation.per_variant[name])
         for tag, rk in strata_rankings.items():
             rep.strata_ranks[tag] = _rank_in(rk.order, name)
             rep.strata_days[tag] = len([d for d in strata[tag] if d in per_day])
         moved = one_parameter_key(rep.params, phone) if name != M.BASE_VARIANT else None
         rep.dead_keys = [moved] if moved in dead_keys else []
-        rep.verdict, rep.why = verdict_of(rep, rep.dead_keys, search_days)
-        rep.why = rep.why[:WHY_MAX]
+        rep.verdict, rep.why = verdict_of(rep, rep.dead_keys, search_days, objective)
+        rep.why = st.cut_words(rep.why, WHY_MAX)
         reports[vh] = rep
     order = [vhash_of[n] for n in ranking.order]
     front = [vhash_of[n] for n in ranking.front] if study.question != 'explore' else list(order)
@@ -436,7 +533,7 @@ def analyze(study, rows, settings=None, now=None):
     return Analysis(study=study, question=study.question, days=search_days, holdout_days=holdout_days,
                     ranking=ranking, holdout_ranking=holdout_ranking, folds=folds, reports=reports, order=order,
                     front=front, dead=dead, floors=ranking.floors, strata=strata, trials=len(dicts),
-                    warnings=warnings, phone=phone)
+                    warnings=warnings, phone=phone, validation=validation)
 
 
 # ----------------------------------------------------------------------------- round.json
@@ -449,10 +546,11 @@ def candidate_of(report):
     for tag, rank in sorted(report.strata_ranks.items()):
         if rank is not None:
             flags.append(f'rank:{tag}={rank}')
-    return Candidate(vhash=report.vhash, variant=report.variant, verdict=report.verdict, why=report.why[:WHY_MAX],
+    return Candidate(vhash=report.vhash, variant=report.variant, verdict=report.verdict, why=st.cut_words(report.why, WHY_MAX),
                      params=dict(report.params), rank=report.rank, days=len(report.days),
                      feasible=report.feasible, effect=report.effect, flags=flags,
-                     tie_with=list(report.tie_with[:TIE_WITH_MAX]))
+                     tie_with=list(report.tie_with[:TIE_WITH_MAX]),
+                     validation=dict(report.validation) if report.validation else None)
 
 
 def round_floors(floors):
@@ -479,11 +577,20 @@ def build_round(study_dir, round_no=None, phase=None, settings=None, now=None, s
     notes = list(analysis.warnings)
     if analysis.question == 'explore':
         notes.insert(0, 'review order, not a ranking by outcome')
+    val = analysis.validation
+    if val is not None:
+        tau = 'n/a' if val.tau is None else f'{val.tau:+.2f}'
+        notes.insert(1 if analysis.question == 'explore' else 0,
+                     f'validate: top {len(val.validated)} of the search review order on {len(val.holdout_days)} '
+                     f'hold-out day(s), {len(val.folds)} leave-one-day-out folds, Kendall tau search vs hold-out '
+                     f'{tau}; {len(val.recommended)} recommended for review (a caveat over '
+                     f'{len(val.scored_days)} days, not a statistic)')
     doc = Round(round=int(round_no), phase=str(phase), started=started or now or contracts.now_iso(),
                 finished=now or contracts.now_iso(), trials=analysis.trials,
                 variants=[candidate_of(r) for r in analysis.ordered(include_base=True)],
                 dead_parameters=list(analysis.dead), floors=round_floors(analysis.floors),
-                front=list(analysis.front), notes=notes)
+                front=list(analysis.front), notes=notes,
+                validation=analysis.validation.summary() if analysis.validation is not None else None)
     for _ in range(4):                                       # fit the per-variant limit: trim notes, then floors
         if not doc.problems():
             break

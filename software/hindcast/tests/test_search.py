@@ -426,7 +426,7 @@ def test_round_for_phase_marks_infeasible(tmp_path):
 
 def test_later_phase_kinds_are_skipped_with_the_issue_number(tmp_path):
     sd, study = make_study(tmp_path, phases=[Phase(kind='oaat'), Phase(kind='halving', rungs=[2, 'all']),
-                                             Phase(kind='optuna', sampler='nsga2', n=10), Phase(kind='validate', top=3)])
+                                             Phase(kind='optuna', sampler='nsga2', n=10), Phase(kind='cv')])
     rows = Rows(study)
     rows.base()
     screen_all(rows, study)

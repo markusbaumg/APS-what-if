@@ -29,6 +29,7 @@ SETTINGS = {'nightscout': {'url': 'https://example.test', 'token': 'secret', 'ap
             'safety': {'max_iob': 7.0},
             'profile_history': {'changes': [{'when': '2026-09-06T20:23:00+02:00', 'parameter': 'autoISF_max', 'from': 1.3, 'to': 1.5}]}}
 HOST = 'example.test'
+FAKE_ENTRIES = [{'date': START + i * 5 * MIN, 'sgv': 100.0 + i % 50, 'type': 'sgv'} for i in range(288)]
 
 
 # ----------------------------------------------------------------------------- fixtures
@@ -54,6 +55,7 @@ def env(tmp_path, monkeypatch):
     settings['nightscout']['cache_dir'] = str(tmp_path / 'cache')
     cache_root = os.path.join(str(tmp_path / 'cache'), HOST)
     make_cache(cache_root, DAY, END + 2 * H)
+    _touch(os.path.join(cache_root, 'entries', DAY + '.json'), END + 2 * H, json.dumps(FAKE_ENTRIES))
     base = str(tmp_path / 'frozen')
     monkeypatch.setenv('HINDCAST_FROZEN_DIR', base)
     monkeypatch.delenv('HINDCAST_OFFLINE', raising=False)
@@ -87,7 +89,7 @@ class FakeLiveSource:
         self.start_ms, self.end_ms = ns_client.parse_iso(start_iso), ns_client.parse_iso(end_iso)
         self.skipped = {}
         self.pending = []
-        self.entries = [{'date': START + i * 5 * MIN, 'sgv': 100.0 + i % 50} for i in range(288)]
+        self.entries = list(FAKE_ENTRIES)
         self.treatments = [{'eventType': 'Correction Bolus', 'insulin': 0.3, 'type': 'SMB', 'created_at': to_iso(START + 6 * H)}]
         self.iob = None
         self.profiles = None
@@ -145,7 +147,7 @@ def test_freeze_day_writes_files_and_meta(env):
     assert meta['window'] == ['2026-09-06T00:00:00.000Z', '2026-09-07T00:00:00.000Z']
     assert meta['character']['loops'] == 98 and meta['character']['smb_U'] == 0.3 and meta['character']['cgm_values'] == 288
     assert meta['character']['tdd_U'] is None                                 # the fake source has no iob/profiles
-    assert 'profile_history: autoISF_max 1.3->1.5 at 20:23 local' in meta['confounders']
+    assert 'profile_history: autoISF_max 1.3->1.5 at 20h23 local' in meta['confounders']
     assert meta['autoISF_versions'] == ['3.2.0']
     assert 'secret' not in open(mp, encoding='utf-8').read()                  # the token never reaches the meta
     # sha1 is over the uncompressed JSONL and the event order is loop order with drops in place
@@ -258,6 +260,62 @@ def test_list_days_and_format(env):
     changed['safety']['max_iob'] = 8.0
     rows = freeze.list_days(DAY, settings=changed, settings_path=env.settings_path)
     assert rows[0]['stale'] == ['settings_sha changed'] and 'STALE' in freeze.format_listing(rows)
+
+
+# ----------------------------------------------------------------------------- meta recompute
+
+def test_recompute_meta_rewrites_character_only(env, monkeypatch, capsys):
+    """A meta with a wrong CGM gap (the old loop-derived badge format) is corrected from the cache; the loops file,
+    sha1 (= freeze_sha) and every non-character key stay; the day does not go stale."""
+    meta = freeze_fake(env)
+    lp, mp = freeze.loops_path(DAY, HOST), freeze.meta_path(DAY, HOST)
+    lp_stat = os.stat(lp)
+    bad = json.loads(json.dumps(meta))
+    bad['character']['cgm_gap_min'] = 346
+    bad['confounders'] = ['loop gap 610 min 07:34-17:44']
+    contracts.write_json_atomic(mp, bad)
+    monkeypatch.setattr(freeze, '_CharacterSource', FakeLiveSource)
+
+    old, new = freeze.recompute_meta(DAY, settings=env.settings, settings_path=env.settings_path, dry=True)
+    assert old == bad and json.load(open(mp, encoding='utf-8')) == bad                      # dry: nothing written
+    assert freeze.character_changes(old, new) == [('cgm_gap_min', 346, meta['character']['cgm_gap_min'])]
+
+    old, new = freeze.recompute_meta(DAY, settings=env.settings, settings_path=env.settings_path)
+    on_disk = json.load(open(mp, encoding='utf-8'))
+    assert on_disk == new and new['character'] == meta['character'] and new['confounders'] == meta['confounders']
+    assert set(new) == set(meta) | {'meta_recomputed'}
+    assert {k: v for k, v in new.items() if k not in freeze.CHARACTER_KEYS + ('meta_recomputed',)} == \
+        {k: v for k, v in meta.items() if k not in freeze.CHARACTER_KEYS}
+    assert new['sha1'] == meta['sha1'] and os.stat(lp).st_mtime == lp_stat.st_mtime and os.stat(lp).st_size == lp_stat.st_size
+    assert freeze.staleness(new, env.settings, settings_path=env.settings_path) == []
+    assert freeze.blocked_reason(DAY, settings=env.settings, settings_path=env.settings_path) is None
+    assert new['character']['duplicate_pct'] == meta['character']['duplicate_pct']        # skips counted from the file
+
+    res = freeze.recompute_metas(None, settings=env.settings, settings_path=env.settings_path)
+    assert [(r[0], r[1], r[2]) for r in res] == [(DAY, 'recomputed', 'character unchanged')]
+    parser = argparse.ArgumentParser()
+    freeze.register(parser.add_subparsers(dest='command'))
+    args = parser.parse_args(['freeze', '--recompute-meta', DAY, '--dry'])
+    assert freeze.run_freeze(args, settings=env.settings, settings_path=env.settings_path) == freeze.EXIT_OK
+    assert f'{DAY}: recomputed - character unchanged' in capsys.readouterr().out
+
+
+def test_recompute_meta_refusals(env, monkeypatch):
+    monkeypatch.setattr(freeze, '_CharacterSource', FakeLiveSource)
+    with pytest.raises(freeze.FreezeError, match='not frozen'):
+        freeze.recompute_meta(DAY, settings=env.settings, settings_path=env.settings_path)
+    meta = freeze_fake(env)
+    changed = json.loads(json.dumps(env.settings))
+    changed['safety']['max_iob'] = 8.0
+    with pytest.raises(freeze.FreezeError, match='stale'):
+        freeze.recompute_meta(DAY, settings=changed, settings_path=env.settings_path)
+    bad = dict(meta, sha1='0' * 40)
+    contracts.write_json_atomic(freeze.meta_path(DAY, HOST), bad)
+    with pytest.raises(freeze.FreezeError, match='no longer hashes'):
+        freeze.recompute_meta(DAY, settings=env.settings, settings_path=env.settings_path)
+    res = freeze.recompute_metas(DAY, settings=env.settings, settings_path=env.settings_path)
+    assert res[0][1] == 'refused'
+    assert json.load(open(freeze.meta_path(DAY, HOST), encoding='utf-8')) == bad            # untouched
 
 
 # ----------------------------------------------------------------------------- FrozenSource

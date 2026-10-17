@@ -4,6 +4,8 @@ test_quarantine.py  -  day quarantine of days.py (backlog H-204)
 Constructed pieces for the four rules and the thresholds from study.json; the real-cache checks read the frozen
 metas and ns_settings.json and skip without them. Every reason string must pass hindcast.lint ('line' and 'issue').
 """
+import os
+
 import pytest
 
 from hindcast import contracts, days, freeze, lint
@@ -180,3 +182,70 @@ def test_quarantine_from_trials_real_trial_rows():
     stale = contracts.TrialRow(status='stale', **base)
     assert days.quarantine_from_trials(study, [done, stale], settings=SETTINGS) == {'2026-09-06': []}
     assert len(days.quarantine_from_trials(study, [stale, done], settings=SETTINGS)['2026-09-06']) == 1
+
+
+def test_cgm_gap_from_raw_entries_is_clipped_at_midnight():
+    """The day's first reading at 01:00Z / 02:01Z: only the minutes since midnight count (entries before the day,
+    e.g. a look-back, are ignored), 60 min kept, 121 min quarantined."""
+    start, end = days.day_bounds('2026-09-06')
+    five = 5 * 60 * 1000
+    hour = 60 * 60 * 1000
+    prev = [{'date': t, 'sgv': 120} for t in range(start - 24 * hour, start - 2 * hour + 1, five)]   # last 22:00Z
+    day = [{'date': t, 'sgv': 120} for t in range(start + hour, end, five)]
+    assert days.quarantine_reasons('2026-09-06', entries=day) == []
+    assert days.quarantine_reasons('2026-09-06', entries=prev + day) == []
+    late = [{'date': t, 'sgv': 120} for t in range(start + 2 * hour + 60 * 1000, end, five)]
+    assert days.quarantine_reasons('2026-09-06', entries=prev + late) == ['CGM gap 121 min (threshold 120 min)']
+
+
+def test_loop_gap_and_missing_cgm_are_no_reasons():
+    assert days.quarantine_reasons('2026-10-05', meta={'character': {'cgm_gap_min': 75, 'loop_gap_min': 610},
+                                                       'confounders': ['phone not looping for 610 min from 07:34 local']}) == []
+    assert days.quarantine_reasons('2026-10-05', meta={'character': {'cgm_gap_min': None, 'cgm_note': 'no CGM file'}}) == []
+
+
+def _requarantine_env(tmp_path, cgm_gap):
+    from hindcast import study as st
+    settings = {'nightscout': {'url': 'https://example.test'}}
+    sdays = [contracts.StudyDay('2026-10-04'),
+             contracts.StudyDay('2026-10-05', role='quarantined', quarantine_reason='was search: CGM gap 346 min (threshold 120 min)'),
+             contracts.StudyDay('2026-10-06', role='quarantined', quarantine_reason='was holdout: CGM gap 300 min (threshold 120 min)')]
+    study = make_study(sdays)
+    sd = st.StudyDir(str(tmp_path / 'studies' / 'rq'))
+    os.makedirs(sd.path)
+    sd.write_study(study)
+    frozen = str(tmp_path / 'frozen')
+    for d, gap in cgm_gap.items():
+        contracts.write_json_atomic(freeze.meta_path(d, 'example.test', frozen), {'day': d, 'character': {'cgm_gap_min': gap}})
+    return settings, sd, frozen
+
+
+def test_requarantine_releases_days_whose_reason_is_gone(tmp_path):
+    settings, sd, frozen = _requarantine_env(tmp_path, {'2026-10-04': 20, '2026-10-05': 75, '2026-10-06': 458})
+    lines = []
+    changed, reasons = days.requarantine(sd.path, settings=settings, frozen_dir=frozen, dry=True, log=lines.append)
+    assert changed == [('2026-10-05', [])]
+    assert sd.load_study(settings).days[1].role == 'quarantined'                         # dry: nothing written
+    changed, reasons = days.requarantine(sd.path, settings=settings, frozen_dir=frozen, log=lines.append)
+    assert changed == [('2026-10-05', [])] and reasons['2026-10-06'] == ['CGM gap 458 min (threshold 120 min)']
+    study = sd.load_study(settings)
+    roles = {d.day: (d.role, d.quarantine_reason) for d in study.days}
+    assert roles['2026-10-05'] == ('search', None)
+    assert roles['2026-10-06'] == ('quarantined', 'was holdout: CGM gap 458 min (threshold 120 min)')
+    assert roles['2026-10-04'] == ('search', None)
+    _lint_clean(lines)
+    assert days.requarantine(sd.path, settings=settings, frozen_dir=frozen, log=lines.append)[0] == []   # idempotent
+
+
+def test_requarantine_refuses_a_running_study(tmp_path):
+    from hindcast import study as st
+    settings, sd, frozen = _requarantine_env(tmp_path, {'2026-10-05': 75})
+    assert sd.try_create_lock(pid=os.getppid())                                          # a live foreign pid
+    with pytest.raises(st.StudyError):
+        days.requarantine(sd.path, settings=settings, frozen_dir=frozen, log=lambda *a: None)
+    import argparse
+    args = argparse.Namespace(name=sd.path, dry=False, studies_dir=None, frozen_dir=frozen)
+    assert days.run_requarantine(args, settings=settings, log=lambda *a: None) == 3
+    p = argparse.ArgumentParser()
+    days.register(p.add_subparsers(dest='c'))
+    assert p.parse_args(['requarantine', 'x', '--dry']).func is days.run_requarantine

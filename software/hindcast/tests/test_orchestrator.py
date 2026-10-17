@@ -571,6 +571,10 @@ def test_low_base_agreement_quarantines_before_the_variants(tmp_path, fake):
     assert [d for d in json.load(open(sd.study_json))['days'] if d['day'] == DAY2][0]['role'] == 'quarantined'
     assert len([r for r in rows_of(sd) if r.day == DAY and r.control is None and r.status == 'done']) == 15
     assert any('quarantined after its base replay' in l for l in lines)
+    # no control runs on a day quarantined in the same round; the round's null moves to the next sentinel
+    controls = [r for r in rows_of(sd) if r.control in ('sentinel', 'null')]
+    assert controls and not [r for r in controls if r.day == DAY2]
+    assert [r.control for r in controls if r.day == DAY].count('null') == 1
 
 
 # ----------------------------------------------------------------------------- close order, round lines, comment words (verifier fixes)

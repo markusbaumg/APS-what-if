@@ -523,6 +523,47 @@ def test_status_top_from_round_json_is_trimmed(tmp_path):
     assert all(t.variant in text for t in status.top)
 
 
+def test_cut_words_cuts_at_a_word_boundary_with_an_ellipsis():
+    text = 'search review order 4, feasible on every search and hold-out day, direction holds on 13/13 days'
+    assert st.cut_words(text, 200) == text
+    out = st.cut_words(text, 40)
+    assert out == 'search review order 4, feasible on...' and len(out) <= 40
+    assert st.cut_words('abcdefghijklmnopqrstuvwxyz', 10) == 'abcdefg...'     # one long word: a hard cut
+    for n in range(10, len(text)):                                    # the first word fits from 9 on
+        cut = st.cut_words(text, n)
+        assert len(cut) <= n and cut.endswith('...')
+        head = cut[:-3]
+        assert text.startswith(head) and text[len(head)] in ' ,;:-('
+
+
+def test_status_fitter_drops_lower_value_fields_before_cutting_why(tmp_path):
+    """the H-308 observation: a 'why' cut at 40 characters mid-phrase. The fitter drops effect numbers, the stop
+    reason length and the quarantine reasons first, shortens the why at a word boundary with an ellipsis, and never
+    cuts mid-word"""
+    sd = make_study(tmp_path, days=tuple(f'2026-09-{d:02d}' for d in range(1, 15)))
+    why = ('search review order 4, feasible on every search and hold-out day, in the top 3 on 100% of 19 '
+           'leave-one-day-out folds, direction holds on 13/13 hold-out days, hold-out rank 2: recommended for review')
+    variants = []
+    for i in range(5):
+        params = {'profile autoISF_max': 1.3 + i * 0.01, 'profile dura_ISF_weight': 0.5}
+        variants.append(c.Candidate(vhash=c.vhash(params), variant=f'autoISF_max_{1.3 + i * 0.01:.2f}__dura_ISF_weight_0.5_{i}',
+                                    verdict='recommended', why=why, params=params, rank=i + 1,
+                                    effect={'rise_vs_base_U': 0.4, 'rest_vs_base_U': 0.01, 'changed_vs_base': 12},
+                                    validation={'holdout_rank': 1, 'holdout_total': 8, 'holds': 13, 'holdout_days': 13,
+                                                'lodo_min': 1, 'lodo_max': 4}))
+    c.Round(round=1, phase='validate', started=c.now_iso(), variants=variants, front=[v.vhash for v in variants],
+            validation={'top': 8}).save(sd.round_path)
+    status = st.build_status(sd)
+    assert len(status.to_compact_json().encode('utf-8')) <= 2048 and status.top
+    for t in status.top:
+        if t.why != why[:len(t.why)] or len(t.why) < len(why):
+            assert t.why.endswith('...'), t.why
+            head = t.why[:-3]
+            assert why.startswith(head) and why[len(head)] in ' ,;:-(', t.why
+            assert t.effect == {}                                    # the numbers went before the words did
+        assert t.validation and t.validation.startswith('hold-out: rank 1 of 8')
+
+
 @pytest.mark.parametrize('verdict', c.VERDICTS)
 def test_status_text_passes_the_line_lint_for_every_verdict(verdict):
     from hindcast import lint

@@ -153,6 +153,12 @@
      "additionalProperties": {
       "type": "number"
      }
+    },
+    "validation": {
+     "type": [
+      "string",
+      "null"
+     ]
     }
    },
    "additionalProperties": false,

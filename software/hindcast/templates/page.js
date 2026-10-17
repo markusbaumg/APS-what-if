@@ -40,13 +40,37 @@
     return tpl ? tpl.replace('{day}', day).replace('{vhash}', vhash || d.base_vhash || '') : null;
   };
 
+  /* An inlined copy is packed (report.pack_inline): an array equal to the same day's orig / base document is
+     {"$ref": path} or {"$ref": path, "$diff": [i, v, i, v, ...]}; expanded here, references first. */
+  var inlineDocs = {};
+  function inlineDoc(path, depth) {
+    if (inlineDocs[path]) return inlineDocs[path];
+    if (!HC.inline[path] || depth > 4) return null;
+    var doc = readJsonScript(HC.inline[path]);
+    if (!doc) return null;
+    var keys = Object.keys(doc);
+    for (var n = 0; n < keys.length; n++) {
+      var k = keys[n], v = doc[k];
+      if (v && typeof v === 'object' && !Array.isArray(v) && typeof v.$ref === 'string') {
+        var ref = inlineDoc(v.$ref, (depth || 0) + 1);
+        if (!ref || !Array.isArray(ref[k])) { console.error('inlined reference unreadable', path, k, v.$ref); return null; }
+        var arr = ref[k].slice(), d = v.$diff || [];
+        for (var i = 0; i + 1 < d.length; i += 2) arr[d[i]] = d[i + 1];
+        doc[k] = arr;
+      }
+    }
+    inlineDocs[path] = doc;
+    return doc;
+  }
+  HC.inlineDoc = function (path) { return inlineDoc(path, 0); };
+
   var tier2Cache = {};
   HC.loadTier2 = function (path) {
     if (!path) return Promise.reject(new Error('no such tier-2 document'));
     if (tier2Cache[path]) return tier2Cache[path];
     var p;
     if (HC.inline[path]) {
-      var doc = readJsonScript(HC.inline[path]);
+      var doc = inlineDoc(path, 0);
       p = doc ? Promise.resolve(doc) : Promise.reject(new Error(path + ': the inlined copy is unreadable'));
     } else if (HC.fromDisk || typeof fetch !== 'function') {
       p = Promise.reject(new Error(HC.text.notFromDisk(path)));
@@ -273,7 +297,11 @@
       floors.appendChild(h('span', null, h('b', { text: fmt.signed(s.smb_bias_U, 2) + ' U' }), ' emulated SMB total vs the phone, over ' + fmt.num(s.hours_total, 1) + ' h replayed'));
       floors.appendChild(h('span', null, h('b', { text: fmt.num(s.tie_rise_U, 2) + ' U / ' + fmt.num(s.tie_rest_U, 2) + ' U' }), ' tie threshold, rising loops / the rest'));
       floors.appendChild(h('span', null, h('b', { text: fmt.int(s.days_with_base) + ' of ' + fmt.int(s.days) }), ' days have a base replay'));
+      floors.appendChild(h('span', null, h('b', { text: fmt.int(s.scored_days_with_base) }), ' scored days (search and hold-out) behind these numbers, ' + fmt.int(s.search_days_with_base) + ' of them search days (the review order\'s floors)'));
     }
+    (s.quarantined || []).forEach(function (q) {          // listed, not scored (DESIGN.md 5.4 phase 0)
+      floors.appendChild(h('span', null, h('b', { text: q.day }), ' quarantined, not scored: ' + q.reason));
+    });
     banner.appendChild(floors);
     el.appendChild(banner);
   }

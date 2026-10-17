@@ -19,7 +19,8 @@ What it writes (default out = studies/<study>/report/):
 The page fetches tier-2 files relative to itself; from file:// (fetch blocked) it says "not available from disk"
 and names `hc serve` and `--single-file`. `--single-file` inlines the selected tier-2 documents as
 <script type="application/json" data-tier2="<path>"> (base and the phone always, plus --variants, default top3 of
-the review order; prediction documents only with --pred) and warns above SINGLE_FILE_WARN_BYTES (12 MB; the artifact
+the review order; prediction documents only with --pred), packed against the day's orig / base document (see
+'page size budget', target PAGE_BUDGET_BYTES = 8 MB), and warns above SINGLE_FILE_WARN_BYTES (12 MB; the artifact
 limit is 16 MB). `--artifact` writes the page without <!doctype>/<html>/<head>/<body> and the charset/viewport metas
 (the Artifact tool wraps its own skeleton) and prints the `files` map for the publish call.
 
@@ -433,6 +434,128 @@ def inline_set(collected, days, variants, pred_variants):
     return out
 
 
+# ----------------------------------------------------------------------------- page size budget
+#
+# A single-file page has to fit the 16 MB artifact limit (ARTIFACT_MAX_BYTES; warning at SINGLE_FILE_WARN_BYTES).
+# The budget is PAGE_BUDGET_BYTES (8 MB) for a study of ~1000-1100 trial rows over 13 days with --variants top3,
+# measured on studies/oct_tierA (967 rows, 97 variants, 13 days of 1-min loops):
+#     before   8.7 MB  = tier-1 3.9 MB (trial rows 2.9: every row's full metrics, stamps and times; rounds 0.1)
+#                      + tier-2 4.7 MB (62 documents of ~1260 loops x 30 arrays) + CSS/JS 0.2 MB
+#     after    2.4 MB  = tier-1 1.3 MB (parameters 0.54, trial rows 0.47, scenarios 0.14, drill-down 0.1)
+#                      + tier-2 0.9 MB + CSS/JS 0.2 MB; --variants all (1260 documents) is 13.1 MB
+# What keeps it there:
+#   - slim_trials: a trial row carries only what page.js reads (PAGE_TRIAL_KEYS: the files lookup, the trials per
+#     day, the base row of a day), its metrics only on base / control rows (the day cards read the base metrics; the
+#     Parameters view has every variant's metrics in parameters.variants[*].per_day). tier1.json (orchestrator) keeps
+#     the full rows.
+#   - slim_rounds: rounds[*] without `variants` (the page reads dead_parameters; the per-variant round data is in
+#     parameters.variants).
+#   - pack_inline: the inlined tier-2 copies drop the arrays no view reads (INLINE_DROP_FIELDS), and an array of a
+#     base or variant document that equals the same day's orig or base document becomes {"$ref": path} (or
+#     {"$ref": path, "$diff": [i, v, i, v, ...]} when it differs in few loops). page.js expands both when it reads
+#     the inlined copy; the files next to a served page stay complete. The tier-2 numbers are already rounded by
+#     export to what the views show (insulin 0.01 U, BG 0.1, factors 0.01), so nothing is rounded here again.
+#   - prediction documents are inlined only with --pred (the drill-down fetches them lazily otherwise).
+PAGE_BUDGET_BYTES = 8 * 1024 * 1024
+PAGE_TRIAL_KEYS = ('trial', 'day', 'vhash', 'variant', 'status', 'control', 'phase', 'round', 'files')
+INLINE_DROP_FIELDS = ('autosens', 'f_acce', 'f_bg', 'f_pp', 'f_drift', 'f_dura', 'isf', 'isf_prof', 'smb_off',
+                      'act', 'dura_min', 'dura_avg', 'low_ahead', 'high_ahead')
+INLINE_PACK_KINDS = ('series', 'orig')
+INLINE_REF_MIN = 50                                        # arrays shorter than this stay as they are
+
+
+def slim_trials(rows):
+    """The trial rows as the page needs them (see the budget above)."""
+    out = []
+    for r in rows or []:
+        s = {k: r[k] for k in PAGE_TRIAL_KEYS if k in r}
+        if r.get('control') or r.get('vhash') == contracts.BASE_VHASH:
+            s['metrics'] = r.get('metrics')
+        out.append(s)
+    return out
+
+
+def slim_rounds(rounds):
+    return [{k: v for k, v in (r or {}).items() if k != 'variants'} for r in rounds or []]
+
+
+def _same(a, b):
+    return type(a) is type(b) and a == b
+
+
+def _packed_array(arr, ref, ref_path):
+    """{"$ref": ref_path[, "$diff": [...]]} when that is shorter than `arr`, else None."""
+    if not isinstance(ref, list) or len(ref) != len(arr):
+        return None
+    diff = []
+    for i, (x, y) in enumerate(zip(arr, ref)):
+        if not _same(x, y):
+            diff += [i, x]
+    if not diff:
+        return {'$ref': ref_path}
+    enc = {'$ref': ref_path, '$diff': diff}
+    return enc if len(json.dumps(enc, separators=(',', ':'))) < len(json.dumps(arr, separators=(',', ':'))) else None
+
+
+def pack_inline(docs):
+    """{page path: tier-2 document} -> the same documents as --single-file inlines them (see the budget above).
+    References only point at an orig document or the base series of the same day, and the base series only at the
+    orig one, so expanding never runs in a circle; unpack_inline() is the inverse (minus the dropped fields)."""
+    by_day = {}
+    for path, doc in docs.items():
+        if isinstance(doc, dict) and doc.get('kind') == 'orig':
+            by_day.setdefault(doc.get('day'), {})['orig'] = path
+        elif isinstance(doc, dict) and doc.get('kind') == 'series' and doc.get('vhash') == contracts.BASE_VHASH:
+            by_day.setdefault(doc.get('day'), {})['base'] = path
+    out = {}
+    for path, doc in docs.items():
+        if not isinstance(doc, dict) or doc.get('kind') not in INLINE_PACK_KINDS:
+            out[path] = doc
+            continue
+        refs = by_day.get(doc.get('day'), {})
+        cands = [] if doc['kind'] == 'orig' else [refs.get('orig')]
+        if doc['kind'] == 'series' and refs.get('base') not in (None, path):
+            cands.append(refs['base'])
+        cands = [c for c in cands if c]
+        new = {}
+        for k, v in doc.items():
+            if k in INLINE_DROP_FIELDS:
+                continue
+            if isinstance(v, list) and len(v) >= INLINE_REF_MIN:
+                best = None
+                for c in cands:
+                    enc = _packed_array(v, docs[c].get(k), c)
+                    if enc is not None and (best is None or len(enc.get('$diff', ())) < len(best.get('$diff', ()))):
+                        best = enc
+                v = best if best is not None else v
+            new[k] = v
+        out[path] = new
+    return out
+
+
+def unpack_inline(packed):
+    """The inverse of pack_inline (what page.js does in HC.loadTier2): {path: packed doc} -> {path: doc}."""
+    done = {}
+
+    def expand(path, depth=0):
+        if path in done:
+            return done[path]
+        if depth > 4 or path not in packed:
+            raise ReportError(f'{path}: an inlined reference that cannot be expanded')
+        doc = dict(packed[path])
+        for k, v in list(doc.items()):
+            if isinstance(v, dict) and isinstance(v.get('$ref'), str):
+                arr = list(expand(v['$ref'], depth + 1)[k])
+                d = v.get('$diff') or []
+                for i in range(0, len(d), 2):
+                    arr[d[i]] = d[i + 1]
+                doc[k] = arr
+        done[path] = doc
+        return doc
+
+    return {p: expand(p) for p in packed}
+
+
 # ----------------------------------------------------------------------------- page data (tier 1 + overview)
 
 def _r(v, dp=3):
@@ -455,8 +578,14 @@ def _plural(n, word, plural=None):
 
 def overview_numbers(study, rows, rounds, hours_by_day, days_meta=None):
     """The numbers of the Study overview (H-402), computed here so the page only formats them:
-    {'summary': {...}, 'days': {day: {...}}, 'banner': str, 'ties_text': str|None}. Every sentence passes the lint."""
+    {'summary': {...}, 'days': {day: {...}}, 'banner': str, 'ties_text': str|None}. Every sentence passes the lint.
+    `days` carries every day with a base row (the day cards); the summary and the banner (worst day, SMB bias,
+    floors, tie thresholds) cover the scored days only: search + hold-out, never a quarantined day (DESIGN.md 5.4
+    phase 0: listed, not scored), the same day set as status.json's `floor` (study.build_status). The quarantined
+    days stay listed in summary['quarantined'] with their reasons. The review order's floors (round.json `floors`,
+    the Parameters view) cover the scored search days only; the banner says so."""
     days_meta = days_meta or {}
+    roles = {d.day: d.role for d in study.days}
     base = {}
     for r in rows:
         if r.status == 'done' and r.metrics and (r.control == 'base' or r.vhash == contracts.BASE_VHASH):
@@ -483,9 +612,14 @@ def overview_numbers(study, rows, rounds, hours_by_day, days_meta=None):
             'tie_rest_U': _r(hm.TIE_FACTOR * hm.effective_floor(f['floor_rest_U'])),
             'freeze_sha': b.freeze_sha or '',
         }
-    with_base = [d for d, o in out_days.items() if o.get('has_base')]
+    all_base = [d for d, o in out_days.items() if o.get('has_base')]
+    with_base = [d for d in all_base if roles.get(d) in ('search', 'holdout')]     # the scored days
+    n_search = sum(1 for d in with_base if roles.get(d) == 'search')
     done = [r for r in rows if r.status == 'done']
-    summary = {'days': len(study.days), 'days_with_base': len(with_base),
+    quarantined = [{'day': d.day, 'reason': d.quarantine_reason or 'no reason recorded'}
+                   for d in study.days if d.role == 'quarantined']
+    summary = {'days': len(study.days), 'days_with_base': len(all_base), 'scored_days_with_base': len(with_base),
+               'search_days_with_base': n_search, 'quarantined': quarantined,
                'loops_with_base': sum(out_days[d]['loops'] or 0 for d in with_base),
                'trials_frozen': sum(1 for r in done if r.freeze_sha), 'trials_live': sum(1 for r in done if not r.freeze_sha),
                'frozen_days': len(days_meta), 'frozen_final_days': sum(1 for m in days_meta.values() if m.get('final'))}
@@ -496,7 +630,8 @@ def overview_numbers(study, rows, rounds, hours_by_day, days_meta=None):
         bias_day = [out_days[d]['smb_bias_U'] * 24.0 / out_days[d]['hours'] for d in with_base if out_days[d]['hours']]
         summary.update({
             'agreement_min_pct': out_days[worst]['agreement_pct'], 'agreement_min_day': worst,
-            'smb_exact_min_pct': min(out_days[d]['smb_exact_pct'] for d in with_base if out_days[d]['smb_exact_pct'] is not None),
+            'smb_exact_min_pct': min((out_days[d]['smb_exact_pct'] for d in with_base
+                                      if out_days[d]['smb_exact_pct'] is not None), default=None),
             'smb_bias_U': _r(sum(out_days[d]['smb_bias_U'] for d in with_base)),
             'smb_bias_U_per_day': _r(sum(bias_day) / len(bias_day)) if bias_day else None,
             'hours_min': min(hours) if hours else None, 'hours_total': _r(sum(hours), 2) if hours else None,
@@ -510,6 +645,12 @@ def overview_numbers(study, rows, rounds, hours_by_day, days_meta=None):
         span = (f'over {_fmt(o["hours"], 1)} h' if o['hours'] and o['hours'] < 23.5 else 'over the day')
         changed = o['loops'] - round(o['loops'] * (o['agreement_pct'] or 0) / 100.0) if o['loops'] else 0
         where = ('on ' + worst) if len(with_base) == 1 else f'on its worst day ({worst})'
+        scope = (f'These numbers cover the {_plural(len(with_base), "scored day")} (search and hold-out, the day set '
+                 f'of the status line); the review order\'s floors and x floor multiples cover the '
+                 f'{_plural(n_search, "scored search day")} only.')
+        if quarantined:
+            scope += (f' {_plural(len(quarantined), "quarantined day")} ('
+                      + ', '.join(q['day'] for q in quarantined) + ') listed, not scored.')
         banner = (f'The base replay (the phone\'s own settings, replayed) matches the phone on all four decisions in '
                   f'{_fmt(o["agreement_pct"], 1)} % of {o["loops"]} loops {where} and disagrees in {changed}; it '
                   f'reproduces the SMB exactly in {_fmt(o["smb_exact_pct"], 1)} %, and its SMB total is '
@@ -519,6 +660,10 @@ def overview_numbers(study, rows, rounds, hours_by_day, days_meta=None):
         if (summary['agreement_min_pct'] or 100) < 96.0:
             banner += (f' This floor is wider than the "about 4 %" the general statement above quotes; '
                        f'read every difference on this page against the numbers here.')
+        banner += ' ' + scope
+    elif all_base:
+        banner = ('No scored day (search or hold-out) has a base replay yet: the floor is unknown; quarantined days '
+                  'are listed, not scored.')
     rnd = rounds[-1] if rounds else None
     if rnd is not None:
         others = [c for c in rnd.variants if c.verdict != 'base']
@@ -572,7 +717,11 @@ def parameter_space(study, rows, rounds):
     {question, days[], floors{day: {floor_*, tie{component: U or loops}}}, components[], extras[], params[],
      base{vhash, variant, values{param: phone}}, variants[{vhash, variant, values, per_day{day: {metric: v}},
      mean{metric: v}, verdict, why, rank, position, feasible, reasons{day: [str]}, review_score, review_component,
-     tie_with_base, flags}], order[vhash], rule_lines[], warnings[]}.
+     tie_with_base, flags, validation}], order[vhash], rule_lines[], warnings[], validation}.
+    `validation` per variant: _validation_of() (None unless the validate phase replayed it); the top-level
+    `validation` is round.json's study-level block (metrics.Validation.summary(): {top, validated, search_days,
+    holdout_days[], folds, tau, recommended_for_review, sign_share, fold_top, fold_share, holdout_top}) or None.
+    `floors` are per scored search day, as round.json's; status.json's floor is the worst of search + hold-out.
     Days = the study's search days (hold-out and quarantined days stay out of the review order); the ranking is
     metrics.rank_variants on the latest done row per variant and day, the verdicts come from the latest round when it
     names the variant."""
@@ -634,7 +783,8 @@ def parameter_space(study, rows, rounds):
             verdict = 'infeasible' if not s.feasible else ('tie' if s.tie_with_base else 'candidate')
             why = ('; '.join(f'{d}: {", ".join(x)}' for d, x in sorted(reasons.items())) if not s.feasible else
                    'indistinguishable from base within the noise floor on every day' if s.tie_with_base else
-                   f'{s.review_component} {s.mean.get(s.review_component, 0.0):+.2f} U vs base, {s.review_score:.1f} x floor')
+                   f'{s.review_component} {s.mean.get(s.review_component, 0.0):+.2f} U vs base, '
+                   f'{_floor_multiple_of(s):.1f} x floor')
             rank = s.rank
         else:
             verdict, why, rank = 'pending', 'no base replay on these days yet', None
@@ -647,6 +797,7 @@ def parameter_space(study, rows, rounds):
             'review_component': s.review_component if s is not None else None,
             'tie_with_base': s.tie_with_base if s is not None else (verdict == 'tie'),
             'flags': list(s.flags) if s is not None else list(c.flags if c is not None else []),
+            'validation': _validation_of(c),
         })
     # order: the ranking's order, then the infeasible ones, then whatever has no ranking (round rank, then label)
     pos = {}
@@ -658,6 +809,8 @@ def parameter_space(study, rows, rounds):
     for i, v in enumerate(variants, 1):
         v['position'] = i
     rule = (ranking.rule_text if ranking is not None else '\n'.join(rnd.notes if rnd is not None else [])) or ''
+    if ranking is not None and rnd is not None and getattr(rnd, 'validation', None):
+        rule = hm.ranking_rule_text(study.question, ranking.objective, ranking.floors, validate=True)
     base_any = next(iter(base_rows.values()), None)
     return {
         'question': study.question, 'days': days, 'floors': floors, 'tie_factor': hm.TIE_FACTOR,
@@ -669,7 +822,32 @@ def parameter_space(study, rows, rounds):
                  'values': {p['key']: p['phone'] for p in params}, 'days': sorted(base_rows)},
         'variants': variants, 'order': [v['vhash'] for v in variants],
         'rule_lines': [x for x in rule.split('\n') if x.strip()], 'warnings': warnings,
+        'validation': dict(rnd.validation) if rnd is not None and getattr(rnd, 'validation', None) else None,
     }
+
+
+def _floor_multiple_of(s):
+    """The 'x floor' multiple of a VariantSummary's review component: metrics.floor_multiple() (the mean over days
+    of |effect| / that day's floor), review_score only when it is missing - as metrics.leaderboard_rows and the
+    cards print it."""
+    fm = (s.floor_multiples or {}).get(s.review_component)
+    return fm if fm is not None else s.review_score
+
+
+def _validation_of(candidate):
+    """The leaderboard's validation block of one variant (H-308), from round.json's Candidate.validation:
+    the metrics.VALIDATION_KEYS {search_rank, holdout_rank, holdout_total, component, direction, holds,
+    holdout_days, flip_days, missing_days, lodo_min, lodo_max, lodo_folds, lodo_unranked, fold_top, fold_share,
+    holdout_top, inside_floor_days, tie_with_base, feasible_all_days, infeasible_days, recommended_for_review,
+    reasons[]} plus `line` (metrics.validation_line) and `caveat` (metrics.validation_caveat, recommended for
+    review only, else None); None for a variant the validate phase did not replay (or before it ran)."""
+    v = getattr(candidate, 'validation', None) if candidate is not None else None
+    if not v:
+        return None
+    out = dict(v)
+    out['line'] = hm.validation_line(v)
+    out['caveat'] = hm.validation_caveat(v) if v.get('recommended_for_review') else None
+    return out
 
 
 # ----------------------------------------------------------------------------- scenario comparison (H-404)
@@ -791,6 +969,51 @@ def drilldown_index(study, collected):
     return out
 
 
+NO_GLUCOSE_RESPONSE = contracts.NO_GLUCOSE_RESPONSE      # shared with the cards ('this page' read as 'this card')
+
+
+def unlock_caveat(study):
+    """The weak-evidence banner of a study that varies keys locked by default (Study.unlocked: tier C profile
+    scales, tier S caps): contracts.WEAK_EVIDENCE via Study.unlock_caveat() plus NO_GLUCOSE_RESPONSE; None
+    otherwise. The page shows it next to the honesty paragraph."""
+    fn = getattr(study, 'unlock_caveat', None)
+    text = fn() if callable(fn) else None
+    if not text:
+        return None
+    text = text[0].upper() + text[1:]
+    return text + ' ' + NO_GLUCOSE_RESPONSE
+
+
+def validation_lines(v):
+    """The Parameters view's 'Hold-out validation' panel from round.json's study-level validation block
+    (metrics.Validation.summary(): {top, validated, search_days, holdout_days[], folds, tau, recommended_for_review,
+    sign_share, fold_top, fold_share, holdout_top}); [] without a validate round. The rule sentence is
+    metrics.recommend_rule_text() over the block's numbers (defaults for a key an older round lacks), the same
+    builder as the rule lines, so the panel cannot state another rule. Kendall tau is quoted as a caveat with its
+    day count, never as a statistic."""
+    if not v:
+        return []
+    hold = list(v.get('holdout_days') or [])
+    n_search = int(v.get('search_days') or 0)
+    n_days = n_search + len(hold)
+    validated = int(v.get('validated') or 0)
+    rec = int(v.get('recommended_for_review') or 0)
+    tau = v.get('tau')
+    tau_text = (f'Kendall tau {tau:+.2f} over {_plural(n_days, "day")}' if isinstance(tau, (int, float))
+                else 'Kendall tau not computed')
+    out = [f'Hold-out validation: {validated} validated, {rec} recommended for review, {tau_text}.']
+    out.append(f'The top {v.get("top", validated)} of the search review order were replayed on '
+               f'{_plural(len(hold), "hold-out day")}' + (f' ({", ".join(hold)})' if hold else '') +
+               f'; {_plural(int(v.get("folds") or 0), "leave-one-day-out fold")} over the {n_search} search and '
+               f'{len(hold)} hold-out days.')
+    if isinstance(tau, (int, float)):
+        out.append(f'Kendall tau compares the search order with the hold-out order of the validated variants; with '
+                   f'{_plural(n_days, "day")} it is a caveat on how stable the order is, not a statistic.')
+    out.append('Recommended for review means: not a tie with base, ' + hm.recommend_rule_text(v, validate=True)
+               + '; a reading for review, not a finding.')
+    return out
+
+
 def build_page_data(sd, study, rows, status, rounds, days_meta, settings, collected, generated, single_file=False,
                     inlined=(), artifact=False):
     """The tier-1 document: export.build_tier1 plus `overview`, `assumed`, `parameters`, `scenarios`, `drilldown` and `page`; the trial rows' `files` are
@@ -810,14 +1033,18 @@ def build_page_data(sd, study, rows, status, rounds, days_meta, settings, collec
             if key in by_src:
                 files[kind] = by_src[key]
         r['files'] = files
+    data['trials'] = slim_trials(data['trials'])
+    data['rounds'] = slim_rounds(data.get('rounds'))
     data['overview'] = overview_numbers(study, rows, rounds, hours, days_meta)
     data['assumed'] = assumed_keys(settings)
     data['parameters'] = parameter_space(study, rows, rounds)
+    data['parameters']['validation_lines'] = validation_lines(data['parameters'].get('validation'))
     data['scenarios'] = scenario_index(study, rows, collected, days_meta, settings, data['parameters'])
     data['drilldown'] = drilldown_index(study, collected)
     data['page'] = {'generated': data['generated'], 'single_file': bool(single_file), 'inlined': list(inlined),
                     'artifact': bool(artifact), 'source': source_label(study.source), 'host': '',
-                    'units': glucose_units(settings), 'study_dir': os.path.basename(sd.path)}
+                    'units': glucose_units(settings), 'study_dir': os.path.basename(sd.path),
+                    'caveat': unlock_caveat(study)}
     if isinstance(data.get('study'), dict):                  # the page is shareable: no Nightscout URL or hostname
         data['study']['source'] = source_label(study.source)
         data['study']['host'] = ''
@@ -829,11 +1056,16 @@ def page_sentences(data):
     ov = data.get('overview') or {}
     out = [s for s in (ov.get('banner'), ov.get('ties_text')) if s]
     out += [str(v) for v in (data.get('assumed') or {}).values()]
+    if (data.get('page') or {}).get('caveat'):
+        out.append(str(data['page']['caveat']))
     ps = data.get('parameters') or {}
     out += list(ps.get('rule_lines') or []) + list(ps.get('warnings') or [])
+    out += [str(x) for x in ps.get('validation_lines') or []]
     for v in ps.get('variants') or []:
         if v.get('why'):
             out.append(str(v['why']))
+        if (v.get('validation') or {}).get('line'):
+            out.append(str(v['validation']['line']))
         for reasons in (v.get('reasons') or {}).values():
             out += [str(x) for x in reasons]
     sc = data.get('scenarios') or {}
@@ -888,6 +1120,7 @@ def render_html(data, inline_docs=None, size_note='', artifact=False, private=()
     (private_strings) is scrubbed from the inlined documents and refused in the result (ReportError)."""
     if private:
         inline_docs = {p: scrub_private(d, private) for p, d in (inline_docs or {}).items()}
+    inline_docs = pack_inline(inline_docs or {})
     study = data.get('study') or {}
     page = data.get('page') or {}
     mode = ('single file, ' + _plural(len(inline_docs or {}), 'per-loop document') + ' inlined') if page.get('single_file') \
@@ -905,6 +1138,7 @@ def render_html(data, inline_docs=None, size_note='', artifact=False, private=()
         'ECHARTS_VERSION': ECHARTS_VERSION,
         'ECHARTS_URL': ECHARTS_URL,
         'SIZE_NOTE': size_note,
+        'CAVEAT': caveat_html(page.get('caveat')),
         'CSS': _guard_inline(_template('page.css'), 'page.css', 'style'),
         'THEME_JS': _guard_inline(_template('theme.js'), 'theme.js', 'script'),
         'PAGE_JS': _guard_inline(_template('page.js'), 'page.js', 'script'),
@@ -925,6 +1159,17 @@ def render_html(data, inline_docs=None, size_note='', artifact=False, private=()
     if private_problems(text, private):
         raise ReportError('refused: the page would carry the Nightscout address; it is shown as "Nightscout" only')
     return text
+
+
+def caveat_html(text):
+    """The weak-evidence paragraph of the honesty band (unlocked studies), or ''."""
+    if not text:
+        return ''
+    head, sep, rest = text.partition(':')
+    if not sep or head.strip().lower() != 'weak evidence':
+        head, rest = 'Weak evidence', ' ' + text
+    return ('<p class="honesty caveat" id="weak-evidence" role="note"><strong>%s:</strong>%s</p>'
+            % (_escape(head), _escape(rest)))
 
 
 def _escape(s):

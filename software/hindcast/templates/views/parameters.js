@@ -3,7 +3,8 @@
    Reads data.parameters (report.parameter_space): question, days[], floors{day: {floor_*, tie{component}}}, tie_factor,
    components[{key, label, unit, floor_key, insulin}], extras[{key, label, unit}], params[{key, type, phone, ...}],
    base{vhash, variant, values, days}, variants[{vhash, variant, values, per_day{day: {metric}}, mean, verdict, why,
-   rank, position, feasible, reasons{day: []}, review_score, review_component, tie_with_base, flags}], rule_lines[].
+   rank, position, feasible, reasons{day: []}, review_score, review_component, tie_with_base, flags, validation{line, caveat, ...}}],
+   rule_lines[], validation_lines[] (the 'Hold-out validation' panel; empty without a validate round).
    Tier 2 is not needed. Styles are scoped under #view-parameters and injected once (report.py inlines page.css only);
    every colour is a page.css token.
 
@@ -40,6 +41,10 @@
     '#view-parameters .pv-scale .base-key i { display: inline-block; width: 14px; height: 10px; margin-right: 6px; vertical-align: -1px; box-shadow: inset 0 0 0 2px var(--ink); }',
     '#view-parameters .lb-box { background: var(--surface); border: 1px solid var(--grid); border-radius: var(--radius); padding: 6px 0 2px 12px; min-width: 0; }',
     '#view-parameters .lb-rule { display: grid; gap: 4px; font-size: 0.86rem; color: var(--ink-2); max-width: 92ch; margin: 0; padding-left: 1.2em; }',
+    '#view-parameters .lb-validation { background: var(--surface-2); border: 1px solid var(--grid); border-radius: var(--radius); padding: 8px 12px; display: grid; gap: 4px; max-width: 92ch; min-width: 0; }',
+    '#view-parameters .lb-validation .lead { font-weight: 600; margin: 0; overflow-wrap: anywhere; }',
+    '#view-parameters .lb-validation p { font-size: 0.86rem; color: var(--ink-2); margin: 0; overflow-wrap: anywhere; }',
+    '#view-parameters .lb .vline { display: block; font-size: 0.8rem; color: var(--ink-2); margin-top: 2px; }',
     '#view-parameters .lb-head { display: grid; gap: 6px; }',
     '#view-parameters .lb-head .order { font-size: 1rem; font-weight: 600; color: var(--ink); }',
     '#view-parameters table.lb th { vertical-align: bottom; white-space: normal; min-width: 84px; max-width: 120px; line-height: 1.25; }',
@@ -527,6 +532,12 @@
       h('ul', { class: 'lb-rule' }, (ps.rule_lines || []).filter(function (l, i) {
         return !(i === 0 && explore && /^Review order, not a ranking by outcome\.?$/.test(l));      // printed as the header
       }).map(function (l) { return h('li', { text: l }); })));
+    var vlines = ps.validation_lines || [];
+    if (vlines.length) {                                  // report.validation_lines: the validate round, a caveat with its day count
+      head.appendChild(h('div', { class: 'lb-validation', role: 'note', 'aria-label': 'hold-out validation' },
+        h('p', { class: 'lead', text: vlines[0] }),
+        vlines.slice(1).map(function (l) { return h('p', { text: l }); })));
+    }
     var chip = h('div', { class: 'filter-chip', hidden: true });
     var box = h('div', { class: 'lb-box' });
     var block = h('div', { class: 'block' },
@@ -600,7 +611,10 @@
           row.appendChild(h('td', { class: 'n num', text: !num(val) ? '-' : x.key.slice(-4) === 'base' ? fmt.signed(val, x.unit === 'loops' ? 0 : 2) : fmt.num(val, x.unit === 'loops' ? 0 : x.unit === '%' ? 1 : 2) }));
         });
         row.appendChild(h('td', { class: 'wrap' }, feasibilityText(v)));
-        row.appendChild(h('td', { class: 'wrap', text: v.why || '' }));
+        var vline = v.validation && v.validation.line;
+        var vcav = v.validation && v.validation.recommended_for_review && v.validation.caveat;   // metrics.validation_caveat
+        row.appendChild(h('td', { class: 'wrap' }, v.why || '', vline ? h('span', { class: 'vline', text: vline + (v.validation.recommended_for_review ? '; recommended for review' : '') }) : null,
+          vcav ? h('span', { class: 'vline vcaveat', text: vcav }) : null));
         tbody.appendChild(row);
       });
       HC.clear(box).appendChild(h('div', { class: 'table-scroll' }, h('table', { class: 'twin lb' }, h('thead', null, tr), tbody)));

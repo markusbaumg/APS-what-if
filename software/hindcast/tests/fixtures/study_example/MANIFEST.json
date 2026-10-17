@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-16T22:11:19Z",
+ "generated": "2026-10-17T01:40:04Z",
  "results_dir": "results/example_2026-09-06",
  "sources": {
   "base": "results/example_2026-09-06/2026-09-06T06-00-00Z.base.csv",
@@ -14,8 +14,8 @@
   "2026-09-06T12:00:00Z"
  ],
  "loops": 340,
- "code_sha": "419bdb8ddbba000cf7770f1d050037c8921f64f6",
- "settings_sha": "0b8122b09d9509aad1af5ebe97203241f384dade",
+ "code_sha": "b34f29b9699f4d24a2145d4f9f1ea19b70b05b4a",
+ "settings_sha": "f07cdfacbbab735a47257a8ac12a81124ad2c0c9",
  "base_vhash": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
  "vhash": {
   "base": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
@@ -26,8 +26,8 @@
  },
  "files": {
   "study.json": {
-   "bytes": 1933,
-   "sha1": "ec5d8a6078a3956d3bc966dc2c2e77b8734b0c8b"
+   "bytes": 1950,
+   "sha1": "f0d22669006358b4b45ed6bb81f0bc172df32475"
   },
   "STATE.json": {
    "bytes": 222,
@@ -35,7 +35,7 @@
   },
   "trials.jsonl": {
    "bytes": 13879,
-   "sha1": "72cb65fae479c0f0a90d8c0fbd490bbf9cc48198"
+   "sha1": "8196609ba3898a0313bb8c3e62a668ed6e7fe73f"
   },
   "round.json": {
    "bytes": 6306,

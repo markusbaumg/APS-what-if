@@ -6,13 +6,15 @@ cli.py  -  `hc`, the Hindcast command (DESIGN.md section 4.6)
     hc study new <name> --days 2026-09-01..09-07 [--holdout 2026-09-05] [--tag 2026-09-05=weekend,sport]
                         --param "profile autoISF_max" 1.1:1.8:0.05 | --from-grid variants/grid_autoISF.json
                         | --space-file hindcast/spaces/autoisf_tierA.json | --tier A|B|C|S
-                        [--unlock "profile sens" ["profile carb_ratio" ...]] [--unlock-reason TEXT]
+                        [--unlock profile sens [profile carb_ratio ...]] [--unlock-reason TEXT]
                         [--constraint "profile a <= profile b"] [--phase oaat:points=5] [--question explore|earlier|gentler]
                         [--base-vdf file.vdf] [--hours 6] [--workers 4] [--sentinel-every 25] [--note text]
     hc study run    <name> [--hours H] [--until HH:MM] [--workers N] [--batch N] [--on-stale stop|reeval] [--grow]
                            [--pred] [--dry] [--no-report]
     hc study status <name> [--json]
     hc study stop   <name>
+    hc study requarantine <name> [--dry]     re-judge the day quarantine from the trial rows and the current metas
+    hc help [<command>]                      this overview, or the --help of one command
     hc check [--refreeze] [--no-live] [--write-golden --reason TEXT]          regression gate (H-902)
     hc replay <day> ...     hc search <name>     hc round <name>                one replay, the search plan, the verdict step
     hc report <name> | hc serve <name> | hc explain <name> <iso> | hc card <name>
@@ -29,7 +31,8 @@ study's queue through `study.dry_evaluate` instead (every task recorded as block
 STATE.json, STOP and resume are exercised.
 
 Unlocks (space.py, contracts.py): `--tier C` (profile ISF / CR / basal scales) and `--tier S` (the safety caps)
-need `--unlock KEY [KEY ...] --unlock-reason TEXT`; without it `hc study new` exits 3 naming the locked keys. The
+need `--unlock KEY [KEY ...] --unlock-reason TEXT` (each KEY is `<array> <item>`, the keys space-separated and
+unquoted: `--unlock profile sens profile carb_ratio`; a key quoted as one argument works too); without it `hc study new` exits 3 naming the locked keys. The
 keys and the reason are stored in study.json (Study.unlocked / Study.unlock_reason) and the weak-evidence caveat
 (Study.unlock_caveat) is printed after the study is created.
 
@@ -123,15 +126,42 @@ def build_space(args, settings, metas=None):
     return space, constraints, phases
 
 
-def unlock_args(args):
-    """--unlock (repeatable, one or more keys each) / --unlock-reason -> (keys, reason). The union in order, without
-    duplicates; a reason is required (non-empty after stripping) whenever a key is given (StudyError, exit 3)."""
+UNLOCK_FORM = '--unlock profile sens profile carb_ratio (each key "<array> <item>", the keys space-separated, unquoted)'
+
+
+def unlock_words(groups):
+    """The --unlock arguments (a list per --unlock) -> the keys '<array> <item>'. The arguments are split into words
+    and paired, so `--unlock profile sens profile carb_ratio` (unquoted), `--unlock "profile sens" "profile
+    carb_ratio"` and one quoted string of several keys all give the same keys. StudyError naming the offending
+    token when a word that should open a key is not an <array> (contracts.VDF_GROUPS), or an <array> has no
+    <item>."""
+    words = []
+    for group in groups or []:
+        for token in (group if isinstance(group, (list, tuple)) else [group]):
+            words += [(w, str(token)) for w in str(token).split()]
     keys = []
-    for group in getattr(args, 'unlock', None) or []:
-        for k in (group if isinstance(group, (list, tuple)) else [group]):
-            k = ' '.join(str(k).split())
-            if k and k not in keys:
-                keys.append(k)
+    i = 0
+    while i < len(words):
+        word, token = words[i]
+        if word not in contracts.VDF_GROUPS:
+            raise StudyError(f'--unlock: "{word}" (in the argument "{token}") is not an <array> (one of '
+                             f'{", ".join(contracts.VDF_GROUPS)}), a key is "<array> <item>"; give {UNLOCK_FORM}')
+        if i + 1 >= len(words) or words[i + 1][0] in contracts.VDF_GROUPS:
+            raise StudyError(f'--unlock: the <array> "{word}" (in the argument "{token}") has no <item>, a key is '
+                             f'"<array> <item>"; give {UNLOCK_FORM}')
+        keys.append(f'{word} {words[i + 1][0]}')
+        i += 2
+    return keys
+
+
+def unlock_args(args):
+    """--unlock (repeatable, one or more keys each, unlock_words) / --unlock-reason -> (keys, reason). The union in
+    order, without duplicates; a reason is required (non-empty after stripping) whenever a key is given
+    (StudyError, exit 3)."""
+    keys = []
+    for k in unlock_words(getattr(args, 'unlock', None)):
+        if k not in keys:
+            keys.append(k)
     reason = (getattr(args, 'unlock_reason', None) or '').strip()
     if keys and not reason:
         raise StudyError('--unlock ' + ', '.join(f'"{k}"' for k in keys) + ' needs --unlock-reason TEXT '
@@ -342,7 +372,7 @@ def cmd_study_stop(args):
 
 def register_study(subparsers):
     p = subparsers.add_parser('study', help='create, run, inspect and stop a study (studies/<name>/)')
-    sub = p.add_subparsers(dest='study_command', metavar='new|run|status|stop')
+    sub = p.add_subparsers(dest='study_command', metavar='new|run|status|stop|requarantine')
     sub.required = True
 
     n = sub.add_parser('new', help='write studies/<name>/study.json (locked keys are refused, exit 3)')
@@ -357,8 +387,9 @@ def register_study(subparsers):
     n.add_argument('--tier', help='a documented default space: A, B (autoISF), C (profile ISF / CR / basal scales, '
                                   'needs --unlock) or S (safety caps, needs --unlock)')
     n.add_argument('--unlock', action='append', nargs='+', metavar='KEY',
-                   help='lift the lock for these "<array> <item>" keys in this study only (repeatable; audited in '
-                        'study.json; weak evidence)')
+                   help='lift the lock for these keys in this study only, each "<array> <item>", the keys '
+                        'space-separated and unquoted: --unlock profile sens profile carb_ratio (repeatable; '
+                        'audited in study.json; weak evidence)')
     n.add_argument('--unlock-reason', default=None, metavar='TEXT', help='why the keys are unlocked (required with --unlock)')
     n.add_argument('--constraint', action='append', help='ordering chain, e.g. "profile smb_delivery_ratio_min <= profile smb_delivery_ratio"')
     n.add_argument('--phase', action='append', help='oaat[:points=5] | grid | lhs:n=24[,seed=1] | halving:rungs=2/5/all | validate:top=8,days=holdout')
@@ -403,6 +434,13 @@ def register_study(subparsers):
     q.add_argument('name')
     _add_common(q)
     q.set_defaults(func=cmd_study_stop)
+
+    try:
+        from hindcast import days
+    except ImportError as e:                                 # the study commands keep working without it
+        _err(f'hc study requarantine unavailable: {e}')
+    else:
+        days.register(sub)                                   # hc study requarantine <name> [--dry]
 
 
 # ----------------------------------------------------------------------------- the other commands, lazily
@@ -457,13 +495,28 @@ def register_lazy(subparsers):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog='hc', description=__doc__.split('\n\n')[1],
+    parser = argparse.ArgumentParser(prog='hc', description='\n\n'.join(__doc__.split('\n\n')[1:3]),
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--version', action='store_true', help='print the emulator version stamps and exit')
     sub = parser.add_subparsers(dest='command', metavar='<command>')
     register_study(sub)
     register_lazy(sub)
+    h = sub.add_parser('help', help='this overview (the usage block above); hc <command> --help for one command')
+    h.add_argument('topic', nargs='*', help='a command, e.g. "study requarantine"')
+    h.set_defaults(func=lambda args: _help(parser, args.topic))
     return parser
+
+
+def _help(parser, topic):
+    """`hc help [command ...]`: the overview, or the --help of that command (argparse exits 0 after printing)."""
+    if not topic:
+        parser.print_help()
+        return EXIT_OK
+    try:
+        parser.parse_args(list(topic) + ['--help'])
+    except SystemExit as e:
+        return int(e.code or 0)
+    return EXIT_OK
 
 
 def main(argv=None):

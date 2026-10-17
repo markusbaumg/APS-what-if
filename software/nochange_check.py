@@ -5,7 +5,8 @@ directory and prints how often the emulated ISF, insulinReq, maxBolus, SMB and T
 (the `orig`/`emul` column pairs of the result CSV, see CLAUDE.md). Exit status 1 when a column falls below
 its threshold or fewer than two loops were replayed. Interim gate until Hindcast's `hc check` (H-902) with
 golden metrics replaces it; the thresholds below are deliberately loose (the 2026-09-06 06-09Z window gives
-ISF 99 %, insReq 93 %, maxBolus 99 %, SMB 99 %, TBR 98 %; 09-15Z: 98 / 84 / 99 / 99 / 97 %; 2026-10-10 06-12Z: 99 / 93 / 99 / 99 / 97 %). Stdlib only, meant for `make nochange`.
+ISF 99 %, insReq 93 %, maxBolus 99 %, SMB 99 %, TBR 98 %; 09-15Z: 98 / 85 / 99 / 99 / 97 %; 2026-10-10 06-12Z: 99 / 94 / 100 / 100 / 98 %;
+exact counts in CLAUDE.md). Stdlib only, meant for `make nochange`.
 """
 import glob
 import os
@@ -45,8 +46,9 @@ def main(argv):
         cmd = [sys.executable, os.path.join(HERE, 'emulator_batch.py'), url, 'bg/iob/ISFs/insReq/SMB/basal/noplot/.',
                vdf, start, end]
         run = subprocess.run(cmd, cwd=HERE, env=env, capture_output=True, text=True)
-        tail = [l for l in run.stdout.splitlines() if 'loop runs' in l or 'skipped' in l or 'failed' in l.lower()]
-        for line in tail[-3:]:
+        tail = [l for l in run.stdout.splitlines()
+                if 'loop runs' in l or 'skipped' in l or 'pinned' in l or 'failed' in l.lower()]
+        for line in tail[-4:]:
             print(line.strip())
         csvs = glob.glob(os.path.join(tmp, '*.no_change.csv'))
         if run.returncode != 0 or not csvs:

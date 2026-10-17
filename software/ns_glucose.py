@@ -12,8 +12,18 @@ Keys of the returned dict (all glucose in mg/dl, deltas in mg/dl per 5 minutes):
     parabola_fit_last_delta, parabola_fit_next_delta, bg_acceleration
 
 `glucose` is the value the loop saw (record['openaps']['suggested']['bg'] when the record is given,
-otherwise the rebuilt smoothed value), `date` the timestamp (entries.date) of the newest CGM reading
-at or before now_ms.  None is returned when that reading is older than 12 minutes.
+otherwise the rebuilt smoothed value), `date` the timestamp (entries.date) of the CGM reading the loop ran on:
+the newest reading at or before now_ms, or an older one the loop is pinned to (below).  None is returned when
+the newest reading is older than 12 minutes.
+
+Loop-to-reading pin: a sluggish phone sometimes runs determine-basal on a reading 1-5 readings (60-320 s) older
+than the newest one already on the server (11 % of the loops on 2026-10-15, 0-2 % on normal days).  With the
+record given, status_at takes the newest of the last PIN_READINGS (6) readings whose rebuilt smoothed bg equals
+suggested.bg within PIN_TOL (0.05 mg/dl) as the cutoff and rebuilds delta, short/long avgdelta and dura_ISF from
+the buckets of that reading (date = that reading); the Libre raw 1-minute parabola fit still uses the newest
+reading (settings 'glucose': {'pin_fit': 'newest'}, the default; 'pinned' fits on the pinned reading too).  No
+candidate matches -> newest reading.  Counters: gh.pinned {readings back: loops}, gh.pin_unmatched; the Kalman
+state (learned R) is left as smoothing at the chosen cutoff leaves it, probes of other cutoffs are undone.
 
 What is ported (AAPS 3.4.2 fork "aisf3.2.1", commit 346a68550c of nightscout/AndroidAPS, and master):
     AutosensDataStoreObject.createBucketedData        1-minute Libre data -> 5-minute buckets (interpolated,
@@ -70,6 +80,8 @@ FIVE_MIN = 5 * 60 * 1000
 MAX_AGE_MS = 12 * 60 * 1000                  # no CGM value within 12 min -> loop not reproducible
 KALMAN_WINDOW_MS = 34 * 60 * 60 * 1000       # AAPS loads 24 h + 10 h (max DIA) of readings for the buckets
 IRREGULAR_DATA_MS = 30 * 1000                # AutosensDataStoreObject.IRREGULAR_DATA_SEC
+PIN_READINGS = 6                             # status_at: candidate cutoffs = the newest reading and 5 older ones
+PIN_TOL = 0.05                               # mg/dl: rebuilt smoothed bg == suggested.bg
 
 
 # ============================================================================ helpers
@@ -563,7 +575,7 @@ def parabola_fit(ts_desc, val_desc, fsl_min_dur, filled_desc=None):
 class GlucoseHistory:
     """See module docstring. settings may carry an optional 'glucose' section:
         {'bucket_grid': 'moving' | <unix ms of a grid time>, 'smoothing': 'kalman' | 'none',
-         'libre_1min_fit': true}"""
+         'libre_1min_fit': true, 'pin_readings': 6 (1 = no pin), 'pin_fit': 'newest' | 'pinned'}"""
 
     def __init__(self, entries, devicestatus, settings):
         cfg = (settings or {}).get('glucose', {}) if isinstance(settings, dict) else {}
@@ -590,6 +602,12 @@ class GlucoseHistory:
         self.kalman = KalmanSmoother()
         self._last_status = None
         self._last_key = None
+        # loop-to-reading pin (see status_at): how many readings back to search, what the fit uses, counters
+        self.pin_readings = int(cfg.get('pin_readings', PIN_READINGS))
+        self.pin_fit = cfg.get('pin_fit', 'newest')         # Libre raw parabola fit: 'newest' reading | 'pinned' one
+        self.pinned = {}                                    # readings back -> loops (back >= 1 only)
+        self.pin_unmatched = 0                              # loops whose suggested.bg no candidate reproduced
+        self.last_index = None                              # index into ts of the reading the last status used
 
     # ------------------------------------------------------------------ core
     def _newest_index(self, now_ms):
@@ -601,6 +619,50 @@ class GlucoseHistory:
         i = self._newest_index(now_ms)
         if i < 2 or now_ms - self.ts[i] > MAX_AGE_MS:
             return None
+        return self._buckets_index(i)
+
+    def _kalman_state(self):
+        k = self.kalman
+        return (k.learnedR, deque(k.innovations), deque(k.raw_innov), k.last_processed)
+
+    def _set_kalman_state(self, st):
+        k = self.kalman
+        k.learnedR, k.innovations, k.raw_innov, k.last_processed = st[0], deque(st[1]), deque(st[2]), st[3]
+
+    def pin_index(self, now_ms, record=None):
+        """index into ts of the reading the loop at now_ms ran on.  A sluggish phone sometimes runs
+        determine-basal on a reading 1-5 minutes older than the newest one already uploaded; the phone's
+        suggested.bg identifies it: the newest of the last PIN_READINGS readings whose rebuilt smoothed bg
+        equals suggested.bg within PIN_TOL.  The newest reading when no record/bg is given or none matches
+        (counted in pin_unmatched).  Leaves the Kalman state as smoothing at the chosen cutoff left it."""
+        i = self._newest_index(now_ms)
+        if i < 2 or now_ms - self.ts[i] > MAX_AGE_MS:
+            return i
+        sug = ((record or {}).get('openaps') or {}).get('suggested') or {}
+        want = sug.get('bg')
+        if not isinstance(want, (int, float)) or self.pin_readings <= 1:
+            return i
+        before = self._kalman_state()
+        data = self._buckets_index(i)
+        if data and abs(data[0].recalculated - want) < PIN_TOL:
+            return i
+        newest = (self._last_key, self._last_status, self._kalman_state())
+        for back in range(1, self.pin_readings):
+            j = i - back
+            if j < 2 or now_ms - self.ts[j] > MAX_AGE_MS:
+                break
+            self._set_kalman_state(before)
+            self._last_key = None
+            d = self._buckets_index(j)
+            if d and abs(d[0].recalculated - want) < PIN_TOL:
+                self.pinned[back] = self.pinned.get(back, 0) + 1
+                return j
+        self.pin_unmatched += 1
+        self._last_key, self._last_status = newest[0], newest[1]
+        self._set_kalman_state(newest[2])
+        return i
+
+    def _buckets_index(self, i):
         key = (self.ts[i], self.grid)
         if self._last_key == key:
             return self._last_status
@@ -625,9 +687,12 @@ class GlucoseHistory:
         i = self._newest_index(now_ms)
         if i < 0 or now_ms - self.ts[i] > MAX_AGE_MS:
             return None
-        data = self.buckets_at(now_ms)
+        i_newest = i
+        i = self.pin_index(now_ms, record) if i >= 2 else i
+        data = self._buckets_index(i) if i >= 2 else None
         if not data:
             return None
+        self.last_index = i
         now = data[0]
         glucose = now.recalculated
         if record is not None:
@@ -640,6 +705,13 @@ class GlucoseHistory:
         delta, short_avg, long_avg = calculate_deltas(data)
         dura_min, dura_avg = dura_isf(data)
         # parabola: Libre 1-minute raw readings when three readings span < 3 min (fork), else the buckets
+        # a pinned loop: bg, deltas and dura_ISF come from the buckets of the older reading (the autosens data the
+        # phone had computed), but the fork reads the raw 1-minute readings for the parabola straight from the
+        # database, where the newest reading already is ('pin_fit' 'newest', default; measured better than
+        # 'pinned' on 2026-10-13..15, see NIGHTSCOUT_SOURCE.md).  The 5-minute bucket fit stays on the pinned series.
+        if self.pin_fit == 'newest' and i != i_newest and self.libre_1min_fit \
+                and self.ts[i_newest] - self.ts[i_newest - 2] < 3 * 60000:
+            i = i_newest
         use_raw = self.libre_1min_fit and i >= 2 and self.ts[i] - self.ts[i - 2] < 3 * 60000
         if use_raw:
             lo = max(0, bisect.bisect_left(self.ts, self.ts[i] - 48 * 60000))
@@ -648,7 +720,7 @@ class GlucoseHistory:
             fit = parabola_fit(ts_desc, val_desc, 10)
         else:
             fit = parabola_fit([b.ts for b in data], [b.recalculated for b in data], 15, [b.filled for b in data])
-        return self._pack(glucose, self.ts[i], delta, short_avg, long_avg, dura_min, dura_avg, fit)
+        return self._pack(glucose, self.ts[self.last_index], delta, short_avg, long_avg, dura_min, dura_avg, fit)
 
     @staticmethod
     def _pack(glucose, date, delta, short_avg, long_avg, dura_min, dura_avg, fit):
@@ -794,7 +866,7 @@ def validate(start_iso, end_iso, url='ns:', grid='moving', smoothing='kalman', v
         ce = sug.get('consoleError') or []
         if isinstance(ce, str):
             ce = ce.split('\n')
-        data = gh.buckets_at(now_ms)
+        data = gh.buckets_at(gh.ts[gh.last_index])          # the cached series of the reading status_at chose
         st_bg.add(stamp, float(sug['bg']), data[0].recalculated)
         if sug.get('tick') is not None:
             want = int(str(sug['tick']).replace('+', ''))
@@ -862,6 +934,9 @@ def validate(start_iso, end_iso, url='ns:', grid='moving', smoothing='kalman', v
         start_iso, end_iso, grid, smoothing, len(devicestatus) - duplicates, duplicates, skipped)]
     for st in (st_bg, st_tick, st_dura, st_dura_bp, st_dura_f, st_dura_avg, st_acce, st_corr, st_para_v, st_para_m):
         lines.append(st.report())
+    lines.append('%-28s %d loops %s, unmatched (kept newest) %d' % (
+        'pinned to an older reading', sum(gh.pinned.values()),
+        '{%s}' % ', '.join('%d back: %d' % kv for kv in sorted(gh.pinned.items())), gh.pin_unmatched))
     if acce_state_n:
         lines.append('%-28s n=%5d  agree %5.1f%%  mismatch %4d' % ('acce_ISF active/by-passed', acce_state_n,
                                                                     100.0 * acce_state_ok / acce_state_n, len(acce_state_bad)))

@@ -6,11 +6,11 @@
   "2026-09-06T06:00:00Z",
   "2026-09-06T09:00:00Z"
  ],
- "written": "2026-10-16T22:26:53Z",
- "reason": "initial baseline (H-902) of the tree of 2026-10-17, fidelity work in progress",
- "code_sha": "0937331a9a03235319b3223b515fc61b0ecb5b9f",
+ "written": "2026-10-17T01:42:48Z",
+ "reason": "ns_glucose loop pin + ns_iob overlapping temps (2026-10-17), refreeze of the 41 days",
+ "code_sha": "b34f29b9699f4d24a2145d4f9f1ea19b70b05b4a",
  "settings_sha": "f07cdfacbbab735a47257a8ac12a81124ad2c0c9",
- "freeze_sha": "beaa7186de95dc82cb5858b306f7f0ac659d9162",
+ "freeze_sha": "4b3b5147abe96d260837008559d18e30c28d0e8e",
  "csv_sha1": "eb9f7651078f54e10ae29f3b815c40a39c98bda8",
  "live_checked": true,
  "versions": {

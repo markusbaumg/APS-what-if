@@ -13,12 +13,15 @@ sections 3, 6 page 5 and 7.3 step 8)
 What a card says (the backlog's list, in this order): the title "Candidate <rank>: <key> <value> (phone: <value>),
 ..."; current -> proposed values with the AAPS preference names from prefs_map.json (a key without a verified title
 shows its VDF key - never a guessed name); the days replayed with their roles and tags; what the loop would have
-asked for vs base in rising and in the other loops, each next to its floor (the worst day's |base - phone|) and in
-floors; the loops changed by direction (smaller / larger SMB than base, loops differing from the phone vs base);
+asked for vs base in rising and in the other loops, each next to its floor (|base - phone| per scored day, shown as
+the range over the days when it differs) and in floors (round.floor_multiple_of: the same number round.json's `why`
+prints; quarantined days are listed, never scored); the loops changed by direction (smaller / larger SMB than base, loops differing from the phone vs base);
 the low-side flags; the status of the pre-hypo constraint P and of the envelope E; the cap-binding share next to
 the phone's; the largest single emulated SMB next to the phone's smallest maxBolus; the rank per stratum (the day
-tags of study.json), on the hold-out days and across the leave-one-day-out folds; the ties ("Not distinguishable
-from candidate 3 within the noise floor"); the verdict; the honesty paragraph verbatim; the VDF text.
+tags of study.json), on the hold-out days and across the leave-one-day-out folds (after the validate phase, H-308:
+'hold-out: rank r of N, direction holds on k/n days, LODO range a-b' and Kendall tau); the ties ("Not distinguishable
+from candidate 3 within the noise floor"); the verdict; the honesty paragraph verbatim (for a study with unlocked keys, tier C / S, followed by
+Study.unlock_caveat() and contracts.NO_GLUCOSE_RESPONSE read for the card); the VDF text.
 
 Every card passes lint.lint_text(text, kind='card') (the vocabulary of DESIGN.md section 3 plus the honesty
 paragraph) or it is NOT written: write_cards() reports the refusal with the offending phrase and goes on with the
@@ -119,9 +122,20 @@ def analysis_of(study_dir, settings=None):
     return rnd.analyze(study, sd.trials(), settings)
 
 
-def _worst_floor(analysis, key, days):
-    vals = [analysis.floors[d].get(key) for d in days if d in analysis.floors and analysis.floors[d].get(key) is not None]
-    return M.effective_floor(max(vals), key) if vals else M.effective_floor(None, key)
+def _floor_band(analysis, component, days):
+    """(smallest, largest) effective floor of `component` over the scored `days` (metrics.floor_band)."""
+    band = M.floor_band(analysis.floors, component, [d for d in days if d in analysis.floors])
+    if band is None:
+        fl = M.effective_floor(None, M.FLOOR_COMPONENTS[component])
+        band = (fl, fl)
+    return band
+
+
+def _floor_text(band, unit=True):
+    lo, hi = band
+    if round(lo, 2) == round(hi, 2):
+        return _u(hi) if unit else f'{hi:.0f}'
+    return (f'{lo:.2f}-{hi:.2f} U by day' if unit else f'{lo:.0f}-{hi:.0f} by day')
 
 
 def _sum(report, key, days):
@@ -204,9 +218,7 @@ def _effect_lines(report, analysis):
     rise = report.mean.get('rise_vs_base_U')
     rest = report.mean.get('rest_vs_base_U')
     total = report.mean.get('delta_vs_base_U')
-    f_rise = _worst_floor(analysis, 'floor_rise_U', days)
-    f_rest = _worst_floor(analysis, 'floor_rest_U', days)
-    f_loops = _worst_floor(analysis, 'floor_loops', days)
+    f_loops = _floor_band(analysis, 'changed_vs_base', days)[1]
     out = []
     if total is not None:
         lo, hi = _min(report, 'delta_vs_base_U', days), _max(report, 'delta_vs_base_U', days)
@@ -217,14 +229,19 @@ def _effect_lines(report, analysis):
         out.append(f'On the {n} replayed search day{"s" if n != 1 else ""} the loop would have asked for '
                    f'{_u(abs(total))} {"more" if total > 0 else "less"} per day than base' + spread + '.')
 
-    def part(v, floor, where):
+    def part(v, comp, where):
         if v is None:
             return None
-        ratio = abs(v) / floor
-        tie = ' (tie: inside 2 x floor)' if M.is_tie(v, floor) else ''
-        return f'- {where}: {_signed_u(v)} vs base per day; floor {_u(floor)}; {ratio:.1f} x floor{tie}'
-    for v, floor, where in ((rise, f_rise, 'rising loops'), (rest, f_rest, 'the other loops')):
-        line = part(v, floor, where)
+        band = _floor_band(analysis, comp, days)
+        ratio = rnd.floor_multiple_of(report, comp, analysis.floors)       # the number round.json's why prints
+        varies = round(band[0], 2) != round(band[1], 2)
+        notes = ['mean of the per-day multiples'] if varies else []
+        if M.tie_every_day(report.per_day, analysis.floors, comp, days):
+            notes.append(f'tie: inside {M.TIE_FACTOR:g} x floor' + (' on every day' if varies else ''))
+        return (f'- {where}: {_signed_u(v)} vs base per day; floor {_floor_text(band)}; {ratio:.1f} x floor'
+                + (f' ({"; ".join(notes)})' if notes else ''))
+    for v, comp, where in ((rise, 'rise_vs_base_U', 'rising loops'), (rest, 'rest_vs_base_U', 'the other loops')):
+        line = part(v, comp, where)
         if line:
             out.append(line)
     more = _sum(report, 'smb_more_vs_base', days)
@@ -330,12 +347,36 @@ def _rank_lines(report, analysis):
             out.append('- Hold-out days: not replayed yet.')
     else:
         out.append('- Hold-out days: none reserved in study.json.')
-    if analysis.folds:
-        cfg = M._objective(analysis.study.objective.to_dict())['recommend']
+    val = getattr(analysis, 'validation', None)
+    if val is not None:
+        if report.validation:
+            v = report.validation
+            out.append(f'- Validate phase ({len(val.holdout_days)} hold-out days, {len(val.folds)} leave-one-day-out '
+                       f'folds over {len(val.scored_days)} days; a caveat with the day count, not a statistic): '
+                       f'{M.validation_line(v)}.')
+            if v.get('flip_days'):
+                out.append(f'- Direction ({v["component"]}) flips on: {", ".join(v["flip_days"])}.')
+        else:
+            out.append(f'- Validate phase: not in the top {val.top} of the search review order, not replayed on the '
+                       f'hold-out days.')
+        if val.tau is not None:
+            out.append(f'- Kendall tau between the search and the hold-out order of the {len(val.validated)} '
+                       f'validated variants: {val.tau:+.2f}.')
+    elif analysis.folds:
+        cfg = M.recommend_config(analysis.study.objective.to_dict())
         share = sum(1 for order in analysis.folds.values() if report.variant in order[:cfg['fold_top']]) / len(analysis.folds)
-        out.append(f'- Leave-one-day-out: in the top {cfg["fold_top"]} on {share:.0%} of {len(analysis.folds)} folds.')
-    if report.recommended:
-        out.append('- Recommended for review: yes (feasible on all days, stable across folds, days and hold-out).')
+        out.append(f'- Leave-one-day-out: in the top {cfg["fold_top"]} on {M.share_pct(share, 0)} of '
+                   f'{len(analysis.folds)} folds.')
+    if report.recommended and report.validation:
+        v = report.validation
+        rule = M.recommend_rule_text(analysis.study.objective.to_dict(), validate=True)
+        out.append(f'- Recommended for review: yes (not a tie with base, {rule}).')
+        cav = M.validation_caveat(v)
+        if cav:
+            out.append(f'- {cav[0].upper()}{cav[1:]}.')
+    elif report.recommended:
+        rule = M.recommend_rule_text(analysis.study.objective.to_dict(), validate=False)
+        out.append(f'- Recommended for review: yes ({rule}).')
     elif report.recommend_reasons:
         out.append('- Not recommended for review: ' + '; '.join(report.recommend_reasons) + '.')
     return out
@@ -361,6 +402,18 @@ def vdf_text_of(report, analysis):
     return spc.vdf_text(report.params, base_lines=study.base_vdf_lines, names=list(study.space))
 
 
+def unlock_lines(study):
+    """The weak-evidence paragraph of a card whose study varies keys locked by default (tier C / S, Study.unlocked):
+    Study.unlock_caveat() first, then contracts.NO_GLUCOSE_RESPONSE with 'this page' read as 'this card' - the
+    same two sentences report.unlock_caveat() puts next to the page's honesty paragraph; [] otherwise."""
+    fn = getattr(study, 'unlock_caveat', None)
+    text = fn() if callable(fn) else None
+    if not text:
+        return []
+    text = text[0].upper() + text[1:]
+    return [text + ' ' + contracts.NO_GLUCOSE_RESPONSE.replace('this page', 'this card'), '']
+
+
 def card_text(report, analysis, settings=None, prefs_map=None, number=None):
     """The Markdown card of one VariantReport (not yet linted; see write_card)."""
     prefs_map = load_prefs_map() if prefs_map is None else prefs_map
@@ -374,7 +427,7 @@ def card_text(report, analysis, settings=None, prefs_map=None, number=None):
              '## Constraints and safety readings', ''] + _constraint_lines(report, analysis) + ['',
              '## Rank by stratum and hold-out', ''] + _rank_lines(report, analysis) + ['',
              '## Ties', ''] + _tie_lines(report, analysis) + ['',
-             '## Honesty', '', HONESTY_STATEMENT, '',
+             '## Honesty', '', HONESTY_STATEMENT, ''] + unlock_lines(study) + [
              '## VDF', '', '```', vdf_text_of(report, analysis).rstrip('\n'), '```', '']
     return '\n'.join(lines)
 

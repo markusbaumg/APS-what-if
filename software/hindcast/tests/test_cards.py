@@ -48,7 +48,7 @@ def test_card_text_matches_the_documented_wording(analysed):
     assert 'Largest single emulated SMB: 0.30 U; the phone\'s maxBolus on these days was at least 0.70 U' in text
     assert '| workday | 3 | 1 |' in text and '| sport | 1 | 1 |' in text
     assert 'Hold-out days (2026-09-05): review order 1 of' in text
-    assert 'Leave-one-day-out: in the top 3 on 100% of 3 folds' in text
+    assert 'Leave-one-day-out: in the top 3 on 100 % of 3 folds' in text
     assert 'Not distinguishable from candidate 2 (' in text and 'within the noise floor.' in text
     assert c.HONESTY_STATEMENT in text
     assert '| dura ISF weight | `profile dura_ISF_weight` |' in text          # the AAPS preference title
@@ -198,3 +198,19 @@ def test_card_from_the_example_results(example_csvs, example_vdfs, tmp_path):
     assert refused == [] and len(written) == 1
     doc, status = rnd.produce(sd, round_no=1, phase='grid', settings=settings)
     assert any(v.vhash == rep.vhash for v in doc.variants) and os.path.getsize(sd.status_path) <= 2048
+
+
+def test_unlocked_study_card_puts_the_weak_evidence_caveat_under_the_honesty_statement(analysed):
+    sd, study, a = analysed
+    rep = a.reports[vh('A')]
+    assert cards.unlock_lines(a.study) == []
+    a.study.unlocked = ['profile sens']
+    a.study.unlock_reason = 'a profile scale study, reviewed by hand'
+    text = cards.card_text(rep, a, settings=SETTINGS, prefs_map={})
+    honesty = text.index(c.HONESTY_STATEMENT)
+    caveat = a.study.unlock_caveat()
+    weak = text.index(caveat[0].upper() + caveat[1:])
+    glucose = text.index(c.NO_GLUCOSE_RESPONSE.replace('this page', 'this card'))
+    assert honesty < weak < glucose < text.index('## VDF'), 'caveat first under the honesty statement'
+    assert 'so this card shows only where' in text and 'so this page shows' not in text
+    cards.lint_card(text)

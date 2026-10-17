@@ -56,6 +56,13 @@
    "items": {
     "type": "string"
    }
+  },
+  "validation": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "additionalProperties": {}
   }
  },
  "additionalProperties": false,
@@ -126,6 +133,13 @@
      "items": {
       "type": "string"
      }
+    },
+    "validation": {
+     "type": [
+      "object",
+      "null"
+     ],
+     "additionalProperties": {}
     }
    },
    "additionalProperties": false,

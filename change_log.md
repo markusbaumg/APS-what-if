@@ -1,5 +1,9 @@
 17.Oct.2026
 -----------
+nightscout-source / hindcast: two reconstruction fixes measured against the phone. ns_glucose pins each loop to the CGM reading the phone actually ran on (a sluggish phone sometimes decides on a reading 1-5 readings older than the newest one on the server; the rebuilt smoothed bg must equal suggested.bg), ns_iob keeps the recorded duration of overlapping temp-basal records and sums them like AAPS instead of cutting a temp at the next start. No-change gate: W2 09-06 09-15Z 319 loops 312/270/316/316/311 (was 311/267/316/315/309), W3 10-10 06-12Z 259 loops 257/244/259/258/254 (was 256/240/257/257/250), W1 unchanged; 2026-10-15 whole-day agreement 90.4 -> 94.5 %. nochange_check.py also prints the pin count line.
+
+17.Oct.2026
+-----------
 determine_basal.py mirrors the phone's Kotlin (autoISF 3.2, AAPS 3.4.2.6) on the 3.3+/Nightscout path, each step gated
 by the no-change replay on three windows (docs/hindcast/PORT_VS_PHONE.md): SMB interval tolerance 6 s (was the JS's
 12 s), new kround() = Kotlin half-up rounding at 65 decision sites, threshold no longer rounded to a whole mg/dl,

@@ -214,6 +214,11 @@ class NightscoutSource:
             }
         if self.skipped:
             self.log_msg('\nNightscout loops skipped: ' + ', '.join(f'{v} x {k}' for k, v in self.skipped.items()))
+        pinned = sum(getattr(self.glucose, 'pinned', {}).values())
+        unmatched = getattr(self.glucose, 'pin_unmatched', 0)
+        if pinned or unmatched:                             # ns_glucose loop-to-reading pin (sluggish phone)
+            self.log_msg(f'Nightscout loops pinned to an older CGM reading (phone ran late): {pinned}'
+                         f', suggested.bg reproduced by no recent reading: {unmatched}')
 
     def meal_data(self, now_ms, sug, last_bolus_time, glucose_status=None, iob_now=None, console_error=None):
         """oref meal data: COB as computed by AAPS, carbs entered during the last 6 h, deviation slopes rebuilt by

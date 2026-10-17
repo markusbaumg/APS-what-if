@@ -25,24 +25,41 @@ unless `--allow-partial`.
 
 Character record (numbers of the day, written into <day>.meta.json, shown as the day strip on the page; mg/dl):
     loops, tdd_U (= bolus_U + basal_U), bolus_U, smb_U, basal_U, carbs_g, cgm_values, bg_mean, pct_gt180, pct_lt70,
-    tt_minutes, tt_parity_smb_off_pct, cgm_gap_min, cgm_gaps (count >= GAP_MIN), loop_gap_min, activity_min,
+    tt_minutes, tt_parity_smb_off_pct, cgm_gap_min, cgm_gaps (count >= GAP_MIN), cgm_note, loop_gap_min, activity_min,
     duplicate_pct, autoISF_versions
+The CGM numbers (cgm_values, bg_mean, the percentages, cgm_gap_min, cgm_gaps) come from the sgv entries of the
+UTC day, read from the cache file entries/<day>.json when the caller passes `cache_root` (freeze, recompute), else
+from the source's `entries` (only the entries inside the day count, the 8 h look-back is ignored). Gaps are
+clipped at midnight: each day accounts only for its own hours. No sgv entry in the first GAP_MIN minutes of the
+day is a gap from the day start (00:00Z) to the first entry, none in its last GAP_MIN minutes a gap from the last
+entry to 24:00Z; a sensor gap that spans midnight is split between the two days, each counting its own part (the
+previous and the next day's files are not consulted). A day without an entries file has cgm_gap_min None and
+cgm_note 'no CGM file'. loop_gap_min is the longest pause between the day's loop runs: the phone not looping (off,
+pump offline, closed loop paused) is a different thing from a CGM gap
+and is never a quarantine reason.
 `tdd_U` is insulin the pump delivered as recorded in Nightscout (boluses + temp basals + scheduled basal where no
 temp ran), not the phone's own TDD statistic. The character describes the day; it is never a score and never
 inferred into chips - day chips (`workday`, `sport`) are typed by the user in study.json (DESIGN.md section 4.5).
 
 Confounders (strings for the badges; local time of the phone from the records' utcOffset):
-    settings changes from ns_settings.json profile_history inside the day, CGM gaps >= GAP_MIN minutes, loop gaps
-    (no loop run) >= LOOP_GAP_MIN minutes, autoISF version changes inside the day (H-712: the smoother changed with
+    settings changes from ns_settings.json profile_history inside the day, CGM gaps >= GAP_MIN minutes ('cgm gap N
+    min 02h00-03h52 local', clipped at the UTC day edges; 'no CGM file' without entries), the phone not looping >= LOOP_GAP_MIN minutes ('phone not looping for N min 07h34-17h44 local'),
+    autoISF version
+    changes inside the day (H-712: the smoother changed with
     3.2.1), Profile Switches with a percentage or time shift, Temporary Targets longer than LONG_TT_MIN.
-They never quote glucose values (the strings may travel into an issue body; DESIGN.md section 9 privacy).
+They never quote glucose values (the strings may travel into an issue body; DESIGN.md section 9 privacy), and
+clock times are written '20h23' (badge_hhmm), not '20:23': the privacy lint for issues reads any number from 2.0 to
+25.9 or 40 to 399 near a 'HH:MM' as a glucose reading (a version 3.2.1, an ISF 3.7, the minutes of a range end
+'05:51-09:26'), so every badge passes hindcast.lint for 'line' and 'issue'. Badges
+are informational only: the quarantine reads the character record, never a badge.
 
 Quarantine (H-204, DESIGN.md section 5.4 phase 0). A day is quarantined - listed with its reasons on the page and in
 status.json, excluded from scoring, never hidden - when any of these holds:
     1. the base replay's `agreement_pct` is below `agreement_pct_min` (94 %: the study would measure the emulator,
        not the settings),
-    2. the longest CGM gap of the day exceeds `cgm_gap_max_min` (120 min; from the frozen meta's character record,
-       or from raw entries when given),
+    2. the longest CGM gap of the day exceeds `cgm_gap_max_min` (120 min; from the frozen meta's character record
+       `cgm_gap_min`, measured on the CGM entries as described above, or from raw entries when given; loop gaps
+       never count),
     3. ns_settings.json `profile_history` records a change INSIDE the day of a key the study searches (the phone's
        own value of that key is not one value on that day),
     4. the loop counts of the day's trials differ across variants (state leaked between in-process replays, or a
@@ -50,13 +67,17 @@ status.json, excluded from scoring, never hidden - when any of these holds:
 Thresholds come from study.json (`objective.quarantine`, contracts.Objective) with QUARANTINE_THRESHOLDS as the
 defaults. `quarantine_reasons()` judges one day from the pieces, `quarantine_from_trials()` collects the pieces for a
 study from its trial rows and frozen metas, `apply_quarantine()` sets the StudyDay roles, `quarantine_listing()`
-renders the list. Every reason string passes hindcast.lint for the kinds 'line' and 'issue' (no glucose values, no
+renders the list. `requarantine()` re-judges a study's days from its rows and the current metas once (after
+`hc freeze --recompute-meta`), giving a day back its role when no reason is left; the orchestrator itself never
+releases a day (apply_quarantine without restore). Every reason string passes hindcast.lint for the kinds 'line' and 'issue' (no glucose values, no
 loop counts, no insulin amounts; tests/test_quarantine.py checks it).
 """
+import argparse
 import datetime
 import json
 import os
 import re
+import sys
 import urllib.parse
 from dataclasses import dataclass, field
 
@@ -313,6 +334,11 @@ def utc_offset_hours(loops):
     return 0.0
 
 
+def badge_hhmm(ms, offset_h):
+    """'20h23': the local clock time of a badge (no 'HH:MM', see the module docstring)."""
+    return local_hhmm(ms, offset_h).replace(':', 'h')
+
+
 def local_hhmm(ms, offset_h):
     dt = datetime.datetime.fromtimestamp(ms / 1000.0 + offset_h * 3600, tz=datetime.timezone.utc)
     return dt.strftime('%H:%M')
@@ -349,7 +375,8 @@ def entries_in(entries, start_ms, end_ms):
 
 def gaps(stamps_ms, start_ms, end_ms, min_gap_min):
     """[(gap_start_ms, gap_end_ms, minutes)] of the pauses >= min_gap_min between consecutive stamps inside
-    [start, end), the day edges included (no stamp in the first hour = a gap from start)."""
+    [start, end), clipped at the window edges: no stamp for min_gap_min after start = a gap from start, none for
+    min_gap_min before end = a gap to end; stamps outside the window are ignored."""
     pts = sorted(s for s in stamps_ms if start_ms <= s < end_ms)
     if not pts:
         return [(start_ms, end_ms, round((end_ms - start_ms) / MIN_MS))]
@@ -364,8 +391,49 @@ def gaps(stamps_ms, start_ms, end_ms, min_gap_min):
 
 
 def cgm_gaps(entries, start_ms, end_ms, min_gap_min=GAP_MIN):
-    """CGM gaps of the window from the raw entries."""
+    """CGM gaps of the window from the raw entries, clipped at the window edges (gaps())."""
     return gaps([ms for ms, _ in entries_in(entries, start_ms, end_ms)], start_ms, end_ms, min_gap_min)
+
+
+def entries_file(cache_root, day):
+    """<cache_root>/entries/<day>.json"""
+    return os.path.join(cache_root, 'entries', day + '.json')
+
+
+def read_entries_file(cache_root, day):
+    """The records of the cached entries day file, None when the file is missing or unreadable."""
+    try:
+        with open(entries_file(cache_root, day), 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+NO_CGM_FILE = 'no CGM file'
+
+
+def cgm_day(day, src=None, cache_root=None, min_gap_min=GAP_MIN):
+    """The CGM view of one UTC day: {'cgm': [(ms, sgv)] of the day, 'gaps': [(a, b, minutes)] clipped at the day
+    edges (start <= a < b <= end), 'cgm_gap_min', 'cgm_gaps', 'note'}. With `cache_root` the day's entries file is
+    read from the cache (None / 'no CGM file' when it is missing); without it the source's `entries` inside the day
+    are used (their 8 h look-back is ignored)."""
+    start, end = day_bounds(day)
+    if cache_root is not None:
+        recs = read_entries_file(cache_root, day)
+        if recs is None:
+            return {'cgm': [], 'gaps': [], 'cgm_gap_min': None, 'cgm_gaps': None, 'note': NO_CGM_FILE}
+    else:
+        recs = getattr(src, 'entries', None) or []
+    cgm = entries_in(recs, start, end)
+    g = gaps([ms for ms, _ in cgm], start, end, min_gap_min)
+    return {'cgm': cgm, 'gaps': g, 'cgm_gap_min': max([m for _, _, m in g], default=0), 'cgm_gaps': len(g), 'note': None}
+
+
+def loop_gaps(day, loops, min_gap_min=LOOP_GAP_MIN):
+    """Pauses between the day's loop runs (the phone not looping), day edges included."""
+    start, end = day_bounds(day)
+    return gaps([loop['now_ms'] for loop in loops if loop.get('now_ms') is not None], start, end, min_gap_min)
 
 
 # ----------------------------------------------------------------------------- character
@@ -461,16 +529,16 @@ def activity_state(console_error):
     return None
 
 
-def character(day, src, loops):
+def character(day, src, loops, cache_root=None):
     """The day character record (see the module docstring) from the loaded source and its yielded loops.
 
-    `src` is the ns_source.NightscoutSource after load() (entries, treatments, iob, profiles are read); `loops` the
-    list its loops() yielded for the day. Values are rounded for the meta file; None where the source lacks the
-    data (a FrozenSource, say)."""
+    `src` is the ns_source.NightscoutSource after load() (treatments, iob, profiles and, without `cache_root`,
+    entries are read); `loops` the list its loops() yielded for the day; `cache_root` the Nightscout cache
+    directory whose entries/ files give the CGM numbers. Values are rounded for the meta file; None where the
+    source lacks the data (a FrozenSource, say)."""
     start, end = day_bounds(day)
     rec = {'loops': len(loops)}
     treatments = getattr(src, 'treatments', None) or []
-    entries = getattr(src, 'entries', None) or []
 
     bolus = smb = 0.0
     carbs = 0.0
@@ -496,8 +564,9 @@ def character(day, src, loops):
     rec['tdd_U'] = None if basal is None else round(bolus + basal, 2)
     rec['carbs_g'] = round(carbs, 1)
 
-    cgm = entries_in(entries, start, end)
-    rec['cgm_values'] = len(cgm)
+    cd = cgm_day(day, src, cache_root)
+    cgm = cd['cgm']
+    rec['cgm_values'] = None if cd['note'] == NO_CGM_FILE else len(cgm)
     if cgm:
         vals = [v for _, v in cgm]
         rec['bg_mean'] = round(sum(vals) / len(vals), 1)
@@ -505,17 +574,16 @@ def character(day, src, loops):
         rec['pct_lt70'] = round(100.0 * sum(1 for v in vals if v < LOW_MGDL) / len(vals), 1)
     else:
         rec['bg_mean'] = rec['pct_gt180'] = rec['pct_lt70'] = None
-    g = gaps([ms for ms, _ in cgm], start, end, GAP_MIN)
-    rec['cgm_gap_min'] = max([m for _, _, m in g], default=0)
-    rec['cgm_gaps'] = len(g)
+    rec['cgm_gap_min'] = cd['cgm_gap_min']
+    rec['cgm_gaps'] = cd['cgm_gaps']
+    rec['cgm_note'] = cd['note']
 
     rec['tt_minutes'] = _tt_minutes(src, start, end)
     n = len(loops)
     parity_off = sum(1 for loop in loops if any(_re_smb_parity_off.match(str(l)) for l in loop.get('console_error') or []))
     rec['tt_parity_smb_off_pct'] = round(100.0 * parity_off / n, 1) if n else None
 
-    lg = gaps([loop['now_ms'] for loop in loops if loop.get('now_ms') is not None], start, end, LOOP_GAP_MIN)
-    rec['loop_gap_min'] = max([m for _, _, m in lg], default=0)
+    rec['loop_gap_min'] = max([m for _, _, m in loop_gaps(day, loops)], default=0)
 
     act = 0.0
     for loop, dt in zip(loops, loop_intervals_min(loops)):
@@ -554,23 +622,32 @@ def _fmt(v):
     return str(v)
 
 
-def confounders(day, settings, src, loops, min_gap_min=GAP_MIN):
-    """Badge strings for the day (module docstring); the empty list when nothing stands out."""
+def _badge_key(key):
+    """A profile_history parameter name without its unit in parentheses ('profile ISF (mmol/U)' -> 'profile ISF'):
+    glucose unit words are refused by the privacy lint."""
+    return re.sub(r'\s*\([^)]*\)', '', str(key)).strip() or str(key)
+
+
+def confounders(day, settings, src, loops, min_gap_min=GAP_MIN, cache_root=None):
+    """Badge strings for the day (module docstring); the empty list when nothing stands out. `cache_root` as for
+    character()."""
     start, end = day_bounds(day)
     off = utc_offset_hours(loops)
     out = []
     for when, key, old, new in history_changes_in(settings, start, end):
-        out.append(f'profile_history: {key} {_fmt(old)}->{_fmt(new)} at {local_hhmm(when, off)} local')
-    entries = getattr(src, 'entries', None) or []
-    for a, b, minutes in cgm_gaps(entries, start, end, min_gap_min):
-        out.append(f'cgm gap {minutes} min {local_hhmm(a, off)}-{local_hhmm(b, off)}')
-    for a, b, minutes in gaps([l['now_ms'] for l in loops if l.get('now_ms') is not None], start, end, LOOP_GAP_MIN):
-        out.append(f'loop gap {minutes} min {local_hhmm(a, off)}-{local_hhmm(b, off)}')
+        out.append(f'profile_history: {_badge_key(key)} {_fmt(old)}->{_fmt(new)} at {badge_hhmm(when, off)} local')
+    cd = cgm_day(day, src, cache_root, min_gap_min)
+    if cd['note'] == NO_CGM_FILE:
+        out.append(NO_CGM_FILE)
+    for a, b, minutes in cd['gaps']:
+        out.append(f'cgm gap {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
+    for a, b, minutes in loop_gaps(day, loops):
+        out.append(f'phone not looping for {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
     last_v = None
     for loop in loops:
         v = loop.get('autoISF_version')
         if v and last_v and v != last_v:
-            out.append(f'autoISF version {last_v}->{v} at {local_hhmm(loop["now_ms"], off)} local (smoother may differ)')
+            out.append(f'autoISF version {last_v}->{v} at {badge_hhmm(loop["now_ms"], off)} local (smoother may differ)')
         if v:
             last_v = v
     for t in getattr(src, 'treatments', None) or []:
@@ -585,12 +662,12 @@ def confounders(day, settings, src, loops, min_gap_min=GAP_MIN):
             shift = t.get('timeshift', 0) or 0
             dur = t.get('duration') or 0
             if (isinstance(pct, (int, float)) and pct != 100) or shift:
-                out.append(f'profile switch {int(pct)} %{f" shift {shift} h" if shift else ""} at {local_hhmm(ms, off)} local'
+                out.append(f'profile switch {int(pct)} %{f" shift {shift} h" if shift else ""} at {badge_hhmm(ms, off)} local'
                            f'{f" ({int(dur)} min)" if dur else ""}')
         elif et == 'Temporary Target':
             dur = t.get('duration') or 0
             if isinstance(dur, (int, float)) and dur >= LONG_TT_MIN:
-                out.append(f'temp target {int(dur)} min from {local_hhmm(ms, off)} local')
+                out.append(f'temp target {int(dur)} min from {badge_hhmm(ms, off)} local')
     return out
 
 
@@ -673,7 +750,7 @@ def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, 
                        loop_counts=None, thresholds=None):
     """The reasons `day` is quarantined ([] = it takes part in scoring). Pieces, each optional:
     `base_metrics` the base trial's metrics dict (agreement_pct), `meta` the frozen meta (character.cgm_gap_min) or
-    `entries` raw CGM entries (the gap is measured here), `settings` + `searched_keys` for the profile_history rule,
+    `entries` raw CGM entries (the gap is measured here, clipped at the day edges like cgm_day()), `settings` + `searched_keys` for the profile_history rule,
     `loop_counts` {variant: loops} or a list of loop counts of the day's trials. Strings are lint-clean for the kinds
     'line' and 'issue'."""
     thr = quarantine_thresholds(None, thresholds)
@@ -794,10 +871,95 @@ def quarantine_listing(reasons_by_day, thresholds=None):
     return lines
 
 
-if __name__ == '__main__':
-    import sys
-    spec = sys.argv[1] if len(sys.argv) > 1 else 'yesterday'
+# ----------------------------------------------------------------------------- requarantine (one-off, after a meta recompute)
+
+def requarantine(name_or_path, settings=None, studies_dir=None, frozen_dir=None, dry=False, log=print,
+                 settings_path=None):
+    """Re-judge every day of a study from its trial rows and the CURRENT frozen metas, with restore=True: a day
+    quarantined for a reason that no longer holds (a CGM gap measured differently before `hc freeze
+    --recompute-meta`) gets its previous role back, a day that now has a reason is quarantined, the reasons of the
+    others are refreshed. Writes study.json unless `dry`; refuses (StudyError) while a run holds the study.
+    Returns (changed [(day, reasons)], reasons_by_day). The released days have no variant trials if they were
+    quarantined right after their base replay; the next `hc study run` replays what is missing."""
+    from hindcast import contracts as ct, freeze, study as st
+    sd = st.StudyDir(st.resolve_study_dir(name_or_path, studies_dir or st.STUDIES_DIR)).require()
+    if not dry:
+        holder = st.lock_holder(sd.read_state(), lock=sd.read_lock())
+        if holder:
+            raise st.StudyError(f'{sd.name}: a run holds the study ({holder}); requarantine after it ended')
+    settings = settings if settings is not None else load_settings(settings_path or ct.NS_SETTINGS_PATH)
+    study = sd.load_study(settings)
+    host = host_of(study.source or 'ns:', settings)
+    metas = {d.day: freeze.read_meta(d.day, host, frozen_dir) for d in study.days}
+    reasons = quarantine_from_trials(study, sd.trials(), metas, settings)
+    before = json.dumps(study.to_dict(), sort_keys=True)
+    changed = apply_quarantine(study, reasons, restore=True)
+    rewritten = json.dumps(study.to_dict(), sort_keys=True) != before
+    for day, why in changed:
+        if why:
+            log(f'{sd.name}: {day} quarantined: {"; ".join(why)}')
+        else:
+            log(f'{sd.name}: {day} released (no quarantine reason left), role {_role_of(study, day)}')
+    if rewritten and not dry:
+        sd.write_study(study)
+    log(f'{sd.name}: {len(changed)} role change{"s" if len(changed) != 1 else ""}'
+        + ('' if rewritten else ', study.json unchanged') + (' (dry run, nothing written)' if dry and rewritten else ''))
+    return changed, reasons
+
+
+def _role_of(study, day):
+    for d in getattr(study, 'days', []):
+        if d.day == day:
+            return d.role
+    return None
+
+
+def register(subparsers):
+    """Add `requarantine` to the `hc study` subparsers object (cli.register_study calls `days.register(sub)`, so
+    `hc study requarantine <study> [--dry]` runs it); `python -m hindcast.days requarantine <study>` runs it without
+    cli.py."""
+    p = subparsers.add_parser('requarantine', help='re-judge the quarantine of a study from its rows and the current '
+                                                   'frozen metas; releases days whose reasons are gone')
+    p.add_argument('name')
+    p.add_argument('--dry', action='store_true', help='print the changes, write nothing')
+    p.add_argument('--studies-dir', default=None, help='where studies/<name>/ live (default software/studies)')
+    p.add_argument('--settings', default=None, help='ns_settings.json (default software/ns_settings.json)')
+    p.add_argument('--frozen-dir', default=None, help=argparse.SUPPRESS)
+    p.set_defaults(func=run_requarantine)
+    return p
+
+
+def run_requarantine(args, settings=None, log=print):
+    """`hc study requarantine`: 0 ok, 3 refused (no study, a run holds it)."""
+    from hindcast import study as st
+    try:
+        changed, reasons = requarantine(args.name, settings=settings, studies_dir=getattr(args, 'studies_dir', None),
+                                        frozen_dir=getattr(args, 'frozen_dir', None), dry=getattr(args, 'dry', False),
+                                        log=log, settings_path=getattr(args, 'settings', None))
+    except st.StudyError as e:
+        print(f'hc study requarantine: {e}', file=sys.stderr)
+        return 3
+    for line in quarantine_listing(reasons):
+        log(line)
+    return 0
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == 'requarantine':
+        parser = argparse.ArgumentParser(prog='python -m hindcast.days')
+        register(parser.add_subparsers(dest='command', required=True))
+        args = parser.parse_args(argv)
+        return args.func(args)
+    spec = argv[0] if argv else 'yesterday'
     root = cache_dir()
     for d in parse_days(spec):
         f = finality(d, root)
-        print(d, 'cached' if f.cached else 'not cached', 'final' if f.final else f.why())
+        cd = cgm_day(d, cache_root=root)
+        gap = cd['note'] if cd['cgm_gap_min'] is None else f"longest CGM gap {cd['cgm_gap_min']} min (clipped at midnight)"
+        print(d, 'cached' if f.cached else 'not cached', 'final' if f.final else f.why(), '|', gap)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

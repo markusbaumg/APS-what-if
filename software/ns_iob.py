@@ -60,8 +60,12 @@ Nightscout record mapping
                  or `rate` U/h, `percent` (+100) for percent temps; duration from durationInMilliseconds (AAPS uploads
                  the real length in ms - a temp that ran 15 s has duration 0 min but 15297 ms), else duration*60000;
                  a record with 0 ms and no endmills is a cancel marker (ends the previous temp, contributes nothing);
-                 a later temp always ends the earlier one at its start (NS already carries the cut duration, enforced
-                 again here); records are de-duplicated by pumpId+timestamp (else identifier/_id)
+                 every other record keeps its recorded duration: AAPS ends the running record when it replaces a
+                 temp (NS then carries the cut duration), and records that still overlap are summed by AAPS's IOB
+                 as recorded (2026-10-15 21:46-22:30Z after the reinstall: the 0 U/h temp of 43.7 min overlapped
+                 three later temps; cutting it cost 0.06-0.13 U basal IOB in 70 loops); current_temp/last-active
+                 lookups take the newest record covering the instant, like the AAPS DB query; records are
+                 de-duplicated by pumpId+timestamp (else identifier/_id)
     planned temp basal end
                  NS stores only the *final* length of a temp (cut when the next one started). AAPS at loop time saw
                  the planned end (e.g. 120 min) -> currenttemp.duration. It is recovered from `devicestatus`:
@@ -266,13 +270,17 @@ class IobCalculator:
         self.boluses = sorted(boluses.values())
         self.bolus_ts = [b[0] for b in self.boluses]
         self.temps = sorted(temps.values(), key=lambda t: t['start'])
-        # a later temp ends the earlier one at its start; cancel markers only end the previous temp
+        # every record keeps its recorded duration, as in the AAPS DB: when AAPS replaces a running temp it ends
+        # that record (NS then carries the cut duration), so normal records never overlap. Records that do overlap
+        # (2026-10-15 21:46 zero temp recorded 43.7 min + the 21:52:58 pump-suspend temp after the reinstall) are
+        # summed by AAPS's IOB as recorded, so they are not cut here. Only a cancel marker ends the previous temp.
         for i, t in enumerate(self.temps):
-            if i + 1 < len(self.temps):
+            if i + 1 < len(self.temps) and self.temps[i + 1]['cancel']:
                 t['end'] = min(t['end'], self.temps[i + 1]['start'])
             t['end'] = max(t['end'], t['start'])
         self.temps = [t for t in self.temps if not t['cancel']]
         self.temp_ts = [t['start'] for t in self.temps]
+        self._max_temp_ms = max((t['end'] - t['start'] for t in self.temps), default=0)
 
     def apply_planned_durations(self, devicestatus):
         """recover the planned end of every temp basal from devicestatus (openaps.enacted, pump.extended)"""
@@ -468,12 +476,15 @@ class IobCalculator:
         return ts if ts >= now_ms - dia_ms else 0
 
     def _temp_active_at(self, ms):
-        """the temp basal whose recorded run (start <= ms < end) covers ms, else None - like the AAPS DB row"""
+        """the newest temp basal whose recorded run (start <= ms < end) covers ms, else None - like the AAPS DB query
+        (timestamp <= ms < timestamp + duration, newest first; an older overlapping record counts once the newer ended)"""
         i = bisect.bisect_right(self.temp_ts, ms)
-        if i == 0:
-            return None
-        t = self.temps[i - 1]
-        return t if t['start'] <= ms < t['end'] else None
+        while i > 0 and self.temps[i - 1]['start'] >= ms - self._max_temp_ms:
+            t = self.temps[i - 1]
+            if ms < t['end']:
+                return t
+            i -= 1
+        return None
 
     def temp_rate(self, temp, ms):
         return temp['rate'] if temp['abs'] else self._basal(ms) * temp['rate'] / 100.0
@@ -595,10 +606,11 @@ def validate(start_iso, end_iso, url=None, now_source='deliverAt', settings_path
             else:
                 # pump status snapshot taken < 2 s after the recorded cut of a temp (cancel / replace by the
                 # loop in progress): AAPS's expected pump state was not updated yet, the DB row already was.
-                # No loop ever runs at such an instant, so this is not comparable.
+                # No loop ever runs at such an instant, so this is not comparable. (After the cut current_temp is
+                # either none or an older overlapping record that still runs, e.g. 2026-10-15 22:30:36.)
                 k = bisect.bisect_right(calc.temp_ts, clock_ms)
                 prev_end = calc.temps[k - 1]['end'] if k else 0
-                if ct['duration'] == 0 and 0 <= clock_ms - prev_end < 2000:
+                if k and ct['start'] != calc.temps[k - 1]['start'] and 0 <= clock_ms - prev_end < 2000:
                     ct_snap += 1
                 elif len(ct_bad) < 5:
                     ct_bad.append((pump['clock'], ct, ext.get('TempBasalStart'), ext['TempBasalRemaining']))

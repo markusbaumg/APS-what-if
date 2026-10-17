@@ -14,6 +14,7 @@ that `emulator_core.scanNightscout()` constructs; `replay.py` (H-102) installs i
     src.load(); loops = list(src.loops())                         # == live NightscoutSource(...).loops()
     freeze.blocked_reason('2026-09-06')                            # None, or why replay.py must mark the trial blocked
     python -m hindcast.freeze freeze 2026-09-06 [--new] [--allow-partial] [--refreeze] [--list] [--online]
+    python -m hindcast.freeze freeze --recompute-meta [2026-08-30..2026-10-15]   # character / confounders only
     python -m hindcast.freeze warm   2026-08-30..2026-09-07 [--allow-partial]
 
 File format. `<day>.loops.jsonl.gz` is gzip JSONL, one event per line in the order the live source produced them:
@@ -33,6 +34,14 @@ sha1, bytes, bytes_gz, seconds, created, final, partial, ns_code_sha (sha1 over 
 freeze depends on nothing else of the core), code_sha (contracts.code_sha, for the record), settings_sha
 (contracts.settings_sha), dropped {no_reason, aborted, no_cgm, duplicate, outside, smb_fallback}, character
 (days.character), confounders (days.confounders), autoISF_versions, finality {missing, partial}.
+
+Meta recompute (`hc freeze --recompute-meta [days]`, recompute_meta()). Rewrites only `character`, `confounders`
+and `autoISF_versions` of <day>.meta.json (plus `meta_recomputed`, the time) from the cache and the frozen loops,
+without re-running the reconstruction: the loops file is not touched and re-hashed first (its sha1 must still be
+meta.sha1), so `sha1` - the freeze_sha of every trials.jsonl row - and every other key stay as they are and no study
+goes stale. It needs the day's cache files (offline) and refuses a stale day (the character would be computed under
+other settings than the frozen loops). Used when days.character / days.confounders change (2026-10-17: the CGM gap
+measured on the day's own entries, clipped at midnight, loop gaps as their own badge).
 
 Staleness. A frozen file whose `ns_code_sha` or `settings_sha` no longer matches the working tree is `stale`:
 `--list` reports it, `freeze_days()` skips it unless `refreeze=True`, `blocked_reason()` names it so replay.py marks
@@ -353,8 +362,8 @@ def freeze_day(day, url='ns:', settings=None, allow_partial=False, force=False, 
         'ns_code_sha': ns_code_sha(software_dir), 'code_sha': contracts.code_sha(software_dir),
         'settings_sha': contracts.settings_sha(settings_path, settings),
         'dropped': dropped,
-        'character': days.character(day, src, loops),
-        'confounders': days.confounders(day, settings, src, loops),
+        'character': days.character(day, src, loops, cache_root=cache_root),
+        'confounders': days.confounders(day, settings, src, loops, cache_root=cache_root),
         'autoISF_versions': sorted({l['autoISF_version'] for l in loops if l.get('autoISF_version')}),
         'finality': {'missing': fin.missing, 'partial': fin.partial},
     }
@@ -362,6 +371,104 @@ def freeze_day(day, url='ns:', settings=None, allow_partial=False, force=False, 
     log_msg(f'frozen {day}: {n_loops} loops, {meta["bytes_gz"] / 1e6:.1f} MB gz, {meta["seconds"]} s'
             + ('' if fin.final else ' (PARTIAL: cache not final)'))
     return meta
+
+
+CHARACTER_KEYS = ('character', 'confounders', 'autoISF_versions')
+
+
+def _loops_sha1(path):
+    h = hashlib.sha1()
+    with gzip.open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+_CharacterSource = ns_source.NightscoutSource              # load() only: treatments, iob, profiles (tests patch it)
+_SLIM_KEYS = ('now_ms', 'utcOffset', 'console_error', 'autoISF_version')
+
+
+def recompute_meta(day, url='ns:', settings=None, base_dir=None, log_msg=print, software_dir=SOFTWARE_DIR,
+                   settings_path=contracts.NS_SETTINGS_PATH, dry=False):
+    """Recompute character / confounders / autoISF_versions of a frozen day's meta from the cache and the frozen
+    loops (no reconstruction, loops file untouched); returns (old_meta, new_meta). Writes the meta unless `dry`.
+    FreezeError when the day is not frozen, stale, its loops file no longer hashes to meta.sha1, or a cache file is
+    missing."""
+    if not days.is_day(day):
+        raise FreezeError(f'"{day}" is not a UTC day (YYYY-MM-DD)')
+    settings = settings if settings is not None else days.load_settings(settings_path)
+    host = days.host_of(url, settings)
+    old = read_meta(day, host, base_dir)
+    lp = loops_path(day, host, base_dir)
+    if old is None or not os.path.isfile(lp):
+        raise FreezeError(f'{day} is not frozen; nothing to recompute')
+    stale = staleness(old, settings, software_dir, settings_path)
+    if stale:
+        raise FreezeError(f'{day} frozen file is stale ({", ".join(stale)}); refreeze it instead (--refreeze)')
+    if _loops_sha1(lp) != old.get('sha1'):
+        raise FreezeError(f'{day}: the loops file no longer hashes to meta.sha1; refreeze it (--refreeze)')
+    cache_root = days.cache_dir(url, settings)
+    loops, skipped = [], {}
+    for ev in read_events(lp):
+        if 'dropped' in ev:
+            skipped[ev['dropped']] = skipped.get(ev['dropped'], 0) + 1
+        else:
+            loops.append({k: ev.get(k) for k in _SLIM_KEYS})
+    if len(loops) != old.get('loops'):
+        raise FreezeError(f'{day}: the loops file holds {len(loops)} loops, the meta says {old.get("loops")}; refreeze it')
+    start_iso, end_iso = days.day_window(day)
+    with offline_guard(True):
+        src = _CharacterSource(url, start_iso, end_iso, settings=settings, log_msg=lambda *a: None, verbose=False)
+        try:
+            src.load()
+        except OfflineError as e:
+            raise FreezeError(f'{day}: {e}') from None
+    src.skipped = skipped
+    new = dict(old)
+    new['character'] = days.character(day, src, loops, cache_root=cache_root)
+    new['confounders'] = days.confounders(day, settings, src, loops, cache_root=cache_root)
+    new['autoISF_versions'] = sorted({l['autoISF_version'] for l in loops if l.get('autoISF_version')})
+    new['meta_recomputed'] = contracts.now_iso()
+    if not dry:
+        contracts.write_json_atomic(meta_path(day, host, base_dir), new)
+    return old, new
+
+
+def character_changes(old, new):
+    """[(key, old, new)] of the character fields that differ between two metas (keys of either side)."""
+    a, b = (old or {}).get('character') or {}, (new or {}).get('character') or {}
+    return [(k, a.get(k), b.get(k)) for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)]
+
+
+def recompute_metas(day_specs=None, url='ns:', settings=None, base_dir=None, log_msg=print, dry=False,
+                    software_dir=SOFTWARE_DIR, settings_path=contracts.NS_SETTINGS_PATH):
+    """recompute_meta over the days (every frozen day when None); [(day, outcome, detail, old, new)] with outcome
+    'recomputed', 'refused' or 'failed'."""
+    settings = settings if settings is not None else days.load_settings(settings_path)
+    host = days.host_of(url, settings)
+    if day_specs:
+        want = days.parse_days(day_specs)
+    else:
+        d = frozen_dir(host, base_dir)
+        want = sorted(n[:-len('.meta.json')] for n in (os.listdir(d) if os.path.isdir(d) else [])
+                      if n.endswith('.meta.json') and days.is_day(n[:-len('.meta.json')]))
+    out = []
+    for day in want:
+        try:
+            old, new = recompute_meta(day, url, settings, base_dir=base_dir, log_msg=log_msg, software_dir=software_dir,
+                                      settings_path=settings_path, dry=dry)
+        except FreezeError as e:
+            out.append((day, 'refused', str(e), None, None))
+            continue
+        except (OSError, RuntimeError, ValueError) as e:
+            out.append((day, 'failed', repr(e), None, None))
+            continue
+        ch = character_changes(old, new)
+        detail = ', '.join(f'{k} {a} -> {b}' for k, a, b in ch) or 'character unchanged'
+        if (old.get('confounders') or []) != new['confounders']:
+            detail += '; badges changed'
+        out.append((day, 'recomputed', detail, old, new))
+    return out
 
 
 def freeze_days(day_specs, url='ns:', settings=None, new=False, allow_partial=False, refreeze=False, log_msg=print,
@@ -682,6 +789,10 @@ def register(subparsers):
     p.add_argument('--list', action='store_true', help='list cache / frozen state per day instead of freezing')
     p.add_argument('--verify', action='store_true', help='with --list: re-hash the frozen files')
     p.add_argument('--online', action='store_true', help='let the freeze fetch missing cache files (HINDCAST_OFFLINE=0)')
+    p.add_argument('--recompute-meta', action='store_true',
+                   help='rewrite only character / confounders of frozen metas from the cache (no replay; loops file and '
+                        'sha1 unchanged); days default to every frozen day')
+    p.add_argument('--dry', action='store_true', help='with --recompute-meta: print the changes, write nothing')
     p.add_argument('--url', default='ns:', help='Nightscout url (default ns: = ns_settings.json)')
     p.add_argument('--frozen-dir', default=None, help='frozen/ root (default HINDCAST_FROZEN_DIR or software/frozen)')
     p.set_defaults(func=run_freeze)
@@ -709,6 +820,12 @@ def run_freeze(args, settings=None, settings_path=contracts.NS_SETTINGS_PATH, lo
                              settings_path=settings_path, verify=getattr(args, 'verify', False))
             print(format_listing(rows))
             return EXIT_OK
+        if getattr(args, 'recompute_meta', False):
+            res = recompute_metas(args.days or None, url=args.url, settings=settings, base_dir=base_dir, log_msg=log_msg,
+                                  dry=getattr(args, 'dry', False), settings_path=settings_path)
+            for day, outcome, detail, _, _ in res:
+                print(f'{day}: {outcome} - {detail}')
+            return outcomes_exit_code([(r[0], 'frozen' if r[1] == 'recomputed' else r[1], r[2]) for r in res])
         if not args.days:
             print('hc freeze: give the days to freeze (YYYY-MM-DD, from..to) or --list', file=sys.stderr)
             return EXIT_REFUSED

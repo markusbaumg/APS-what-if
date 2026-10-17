@@ -879,6 +879,15 @@ class Guards:
               `sentinel_every` (study.json) tasks.
     null      one searched parameter set to the phone's value (rotating with the round number); once per run
               (= round), right after the first sentinel; must equal base the same way.
+    per day   in the phases of PER_DAY_PHASES ('validate', H-308) the phase-start and every-N rules do not apply:
+              a day gets one sentinel for the whole study, before its first variant task, unless one was scheduled
+              on that day in this run (its base replay brings one when the base runs in the same batch) or the
+              study already has a done sentinel row on that day (`covered_days`, Runner.run passes them from
+              trials.jsonl), so later validate rounds do not repeat it; the null of a validate round runs with its
+              first sentinel (none when every day of the round is covered).
+    quarantine no control is ever scheduled on a day the study has quarantined (study.json role 'quarantined';
+              the quarantine is judged before the tasks are planned, and the orchestrator's after_base_wave drops
+              the controls of a day it quarantines in the same round).
 
     A mismatch is a guard stop (Runner: exit 2, the differing loop's index, time and column names in status.json's
     stop_reason; the cell values and loop counts only in the row's error); a control that fails while its day's
@@ -950,20 +959,40 @@ class Guards:
         return Task(params={name: params[name]}, day=day, phase=phase, control='null', round=round_, variant='null',
                     meta={'instance': str(instance), 'parameter': name})
 
-    def schedule(self, tasks, run_tag='run'):
-        """The tasks with the controls inserted (see the class docstring). Controls already in `tasks` pass through.
-        Days on which no sentinel can be built end up in `not_schedulable` (reset per call)."""
+    PER_DAY_PHASES = ('validate',)
+
+    def quarantined_days(self):
+        """The study's days with role 'quarantined' (listed, not scored: no control runs there)."""
+        return {d.day for d in (getattr(self.study, 'days', None) or []) if getattr(d, 'role', None) == 'quarantined'}
+
+    @staticmethod
+    def sentinel_days_done(rows):
+        """The days with a done sentinel row (latest row per key) in `rows` (TrialRow list): covered_days."""
+        latest = StudyDir.latest_by_key(rows) if rows else {}
+        return {r.day for r in latest.values() if r.control == 'sentinel' and r.status == 'done'}
+
+    def schedule(self, tasks, run_tag='run', covered_days=None):
+        """The tasks with the controls inserted (see the class docstring). Controls already in `tasks` pass through
+        (except on a quarantined day). `covered_days`: days that already have a done sentinel in this study (the
+        per-day rule skips them). Days on which no sentinel can be built end up in `not_schedulable` (reset per
+        call)."""
         out, since, phases, seq = [], 0, set(), 0
+        sentinel_days = set()
+        covered = set(covered_days or ())
+        skip = self.quarantined_days()
         self.not_schedulable = {}
         null_due = self.null
 
         def add_sentinel(t):
             nonlocal seq, since, null_due
+            if t.day in skip:
+                return
             s = self.sentinel_task(t.day, t.phase, t.round, f'{run_tag}:s{seq}')
             if s is None:
                 return
             seq += 1
             since = 0
+            sentinel_days.add(t.day)
             out.append(s)
             if null_due:
                 n = self.null_task(t.day, t.phase, t.round, f'{run_tag}:null')
@@ -973,6 +1002,10 @@ class Guards:
 
         for t in tasks:
             if is_control(t):
+                if t.day in skip:
+                    continue
+                if t.control == 'sentinel':
+                    sentinel_days.add(t.day)
                 out.append(t)
                 continue
             params, skipped = self.phone_params(t.day)
@@ -982,6 +1015,14 @@ class Guards:
                 out.append(t)
                 if self.floor_sentinel:
                     add_sentinel(t)
+                continue
+            if t.phase in self.PER_DAY_PHASES:              # one sentinel per day for the whole study
+                phases.add(t.phase)
+                if t.day not in sentinel_days and t.day not in covered:
+                    add_sentinel(t)
+                    sentinel_days.add(t.day)                 # also when none could be built: do not retry per task
+                out.append(t)
+                since += 1
                 continue
             if t.phase not in phases:
                 phases.add(t.phase)
@@ -1557,7 +1598,7 @@ class Runner:
                 # the run tag is unique per run (round number + the first trial number of this run): the controls
                 # of a re-run after a kill -9 are new keys, never a second done row of an old key
                 run_tag = (f'r{rnd}.t{trial_no}' if rnd is not None else f'run{trial_no}')
-                sched = guards.schedule([t for t, _ in todo], run_tag)
+                sched = guards.schedule([t for t, _ in todo], run_tag, covered_days=Guards.sentinel_days_done(self.sd.trials()))
                 keys = {id(t): k for t, k in todo}
                 todo = [(t, keys.get(id(t)) or self.key_of(t)) for t in sched]
                 done_now = self.sd.done_keys()
@@ -1726,27 +1767,39 @@ def _round3(v):
     return None if v is None else round(float(v), 3)
 
 
-def aggregate_floor(rows):
-    """Status.floor: over the base rows of all days, max |base - phone| per component and min agreement_pct."""
+def aggregate_floor(rows, days=None):
+    """Status.floor: metrics.study_floor over the base rows (latest done per day): max |base - phone| per component
+    and min agreement_pct. `days` = the scored days (search + hold-out, never a quarantined day: quarantined days are
+    listed, not scored, DESIGN.md 5.4 phase 0); None = every day with a base row. build_status passes search +
+    hold-out days, so this floor is wider than (or equal to) round.json's `floors`, which cover the scored search
+    days only (the days the review order is ranked on); the page labels each with its day set."""
     try:
-        from hindcast.metrics import floors_from_base
+        from hindcast.metrics import floors_from_base, study_floor
     except Exception:                                        # pragma: no cover - metrics.py absent
         return {}
-    agg = {}
+    by_day = {}
     for r in rows:
         if r.status != 'done' or not r.metrics or not (r.control == 'base' or r.vhash == BASE_VHASH):
             continue
-        f = floors_from_base(r.metrics)
-        for k, v in f.items():
-            if v is None:
-                continue
-            if k == 'agreement_pct':
-                agg[k] = v if k not in agg else min(agg[k], v)
-            elif k == 'loops':
-                continue
-            else:
-                agg[k] = v if k not in agg else max(agg[k], v)
-    return {k: _round3(v) for k, v in agg.items()}
+        by_day[r.day] = floors_from_base(r.metrics)
+    return {k: _round3(v) for k, v in study_floor(by_day, days).items()}
+
+
+ELLIPSIS = '...'
+
+
+def cut_words(text, limit):
+    """`text` in at most `limit` characters: unchanged when it fits, else cut at the last word boundary (space,
+    or after ',' ';' ':') before limit - 3, trailing punctuation dropped, plus '...' - never mid-word."""
+    text = str(text or '')
+    if len(text) <= limit:
+        return text
+    room = max(1, limit - len(ELLIPSIS))
+    head = text[:room + 1]
+    cut = max(head.rfind(' '), -1)
+    head = head[:cut] if cut > 0 else text[:room]
+    head = head.rstrip(' ,;:-(')
+    return head + ELLIPSIS
 
 
 def guard_lines(study_dir):
@@ -1806,31 +1859,66 @@ def build_status(study_dir, now=None):
                     trials_failed=counts.get('failed', 0), trials_blocked=counts.get('blocked', 0),
                     pid=(state.pid if state and holder else None), round=(state.round if state else None),
                     stale_context=list(state.stale_context) if state else [],
-                    floor=aggregate_floor(rows),
+                    floor=aggregate_floor(rows, set(study.search_days()) | set(study.holdout_days())),
                     days={d.day: _day_label(d, not_frozen) for d in study.days},
                     exit_code=(state.exit_code if state else None), stop_reason=(state.stop_reason if state else None),
                     report=(os.path.join('report', 'index.html') if os.path.isfile(os.path.join(sd.report_dir, 'index.html')) else None))
     rnd = sd.read_round()
     if rnd is not None:
+        from hindcast import metrics as _m                   # lazy: metrics imports emulator_optimize
         status.dead_parameters = [d.key for d in rnd.dead_parameters]
         by_vhash = {c.vhash: c for c in rnd.variants}
         order = [v for v in rnd.front if v in by_vhash] or [c.vhash for c in rnd.variants if c.verdict != 'base']
+        if rnd.validation:                                   # validate round: recommended for review first, then the order
+            order = ([v for v in order if by_vhash[v].verdict == 'recommended']
+                     + [v for v in order if by_vhash[v].verdict != 'recommended'])
         for vh in order[:5]:
             c = by_vhash[vh]
             effect = dict(list((c.effect or {}).items())[:4])
+            vline = _m.validation_line(c.validation)
             status.top.append(TopItem(vhash=contracts.short(c.vhash), variant=c.variant, verdict=c.verdict,
-                                      why=(c.why or c.verdict)[:120], rank=c.rank,
-                                      effect={k: _round3(v) for k, v in effect.items()}))
+                                      why=cut_words(c.why or c.verdict, 120), rank=c.rank,
+                                      effect={k: _round3(v) for k, v in effect.items()},
+                                      validation=cut_words(vline, 80) if vline else None))
     status.guards = guard_lines(sd)                          # not a Status field (contract): status_text only
-    for _ in range(8):                                       # fit the 2 KB limit: shorten, then drop, the top items
-        if len(status.to_compact_json().encode('utf-8')) <= STATUS_MAX_BYTES:
+    # fit the 2 KB limit: the lower-value fields go first (round.json, study.json and guards.json keep all of them):
+    # effect numbers down to two, the stop reason, the quarantine reasons, the effect numbers, then the why texts
+    # (cut at a word boundary with an ellipsis, never mid-word), and only then a whole top item
+    def fits():
+        return len(status.to_compact_json().encode('utf-8')) <= STATUS_MAX_BYTES
+
+    def shorten_why(limit):
+        if any(len(t.why) > limit for t in status.top):
+            for t in status.top:
+                t.why = cut_words(t.why, limit)
+            return True
+        return False
+
+    for _ in range(24):
+        if fits():
             break
-        if status.top:
-            if any(len(t.why) > 60 for t in status.top):
-                for t in status.top:
-                    t.why = t.why[:60]
-            else:
-                status.top.pop()
+        if status.top and any(len(t.effect) > 2 for t in status.top):
+            for t in status.top:
+                t.effect = dict(list(t.effect.items())[:2])
+        elif status.stop_reason and len(status.stop_reason) > 160:
+            status.stop_reason = cut_words(status.stop_reason, 160)
+        elif any(':' in v for v in status.days.values()):
+            status.days = {d: v.split(':', 1)[0] for d, v in status.days.items()}
+        elif status.top and any(t.effect for t in status.top):
+            for t in status.top:
+                t.effect = {}
+        elif status.top and shorten_why(80):
+            pass
+        elif status.top and shorten_why(60):
+            pass
+        elif status.top and any(t.validation and len(t.validation) > 48 for t in status.top):
+            for t in status.top:
+                if t.validation:
+                    t.validation = cut_words(t.validation, 48)
+        elif status.top and shorten_why(40):
+            pass
+        elif status.top:
+            status.top.pop()
         elif status.stale_context:
             status.stale_context = [s[:80] for s in status.stale_context[:3]]
         else:
@@ -1870,5 +1958,7 @@ def status_text(status, study=None):
             eff = ', '.join(f'{k} {v}' for k, v in t.effect.items())
             lines.append(f'  {t.rank if t.rank is not None else "-":>2} {t.variant}  [{verdict_label(t.verdict)}] {t.why}'
                          + (f'  ({eff})' if eff else ''))
+            if t.validation:
+                lines.append(f'     {t.validation}')
     lines += ['', HONESTY_STATEMENT]
     return '\n'.join(lines) + '\n'

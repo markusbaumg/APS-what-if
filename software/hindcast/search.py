@@ -35,12 +35,24 @@ trial rows so a resumed run continues where it stopped):
             by construction), snapped to the grid, duplicates dropped, so the same seed gives the same points on
             every machine and a different seed another design. Fewer than n points come back when the grid is
             smaller than n or a frozen chain member cuts points; the shortfall is in the notes.
-    halving, coordinate, optuna, validate, cv, grow
-            not built here (H-306..H-309): the plan marks them `skipped` with the issue number, next_batch skips
-            them.
+    validate
+            (H-308) the top `top` (default metrics.DEFAULT_VALIDATE_TOP = 8) variants of the search review order
+            (metrics.rank_variants over the search days on the done rows, feasible only; the same rows round.analyze
+            reads) replayed on the validation days: phase.days 'holdout' (or empty) = the study's `role: holdout`
+            days (a quarantined day has left that role), or a comma list of hold-out days. The base of every
+            validation day comes first like in every phase. The phase is complete when every (variant, day) task is
+            settled (done, or failed like in every other phase - a failed hold-out replay is reported as not
+            feasible on that day, it is not handed out forever). The points depend on the rows, so phase_tasks needs
+            `trials` for it; while the search phases are still running the list is provisional (the plan only
+            counts it, next_batch reaches it once every earlier phase is settled). The verdicts (hold-out rank,
+            direction per hold-out day, leave-one-day-out rank range, Kendall tau, recommended for review) are
+            round.py's, through metrics.validate_variants.
+    halving, coordinate, optuna, cv, grow
+            not built here (H-306, H-307, H-309; cv: the leave-one-day-out folds are computed by the validate round,
+            no replays of their own): the plan marks them `skipped` with the issue number, next_batch skips them.
 
 Days. A phase runs on the study's search days (`role: search`; hold-out and quarantined days never enter a search
-phase). `phase.days` narrows them: 'screening' = `screening_days(study)` (up to SCREENING_DAYS = 3 days covering as
+phase; only `floor` and `validate` touch hold-out days). `phase.days` narrows them: 'screening' = `screening_days(study)` (up to SCREENING_DAYS = 3 days covering as
 many distinct user-typed tag sets as possible, in study order), or a comma list of days. Tasks are point-major
 (every day of one point, then the next point) so that a stopped run leaves whole variants behind.
 
@@ -140,9 +152,11 @@ SCREENING_DAYS = 3                                     # phase.days == 'screenin
 SETTLED = ('done', 'failed')                           # a row with one of these statuses is not handed out again
 BASE_RETRY_LIMIT = 3                                   # a failed base replay is handed out again until it failed this often
 RETRY = ('blocked', 'stale')                           # these are handed out again (frozen since, context re-evaluated)
-BUILT_KINDS = ('floor', 'oaat', 'grid', 'lhs')
-LATER_ISSUE = {'halving': 'H-306', 'coordinate': 'H-307', 'optuna': 'H-307', 'validate': 'H-308', 'cv': 'H-308',
-               'grow': 'H-309'}
+BUILT_KINDS = ('floor', 'oaat', 'grid', 'lhs', 'validate')
+SEARCH_KINDS = ('oaat', 'grid', 'lhs', 'halving', 'coordinate', 'optuna')   # phases that search: search days only
+VALIDATE_PHASE = 'validate'
+LATER_ISSUE = {'halving': 'H-306', 'coordinate': 'H-307', 'optuna': 'H-307',
+               'cv': 'H-308 (the leave-one-day-out folds are computed by the validate round)', 'grow': 'H-309'}
 FLOOR_PHASE = 'floor'
 NOT_TESTABLE = 'not testable on these days'
 
@@ -310,10 +324,28 @@ def screening_days(study, n=SCREENING_DAYS) -> List[str]:
     return chosen
 
 
+def validation_days(study, phase) -> List[str]:
+    """The days of a validate phase: phase.days '' / 'holdout' -> the study's hold-out days (role holdout: quarantined
+    days have left it), or a comma list that must name hold-out days."""
+    spec = (phase.days or '').strip()
+    holdout = study.holdout_days()
+    if not spec or spec == 'holdout':
+        return holdout
+    wanted = [d.strip() for d in spec.split(',') if d.strip()]
+    bad = [d for d in wanted if d not in set(holdout)]
+    if bad:
+        raise SearchError(f'phase validate: days {", ".join(bad)} are not hold-out days of this study (a search day '
+                          f'cannot validate the search; a quarantined day is excluded from scoring)')
+    return wanted
+
+
 def phase_days(study, phase) -> List[str]:
-    """The days a phase runs on: search days; 'screening' -> screening_days(); a comma list -> those search days."""
+    """The days a phase runs on: search days; 'screening' -> screening_days(); a comma list -> those search days;
+    floor -> search + hold-out days; validate -> validation_days()."""
     if phase.kind == FLOOR_PHASE:
         return [d.day for d in study.days if d.role in ('search', 'holdout')]
+    if phase.kind == VALIDATE_PHASE:
+        return validation_days(study, phase)
     spec = (phase.days or '').strip()
     if not spec or spec == 'search':
         return search_days(study)
@@ -469,17 +501,52 @@ def phase_points(space, phase, frozen=None, phone=None) -> Tuple[List[dict], Lis
         pts, notes = lhs_points(space, n, seed, frozen, phone)
         return pts, [f'lhs: {len(pts)} point(s) of {n} asked, seed {seed}'
                      + (f', {len(frozen)} parameter(s) frozen' if frozen else '')] + notes
+    if phase.kind == VALIDATE_PHASE:
+        raise SearchError('the validate points come from the trial rows: phase_tasks(..., trials=...) / validate_points')
     raise SearchError(f'phase kind {phase.kind!r} is not built here ({LATER_ISSUE.get(phase.kind, "later wave")})')
 
 
-def phase_tasks(study, phase, frozen=None, settings=None, space=None, round_no=None) -> Tuple[List[Task], List[str]]:
+def validate_points(study, trials, phase, space=None, settings=None) -> Tuple[List[dict], List[str]]:
+    """The points of a validate phase: the top `phase.top` variants of the search review order over the done rows
+    (round.trial_dicts: the latest done row per key, controls left out, base relabelled), feasible only, in that
+    order; and the notes. The same ranking round.analyze / metrics.validate_variants starts from."""
+    from hindcast import round as rd                        # round imports study and metrics only: no cycle
+    space = space or spc.ParamSpace.from_study(study, settings=settings, check_locked=False)
+    top = int(phase.top or mt.DEFAULT_VALIDATE_TOP)
+    sdays = search_days(study)
+    rows = [r for r in _rows(trials) if r.day in set(sdays)]
+    dicts = rd.trial_dicts(rows)
+    if not dicts:
+        return [], [f'validate: no done rows on the search days yet; the top {top} is not known']
+    objective = study.objective.to_dict() if hasattr(study.objective, 'to_dict') else dict(study.objective or {})
+    ranking = mt.rank_variants(dicts, study.question, objective, sdays)
+    params_of = {d['variant']: d['params'] for d in dicts}
+    points = []
+    for name in ranking.order[:top]:
+        p = params_of.get(name) or {}
+        if p:
+            points.append(space.normalize(p) if all(k in space for k in p) else dict(p))
+    notes = [f'validate: top {len(points)} of {len(ranking.order)} feasible variant(s) of the search review order '
+             f'({len(sdays)} search day(s)) on the validation days']
+    if len(points) < top:
+        notes.append(f'validate: {top} asked, {len(points)} feasible on the search days')
+    return points, notes
+
+
+def phase_tasks(study, phase, frozen=None, settings=None, space=None, round_no=None, trials=None) -> Tuple[List[Task], List[str]]:
     """Every task of a phase: the base replay of each of its days first (phase 'floor', control 'base'), then the
-    points, point-major. The tasks are complete, not filtered by what is done (see RowLookup.pending)."""
+    points, point-major. The tasks are complete, not filtered by what is done (see RowLookup.pending). A validate
+    phase needs `trials` (its points are the search's top-N; without rows it has base tasks only)."""
     space = space or spc.ParamSpace.from_study(study, settings=settings, check_locked=False)
     phone = _phone(space, settings)
     days = phase_days(study, phase)
     tasks = [Task(params={}, day=d, phase=FLOOR_PHASE, control='base', round=round_no) for d in days]
-    points, notes = phase_points(space, phase, frozen, phone)
+    if phase.kind == VALIDATE_PHASE:
+        points, notes = validate_points(study, trials or [], phase, space, settings)
+        if not days:
+            notes = ['validate: no hold-out days reserved (or all quarantined); nothing to validate']
+    else:
+        points, notes = phase_points(space, phase, frozen, phone)
     for point in points:
         for d in days:
             tasks.append(Task(params=dict(point), day=d, phase=phase.kind, round=round_no))
@@ -625,7 +692,7 @@ def plan(study, trials, settings=None, key_of=None, retry=RETRY) -> SearchPlan:
                                    complete=False, skipped=True, frozen=dict(frozen),
                                    notes=[f'{ph.kind}: not built yet (backlog {LATER_ISSUE.get(ph.kind, "later")}); skipped']))
             continue
-        tasks, notes = phase_tasks(study, ph, frozen, settings, space)
+        tasks, notes = phase_tasks(study, ph, frozen, settings, space, trials=trials)
         statuses = [lookup.status(t) for t in tasks]
         done = sum(1 for s in statuses if s == 'done')
         failed = sum(1 for s in statuses if s == 'failed')
@@ -658,7 +725,7 @@ def next_batch(study, trials, settings=None, key_of=None, batch_size=None, round
         return []
     ph = study.phases[p.current.index]
     space = spc.ParamSpace.from_study(study, settings=settings, check_locked=False)
-    tasks, _ = phase_tasks(study, ph, p.current.frozen, settings, space, round_no)
+    tasks, _ = phase_tasks(study, ph, p.current.frozen, settings, space, round_no, trials=trials)
     lookup = RowLookup(study, trials, space, key_of)
     pending = lookup.pending(tasks, retry)
     states = {}
@@ -691,7 +758,7 @@ def untried_keys(study, trials, settings=None, key_of=None) -> set:
     for pp in p.phases:
         if pp.skipped:
             continue
-        tasks, _ = phase_tasks(study, study.phases[pp.index], pp.frozen, settings, space)
+        tasks, _ = phase_tasks(study, study.phases[pp.index], pp.frozen, settings, space, trials=trials)
         for t in tasks:
             if lookup.row(t) is None:
                 out.add(key_of(t) if key_of is not None else (lookup.vhash(t.params), t.day))
@@ -721,7 +788,7 @@ def round_for_phase(study, trials, phase_index, round_no, started=None, settings
     p = plan(study, trials, settings, key_of)
     pp = p.phases[phase_index]
     phone = _phone(space, settings)
-    tasks, notes = phase_tasks(study, ph, pp.frozen, settings, space)
+    tasks, notes = phase_tasks(study, ph, pp.frozen, settings, space, trials=trials)
     days = pp.days
     lookup = RowLookup(study, trials, space, key_of)
     wanted = {lookup.vhash(t.params) for t in tasks}
@@ -812,6 +879,8 @@ def plan_text(p: SearchPlan, study=None) -> str:
         lines.append(f'{NOT_TESTABLE}, frozen: ' + ', '.join(p.frozen))
     if p.current is None:
         lines.append('every built phase is settled; nothing pending')
+        if any(pp.kind == VALIDATE_PHASE and not pp.skipped for pp in p.phases):
+            lines.append('the validate round names the variants recommended for review (`hc round`, `hc study status`)')
     else:
         lines.append(f'next: phase {p.current.index} ({p.current.kind}), {p.current.pending} task(s) pending, '
                      f'{p.current.stale} stale')
@@ -906,6 +975,7 @@ def main(argv=None):
 
 __all__ = ['DEAD_FACTOR', 'DEAD_COMPONENTS', 'DEFAULT_LEVELS', 'DEFAULT_LHS_N', 'DEFAULT_SEED', 'SCREENING_DAYS',
            'SearchError', 'RowLookup', 'PhasePlan', 'SearchPlan', 'search_days', 'screening_days', 'phase_days',
+           'validation_days', 'validate_points', 'VALIDATE_PHASE', 'SEARCH_KINDS',
            'lhs_design', 'lhs_points', 'oaat_points', 'grid_points', 'phase_points', 'phase_tasks', 'dead_parameters',
            'plan', 'next_batch', 'untried_keys', 'BASE_RETRY_LIMIT', 'round_for_phase', 'write_round', 'plan_text', 'register', 'runner_for', 'run_search']
 

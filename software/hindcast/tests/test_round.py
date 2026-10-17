@@ -250,3 +250,99 @@ def test_cli_main_writes_both_files(tmp_path, capsys):
     assert json.load(open(sd.round_path))['round'] == 3
     rc = rnd.main([str(tmp_path / 'nope'), '--studies-dir', str(tmp_path)])
     assert rc == st.EXIT_REFUSED
+
+
+# ----------------------------------------------------------------------------- floors: one multiple, scored days only
+
+def _rewrite_base(sd, day, **override):
+    """replace the metrics of the base row of `day` (a larger |base - phone| = a wider floor on that day)"""
+    rows = sd.trials()
+    for r in rows:
+        if r.control == 'base' and r.day == day:
+            r.metrics = dict(mk(base=True), **override)
+    with open(sd.trials_path, 'w', encoding='utf-8') as fh:
+        for r in rows:
+            fh.write(r.to_compact_json() + '\n')
+
+
+def _why_multiple(why):
+    import re
+    m = re.search(r'\((\d+\.\d) x floor\)', why)
+    return m and m.group(1)
+
+
+def test_round_why_and_card_print_the_same_floor_multiple(tmp_path):
+    """the floors differ by day (rise 0.2 U on two days, 1.0 U on the third): round.json's why and the card both
+    print metrics.floor_multiple (mean over days of |effect| / that day's floor), never |mean| / worst floor"""
+    from hindcast import cards
+    variants = {'cand': ({'profile autoISF_max': PHONE_MAX, 'profile dura_ISF_weight': 0.5}, dict(rise=-0.6, rest=0.0))}
+    sd, study = make_study_with_rows(tmp_path, variants=variants, holdout=[], tags={})
+    _rewrite_base(sd, SEARCH[2], rise_emul_U=4.0)                     # floor_rise 1.0 U on the third day
+    doc, _ = rnd.produce(sd, round_no=1, phase='grid', settings=SETTINGS)
+    cand = next(v for v in doc.variants if v.verdict != 'base')
+    want = (0.6 / 0.2 + 0.6 / 0.2 + 0.6 / 1.0) / 3                     # 2.2
+    assert _why_multiple(cand.why) == f'{want:.1f}' == '2.2'
+    a = rnd.analyze(study, sd.trials(), SETTINGS)
+    rep = a.reports[cand.vhash]
+    assert rep.floor_multiples['rise_vs_base_U'] == pytest.approx(want)
+    assert M.floor_multiple(rep.per_day, a.floors, 'rise_vs_base_U', rep.days) == pytest.approx(want)
+    card = cards.card_text(rep, a, settings=SETTINGS)
+    line = next(l for l in card.splitlines() if l.startswith('- rising loops:'))
+    assert f'{want:.1f} x floor (mean of the per-day multiples)' in line
+    assert 'floor 0.20-1.00 U by day' in line
+    assert f'{0.6 / 1.0:.1f} x floor' not in line                      # not |mean| / worst-day floor
+    assert lint.lint_findings(cand.why, 'line') == []
+
+
+def test_quarantined_days_neither_widen_the_floor_nor_enter_a_ranking(tmp_path):
+    """a quarantined day with a huge |base - phone| is listed, not scored: status.json's worst-day floor, round.json's
+    floors, the strata and the x floor multiples are computed over the other days"""
+    variants = {'cand': ({'profile autoISF_max': PHONE_MAX, 'profile dura_ISF_weight': 0.5}, dict(rise=-0.6, rest=0.0))}
+    sd, study = make_study_with_rows(tmp_path, variants=variants, holdout=HOLDOUT)
+    _rewrite_base(sd, SEARCH[2], rise_emul_U=8.0, agreement_pct=50.0)  # floor_rise 5.0 U on the bad day
+    before = st.aggregate_floor(sd.trials())
+    assert before['floor_rise_U'] == pytest.approx(5.0) and before['agreement_pct'] == 50.0
+    study = sd.load_study(SETTINGS)
+    for d in study.days:
+        if d.day == SEARCH[2]:
+            d.role, d.quarantine_reason = 'quarantined', 'was search: base agreement below the threshold'
+    sd.write_study(study)
+    doc, status = rnd.produce(sd, round_no=1, phase='grid', settings=SETTINGS)
+    assert status.floor['floor_rise_U'] == pytest.approx(0.2) and status.floor['agreement_pct'] == 96.0
+    assert status.days[SEARCH[2]].startswith('quarantined')
+    assert SEARCH[2] not in doc.floors and set(doc.floors) == set(SEARCH[:2])
+    cand = next(v for v in doc.variants if v.verdict != 'base')
+    a = rnd.analyze(sd.load_study(SETTINGS), sd.trials(), SETTINGS)
+    assert a.reports[cand.vhash].floor_multiples['rise_vs_base_U'] == pytest.approx(3.0)   # 0.6 / 0.2, two days
+    assert a.strata['workday'] == SEARCH[:2]                           # the quarantined workday is not a stratum day
+    assert a.reports[cand.vhash].strata_days['workday'] == 2
+    assert M.study_floor({'x': {'floor_rise_U': 1.0}, 'y': {'floor_rise_U': 0.3}}, days=['y']) == {'floor_rise_U': 0.3}
+
+
+def test_a_tie_is_judged_before_the_recommended_verdict():
+    """DESIGN.md 5.3 rule 4 before rule 5: a report that is a tie with base never gets the recommended verdict,
+    with the validate rule or the older recommend() rule"""
+    v = {'search_rank': 1, 'holds': 2, 'holdout_days': 2, 'lodo_min': 1, 'lodo_max': 1, 'lodo_folds': 4,
+         'fold_share': 1.0, 'fold_top': 3, 'holdout_rank': 1, 'inside_floor_days': 2, 'reasons': []}
+    for validation in (v, None):
+        rep = rnd.VariantReport(vhash='a' * 40, variant='x', params={}, verdict='pending', why='', days=SEARCH,
+                                feasible=True, tie_with_base=True, recommended=True, validation=validation)
+        verdict, why = rnd.verdict_of(rep, [], SEARCH)
+        assert verdict == 'tie' and 'indistinguishable from base' in why
+        rep.tie_with_base = False
+        verdict, why = rnd.verdict_of(rep, [], SEARCH)
+        assert verdict == 'recommended' and 'recommended for review' in why
+        if validation:
+            assert 'caveat: inside 2 x floor on 2 of the 2 holding hold-out days' in why
+            assert lint.lint_findings(why, 'line') == []
+
+
+def test_status_and_round_floors_name_their_day_sets():
+    """status.json's floor covers search + hold-out days, round.json's floors the search days only; both say so."""
+    assert 'search AND hold-out' in rnd.__doc__ and 'SEARCH days only' in rnd.__doc__
+    doc = ' '.join(st.aggregate_floor.__doc__.split())
+    assert 'search + hold-out days' in doc and 'cover the scored search days only' in doc
+    text = M.ranking_rule_text('explore', None, {'2026-09-01': {'floor_rise_U': 0.1, 'floor_rest_U': 0.1,
+                                                                'floor_total_U': 0.1, 'floor_loops': 3}},
+                               validate=True)
+    assert 'computed over the 1 scored search day only' in text
