@@ -1,0 +1,151 @@
+<title>Hindcast Night Report</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* layout: one reading column, a verdict band first, then the evidence; lab-notebook register */
+:root {
+  --bg: #f6f7f5; --panel: #ffffff; --fg: #1d2420; --muted: #5b6660; --line: #d7dcd8;
+  --accent: #1f6f78; --accent-ink: #ffffff; --good: #2f7a3e; --warn: #9a6400; --soft: #e9eeec;
+  --display: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --body: "Source Sans 3", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #141917; --panel: #1b2220; --fg: #e6ebe8; --muted: #9aa6a0; --line: #2d3734;
+  --accent: #5fb6bf; --accent-ink: #0f1a1b; --good: #6cc27a; --warn: #e0b14a; --soft: #222b28; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #141917; --panel: #1b2220; --fg: #e6ebe8; --muted: #9aa6a0; --line: #2d3734;
+  --accent: #5fb6bf; --accent-ink: #0f1a1b; --good: #6cc27a; --warn: #e0b14a; --soft: #222b28; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 16px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 48px; }
+main { max-width: 760px; margin: 0 auto; display: grid; gap: 28px; }
+h1, h2, h3 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: 2rem; } h2 { font-size: 1.35rem; } h3 { font-size: 1.05rem; }
+p { margin: 0; max-width: 65ch; }
+header { padding-top: 32px; display: grid; gap: 10px; }
+.eyebrow { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.verdict { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); padding: 18px 20px; display: grid; gap: 10px; }
+.verdict p { max-width: none; }
+section { display: grid; gap: 14px; }
+.cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.card { background: var(--panel); border: 1px solid var(--line); padding: 16px; display: grid; gap: 8px; min-width: 0; }
+.card .key { font-family: var(--mono); font-size: 0.85rem; color: var(--muted); }
+.card .move { font-family: var(--mono); font-size: 1.25rem; font-weight: 500; font-variant-numeric: tabular-nums; }
+.card .move b { color: var(--accent); font-weight: 500; }
+.card .study { font-size: 0.85rem; color: var(--muted); }
+.ev { display: grid; gap: 4px; font-size: 0.92rem; }
+.ev span { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding-top: 4px; font-variant-numeric: tabular-nums; }
+.ev span em { font-style: normal; color: var(--muted); }
+.pill { display: inline-block; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 999px; background: var(--soft); color: var(--fg); }
+.pill.good { background: var(--good); color: #fff; } .pill.warn { background: var(--warn); color: #fff; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; min-width: 560px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; }
+td.num { font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 0.85rem; white-space: nowrap; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+ul { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; } li { max-width: 70ch; }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+.honesty { font-size: 0.9rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
+details { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; }
+summary { cursor: pointer; font-weight: 600; }
+details[open] summary { margin-bottom: 8px; }
+@media (prefers-reduced-motion: no-preference) { details { transition: background 0.2s; } }
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">Hindcast · campaign of 2026-10-17 · 01:35 – 05:00 local · nothing applied anywhere</div>
+  <h1>Hindcast Night Report</h1>
+  <p>Five studies over 37 replayable days of your loop history (Aug 30 – Oct 15), each settings variant replayed loop by loop against the phone's own decisions. Three single-lever changes survive the review rule; the combination study found no stable multi-lever point.</p>
+</header>
+
+<div class="verdict">
+  <div class="eyebrow">For your review</div>
+  <p>All three survivors point the same way: on these days the loop would have asked for <strong>a little less insulin on rises</strong>, with no extra insulin before a recorded low and no breach of the 1 U / 3 h envelope. The replay cannot tell whether that would have been better for glucose; the study pages show where and how much, loop by loop. The honest proposal is one lever at a time, each watched for a week.</p>
+</div>
+
+<section>
+  <h2>Survivors of the review rule</h2>
+  <div class="cards">
+    <article class="card">
+      <span class="pill good">recommended for review</span>
+      <div class="key">profile bgAccel_ISF_weight</div>
+      <div class="move">0.09 → <b>0.08</b></div>
+      <div class="study">Study 1 · tier A · the acceleration term of autoISF, a touch weaker</div>
+      <div class="ev">
+        <span><em>rising loops, per search day</em>−0.26 U</span>
+        <span><em>direction on hold-out days</em>16 / 16</span>
+        <span><em>top-3 in leave-one-day-out folds</em>97 % of 29</span>
+        <span><em>hold-out rank</em>1 of 8</span>
+        <span><em>caveat</em>inside 2× floor on most days</span>
+      </div>
+    </article>
+    <article class="card">
+      <span class="pill good">recommended for review</span>
+      <div class="key">profile activity_scale_factor</div>
+      <div class="move">1.1 → <b>1.25</b></div>
+      <div class="study">Study 2 · tier B · the step counter raises ISF more during activity</div>
+      <div class="ev">
+        <span><em>rising loops, per search day</em>−0.43 U</span>
+        <span><em>direction on hold-out days</em>14 / 16</span>
+        <span><em>top-3 in leave-one-day-out folds</em>100 % of 29</span>
+        <span><em>hold-out rank</em>1 of 8</span>
+        <span><em>largest 3 h difference</em>0.79 U (limit 1 U)</span>
+      </div>
+    </article>
+    <article class="card">
+      <span class="pill good">recommended for review</span>
+      <div class="key">profile pp_ISF_weight</div>
+      <div class="move">0.018 → <b>0.012</b></div>
+      <div class="study">Study 2 · tier B · the post-prandial ISF term, weaker</div>
+      <div class="ev">
+        <span><em>rising loops, per search day</em>−0.34 U</span>
+        <span><em>direction on hold-out days</em>15 / 16</span>
+        <span><em>top-3 in leave-one-day-out folds</em>90 % of 29</span>
+        <span><em>hold-out rank</em>2 of 8</span>
+        <span><em>other loops</em>−0.01 U</span>
+      </div>
+    </article>
+  </div>
+  <p>The rule (DESIGN 5.3 rule 5): feasible on every search and hold-out day, top-3 on at least 80 % of the leave-one-day-out folds, the same direction on at least 80 % of the hold-out days, hold-out rank within the top 5, never a tie with the phone's own settings. Cards with current → proposed values and the VDF rows: <code>software/studies/&lt;study&gt;/cards/</code>.</p>
+</section>
+
+<section>
+  <h2>The five studies</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Study</th><th>Space</th><th>Days</th><th>Result</th><th>Page</th></tr></thead>
+    <tbody>
+      <tr><td>1 oct_tierA</td><td>10 autoISF caps, weights, SMB delivery ratios</td><td class="num">13 search · 16 hold-out</td><td>1 of 8 validated recommended; τ +0.33</td><td><a href="https://claude.ai/artifact/RxYnSWrvAQ3sznvAKMzGB1">open</a></td></tr>
+      <tr><td>2 oct_tierB</td><td>14 secondary autoISF / SMB knobs</td><td class="num">13 · 16</td><td>2 of 8 recommended; 9 dead parameters; τ +0.29</td><td><a href="https://claude.ai/artifact/FwjnFqDXfPrRqizB1qHMRw">open</a></td></tr>
+      <tr><td>3 oct_profile</td><td>ISF, CR, basal scales (unlocked, weak evidence)</td><td class="num">13 · 16</td><td>0 of 6; carb_ratio ×1.3–1.4 leave the envelope on a hold-out day</td><td><a href="https://claude.ai/artifact/82dR3x7qDFLXTuXo9VG87C">open</a></td></tr>
+      <tr><td>4 oct_caps</td><td>max_iob, max_basal (unlocked)</td><td class="num">13 · 16</td><td>max_basal never binds; max_iob ties or infeasible</td><td><a href="https://claude.ai/artifact/LxY1xgwKNsFApt5pErSwXR">open</a></td></tr>
+      <tr><td>5 oct_combined</td><td>7 levers of 1–2 together, lhs 64</td><td class="num">13 · 24</td><td>0 of 8 (2 on 19 hold-out days, then 6–8 of 24 days flipped); τ +0.40</td><td><a href="https://claude.ai/artifact/W6Q8Fao1bbuZNgvTiMdES1">open</a></td></tr>
+    </tbody>
+  </table></div>
+  <p>Everything that asked for <em>more</em> insulin (smb_delivery_ratio 0.25, smb_delivery_ratio_min 0.15, autoISF_min 0.5–0.8, larger carb-ratio scales) either left the envelope on a hold-out day or flipped direction on most days. The combination points of study 5 were recommended on 19 hold-out days and lost it when the five returned September days went the other way: the single levers are the stable finding, the combinations are not.</p>
+</section>
+
+<section>
+  <h2>What changed under the studies tonight</h2>
+  <ul>
+    <li><strong>Reconstruction fidelity.</strong> The phone sometimes decides on a CGM reading one to five readings older than the newest on the server; the replay now pins each loop to the reading the phone used. Overlapping temp-basal records after the Oct 15 reinstall are summed like AAPS does. Oct 15 base agreement 90.4 → 94.5 %, every gate window up, none down.</li>
+    <li><strong>Validate phase.</strong> Top-8 re-run on the hold-out days, leave-one-day-out rank stability, the review rule applied literally. Floors and every "× floor" multiple now cover scored days only, one review order on every surface.</li>
+    <li><strong>Quarantine.</strong> The night gaps on Oct 10, 12, 13, 14 and five September days are gaps with no CGM <em>and</em> no loop (AAPS runs no loop without CGM), so no loop is lost and they no longer quarantine the day. A bridge from the phone's own uploaded glucose was built and measured anyway; it had nothing to bridge and is parked on branch <code>experiment/h714-cgm-bridge</code>.</li>
+    <li><strong>Still quarantined</strong> for base agreement under 94 %: Aug 30, Sep 10, Sep 24 (66.7 %, a short day), Sep 28.</li>
+  </ul>
+  <details>
+    <summary>Where to read more</summary>
+    <ul>
+      <li>Campaign log with every pass and number: <code>docs/hindcast/CAMPAIGN_2026-10-17.md</code></li>
+      <li>Port-vs-phone status and the open fidelity items: <code>docs/hindcast/PORT_VS_PHONE.md</code></li>
+      <li>Backlog epic E10 (H-714 … H-718) for the follow-ups found tonight: <code>docs/hindcast/BACKLOG.md</code></li>
+      <li>Commits on <code>hindcast</code>: cbf3cf0 (wave 4), 1a132ab (review order, cards, quarantine rule) and the log commits; 965 tests pass.</li>
+      <li>No GitHub issue or campaign post was created, as agreed. Nothing was written to the phone, Nightscout or <code>ns_settings.json</code>.</li>
+    </ul>
+  </details>
+</section>
+
+<p class="honesty">Hindcast replays the loop's decisions under other settings over the glucose and insulin history that the phone's own settings produced. It says where and how much the loop would have asked differently; it cannot say what glucose would have done. A variant that boluses earlier is charged for its bolus and for the later ones the phone actually gave, so deltas overstate aggressive settings and understate gentle ones. The base replay disagrees with the phone in about 4 % of loops; differences smaller than that floor are ties. Nothing here changes the phone; settings are for you and your care team to review. This is one person's insulin dosing, not medical advice.</p>
+</main>
