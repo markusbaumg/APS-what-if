@@ -33,6 +33,15 @@ Rules (DESIGN.md section 4.2, backlog H-103):
     serial twin     `run_serial()` evaluates the same specs in this process with the same function, so a test can
                     assert that 2 workers x 4 trials give the metrics of the serial run (they do: the replay is
                     deterministic given the frozen file, the VDF and the settings).
+    waking          `run(specs, wake_s=30, trial_timeout_s=600, on_wake=f)` (what the orchestrator passes) submits at
+                    most `workers` specs at a time with apply_async and waits for the next result with a timeout:
+                    when nothing arrived for `wake_s` seconds, `on_wake()` is called (the Runner's idle(): heartbeat,
+                    STOP, budget, disk; it may raise to stop the run), so a hard-dead worker never blocks the parent
+                    for ever. A trial that has not answered after `trial_timeout_s` comes back as one failed
+                    TrialResult ("no answer within N s"), the pool is terminated (that kills the hung worker) and
+                    started again, and the other trials in flight are submitted again. Without these arguments
+                    `run()` streams through imap_unordered as before. The serial path cannot time out (the trial
+                    runs in the parent).
 
 `run_tasks(ctx, tasks, workers)` is the task-level helper for the orchestrator: it turns study.Task objects into
 TrialSpecs through a replay.ReplayContext, runs the base tasks of each day first (every other trial of a day is
@@ -58,6 +67,8 @@ os.environ.setdefault('PYTHONUTF8', '1')
 from hindcast import replay                                                                 # noqa: E402
 
 DEFAULT_MAX_TASKS_PER_CHILD = 200
+DEFAULT_WAKE_S = 30                                      # the parent wakes at least this often while waiting
+DEFAULT_TRIAL_TIMEOUT_S = 600                            # a trial without an answer after this is failed
 DEFAULT_NICE = 5
 START_METHOD = 'spawn'
 
@@ -151,6 +162,7 @@ class WorkerPool:
         self._pool = None
         self.started_at = None
         self.results = 0
+        self.restarts = 0                                    # pool restarts after a trial timeout
 
     # ---- lifecycle
     def start(self):
@@ -188,15 +200,77 @@ class WorkerPool:
         return False
 
     # ---- work
-    def run(self, specs, ordered=False):
+    def run(self, specs, ordered=False, wake_s=None, trial_timeout_s=None, on_wake=None):
         """Generator over the results of `specs`, in completion order (ordered=True: in submission order, still
-        streamed). Each item is whatever `run(spec)` returned (a TrialResult for the default)."""
+        streamed). Each item is whatever `run(spec)` returned (a TrialResult for the default). With `wake_s`,
+        `trial_timeout_s` or `on_wake` the waking scheduler is used (module docstring, completion order)."""
         self.start()
         specs = list(specs)
         if not specs:
             return
+        if not ordered and (wake_s or trial_timeout_s or on_wake is not None):
+            yield from self._run_waking(specs, wake_s or DEFAULT_WAKE_S, trial_timeout_s, on_wake)
+            return
         mapper = self._pool.imap if ordered else self._pool.imap_unordered
         for res in mapper(worker_run, specs, chunksize=1):
+            self.results += 1
+            yield res
+
+    def _run_waking(self, specs, wake_s, trial_timeout_s, on_wake):
+        """At most `workers` specs in flight (so the submit time is the start time of the trial), results from the
+        pool's callbacks through a queue read with a timeout; see the module docstring."""
+        import queue
+        results = queue.Queue()
+        todo = list(enumerate(specs))
+        inflight = {}                                        # index -> (spec, submitted at)
+        generation = [0]
+
+        def submit(i, spec):
+            g = generation[0]
+            self._pool.apply_async(worker_run, (spec,),
+                                   callback=lambda r, i=i, g=g: results.put((g, i, r, None)),
+                                   error_callback=lambda e, i=i, g=g: results.put((g, i, None, e)))
+            inflight[i] = (spec, time.time())
+
+        while todo or inflight:
+            while todo and len(inflight) < self.workers:
+                submit(*todo.pop(0))
+            wait = float(wake_s)
+            if trial_timeout_s:
+                oldest = min(t for _, t in inflight.values())
+                wait = min(wait, oldest + float(trial_timeout_s) - time.time())
+            try:
+                g, i, res, err = results.get(timeout=max(0.01, wait))
+            except queue.Empty:
+                now = time.time()
+                late = [i for i, (_, t) in inflight.items()
+                        if trial_timeout_s and now - t >= float(trial_timeout_s)]
+                if late:
+                    for i in late:
+                        spec, t = inflight.pop(i)
+                        self.log(f'pool: a trial gave no answer within {trial_timeout_s:g} s; the pool is restarted')
+                        res = _failed_result(spec, TimeoutError(f'no answer within {trial_timeout_s:g} s (worker '
+                                                                f'hung or dead); the pool was restarted'), '')
+                        res.error = res.error.rstrip('\n')
+                        res.seconds = round(now - t, 3)
+                        self.results += 1
+                        yield res
+                    again = [(i, s) for i, (s, _) in sorted(inflight.items())]
+                    inflight.clear()
+                    self.terminate()                         # kills the hung worker with the others
+                    generation[0] += 1                       # late callbacks of the old pool are ignored
+                    self.start()
+                    self.restarts += 1
+                    todo = again + todo
+                    continue
+                if on_wake is not None:
+                    on_wake()
+                continue
+            if g != generation[0] or i not in inflight:
+                continue
+            spec, _ = inflight.pop(i)
+            if err is not None:
+                res = _failed_result(spec, err, '')
             self.results += 1
             yield res
 
@@ -234,9 +308,27 @@ def run_specs(specs, workers=1, run=None, **pool_kw):
         yield from wp.run(specs)
 
 
-def run_tasks(ctx, tasks, workers=1, pool=None, log=None, **pool_kw):
+def _spec_failure(task, exc):
+    """A failed TrialResult for a task whose spec could not be built (the row names the exception)."""
+    params = dict(getattr(task, 'params', None) or {})
+    return replay.TrialResult(status='failed', day=str(getattr(task, 'day', '1970-01-01')), vhash='',
+                              variant=str(getattr(task, 'variant', '') or ''), params=params,
+                              control=getattr(task, 'control', None),
+                              error=f'the trial could not be prepared: {type(exc).__name__}: {exc}'[:1000])
+
+
+def run_tasks(ctx, tasks, workers=1, pool=None, log=None, spec_of=None, wave_filter=None, run_kw=None, **pool_kw):
     """study.Task list through a replay.ReplayContext: base tasks first (their CSVs are what the other trials of a
-    day are compared with), then the rest; yields (task, TrialResult) in completion order after ctx.absorb()."""
+    day are compared with), then the rest; yields (task, TrialResult) in completion order after ctx.absorb().
+
+    `spec_of(task) -> TrialSpec` replaces ctx.spec_for (H-305: the orchestrator routes the sentinel / null controls
+    through study.Guards.control_spec, which keeps the control's CSV for the verdict). The specs of a wave are built
+    when the wave starts, so the second wave sees the base CSVs (and base failures) the first one absorbed. A task
+    whose spec cannot be built (spec_of raises) comes back as one failed result of its own; the wave goes on.
+    `wave_filter(tasks) -> tasks` is called when the second wave starts, after every base result of the first wave
+    was consumed (the orchestrator drops the variants of a day the base agreement just quarantined); a task it drops
+    is not run and not yielded. `run_kw` go to pool.run (wake_s, trial_timeout_s, on_wake)."""
+    spec_of = spec_of or ctx.spec_for
     tasks = list(tasks)
     base = [t for t in tasks if ctx.is_base(t)]
     rest = [t for t in tasks if not ctx.is_base(t)]
@@ -245,12 +337,26 @@ def run_tasks(ctx, tasks, workers=1, pool=None, log=None, **pool_kw):
     if own:
         pool = WorkerPool(workers=workers, frozen_dir=ctx.frozen_dir, log=log, **pool_kw).start()
     try:
-        for wave in (base, rest):
+        for n, wave in enumerate((base, rest)):
+            if n and wave_filter is not None:
+                wave = list(wave_filter(wave))
             if not wave:
                 continue
-            specs = [ctx.spec_for(t) for t in wave]
+            specs, ready, broken = [], [], []
+            for t in wave:
+                try:
+                    specs.append(spec_of(t))
+                    ready.append(t)
+                except Exception as e:                       # one bad task, not a broken wave
+                    broken.append((t, _spec_failure(t, e)))
+            for task, res in broken:
+                log(f'{res.day} {res.variant}: failed before the replay ({res.error})')
+                yield task, res
+            wave = ready
+            if not wave:
+                continue
             if pool is not None:
-                results = pool.run(specs)
+                results = pool.run(specs, **(run_kw or {}))
                 pairs = ((_match(specs, wave, r), r) for r in results)
             else:
                 pairs = zip(wave, run_serial(specs))

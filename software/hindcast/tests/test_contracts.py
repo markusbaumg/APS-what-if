@@ -144,6 +144,50 @@ def test_locked_reason_reads_settings_safety_section():
         s.validate(settings)
 
 
+def test_unlock_needs_a_reason_and_is_honoured_only_with_one():
+    s = make_study()
+    s.space['profile max_iob'] = SpaceParam('float', 3, 12, 0.5)
+    s.space['profile sens'] = SpaceParam('scale', 0.7, 1.4, 0.05, target='profile sens')
+    with pytest.raises(ContractError, match='locked'):
+        s.validate()
+    s.unlocked = ['profile max_iob', 'profile sens']
+    with pytest.raises(ContractError) as e:                  # an unlock without a reason is refused, and does not unlock
+        s.validate()
+    assert 'unlock_reason is empty' in str(e.value) and 'locked key "profile max_iob"' in str(e.value)
+    s.unlock_reason = '  '
+    with pytest.raises(ContractError, match='unlock_reason is empty'):
+        s.validate()
+    s.unlock_reason = 'the person whose data this is asked for a profile and cap study; reviewed by hand'
+    s.validate()
+    s.validate({'safety': {'max_iob': 7.0}})
+    back = Study.from_json(s.to_json())
+    assert back.unlocked == ['profile max_iob', 'profile sens'] and back.unlock_reason == s.unlock_reason
+    assert 'weak evidence' in back.unlock_caveat() and 'profile sens' in back.unlock_caveat()
+    assert make_study().unlock_caveat() is None and 'unlocked' not in make_study().to_dict() or \
+        make_study().to_dict()['unlocked'] == []
+
+
+def test_unlocked_base_vdf_rows_and_never_unlockable_keys():
+    line = 'profile max_iob 9 ### base'
+    assert c.locked_vdf_row_reason(line)
+    assert c.locked_vdf_row_reason(line, unlocked=['profile max_iob']) is None
+    assert c.locked_reason('profile sens', unlocked=['profile sens']) is None
+    assert c.locked_reason('profile sens', unlocked=['profile carb_ratio'])
+    s = make_study(unlocked=['profile dia', 'new_parameter SMBRatio', 'profile dia'], unlock_reason='x')
+    text = '\n'.join(s.problems())
+    assert 'profile dia" cannot be unlocked' in text and 'new_parameter keys cannot be unlocked' in text
+    assert 'listed twice' in text
+
+
+def test_scale_rules_in_the_study():
+    s = make_study()
+    s.space['profile autoISF_min'] = SpaceParam('scale', 0.7, 1.4, 0.05)
+    s.space['profile sens'] = SpaceParam('float', 20, 80, 5)
+    s.unlocked, s.unlock_reason = ['profile sens'], 'x'
+    text = '\n'.join(s.problems())
+    assert 'type scale is for' in text and 'search it as type scale' in text
+
+
 def test_non_profile_groups_and_bad_names_refused():
     assert 'input' in c.locked_reason('iob_data iob')
     assert 'unknown VDF group' in c.locked_reason('nonsense key')

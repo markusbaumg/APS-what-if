@@ -252,9 +252,69 @@ def test_privacy_specifics():
            'predBGs: [120, 118]': 'predBGs', 'UAMpredBGs': 'predBGs', 'asks for 2.65 U more': 'insulin units',
            '1 U more': 'insulin units', 'basal 0.9 U/h': 'insulin units', '1311 loops': 'loop count', '1 311 loops': 'loop count',
            'loops: 1311': 'loop count', '12 more loops': 'loop count', '45 g carbs': 'carbs', '12 % > 180': 'glucose statistic',
-           'pct_lt70 2.1': 'glucose statistic'}
+           'pct_lt70 2.1': 'glucose statistic', 'within 0.5 U of the phone': 'insulin units',
+           'within 2.65 U': 'insulin units', 'differs by 0.05 U': 'insulin units'}
     for s, name in bad.items():
         assert name in {f.name for f in lint_findings(s, kind='issue')}, s
+
+
+# the round-comment leak (gh.round_body posted candidate `why` lines with amounts under the old 0.5 U threshold):
+# every insulin amount, U per day, TDD share, glucose unit and loop count is refused in an issue, however small
+REFUSED_IN_ISSUE = [
+    ('would have asked for 0.06 U less than base per day in the other loops (1.3 x floor)', 'insulin units'),
+    ('would have asked for 0.06 U less than base per day in the other loops (1.3 x floor)', 'U/day'),
+    ('rising loops -0.02 U', 'insulin units'),
+    ('the other loops +0.35 U', 'insulin units'),
+    ('0.3U', 'insulin units'),
+    ('0,3 U', 'insulin units'),
+    ('basal 0.45 U/h', 'insulin units'),
+    ('\u2212 0.4 U', 'insulin units'),
+    ('3 U', 'insulin units'),
+    ('U per day', 'U/day'),
+    ('2.46 U more than base per day', 'U/day'),
+    ('+4.05 U / day', 'U/day'),
+    ('16.4 % of the phone\'s TDD vs base', 'U/day'),
+    ('3 % of total daily insulin', 'U/day'),
+    ('the total daily dose', 'U/day'),
+    ('3.6 mmol', 'mmol'),
+    ('3.6mmol/L', 'mmol'),
+    ('65mg/dl', 'mg/dl'),
+    ('65 mg/dL', 'mg/dl'),
+    ('BG 65 mgdl', 'mg/dl'),
+    ('114 loops changed', 'loop count'),
+    ('loops changed: 114', 'loop count'),
+    ('loops differ in 12', 'loop count'),
+    ('1 loop', 'loop count'),
+    ('+12 loops', 'loop count'),
+    ('12 of 1311 loops', 'loop count'),
+    ('1,311 loops', 'loop count'),
+    ('12 other loops', 'loop count'),
+    ('loop count 1311 differs from base 1310', 'loop count'),
+    ('a loop count of 1311', 'loop count'),
+]
+
+
+@pytest.mark.parametrize('text,name', REFUSED_IN_ISSUE, ids=['%d-%s' % (i, n) for i, (_, n) in enumerate(REFUSED_IN_ISSUE)])
+def test_issue_privacy_refuses_every_quantity(text, name):
+    assert name in {f.name for f in lint_findings(text, kind='issue')}, text
+
+
+ALLOWED_IN_ISSUE = [
+    'would have asked for less insulin than base in rising loops (2.9 x the floor) over 1 day; the other loops: less',
+    'asked for less insulin in rising loops, 2.9 x the floor',
+    'UAM', '2 UAM loops differ', 'enable_UAM true', 'the UAM prediction',
+    'SMB within 0.05 U', 'TBR rate within 0.05 U/h', 'insulinReq within 0.05 U >= 99 %',
+    'max_single_smb_U', 'floor_rise_U', 'rise_vs_base_U and rest_vs_base_U', 'parameter U', 'the U/h unit is in the artifact',
+    'the 09:00 loop differs', 'the 2026-09-06T09:00:37Z loop differs, see the artifact', 'the loop differs',
+    'loops differ from base, see the artifact', 'cap binding 9.7 % of loops', 'agreement 97.483 %',
+    'autoISF_max 1.3 -> 1.5', 'over 1 day', '240 trials done', 'smb_delivery_ratio_bg_range 36',
+    'the loop would have disabled SMB in N more loops', 'commolution',
+]
+
+
+@pytest.mark.parametrize('text', ALLOWED_IN_ISSUE)
+def test_issue_privacy_false_positives(text):
+    assert lint_findings(text, kind='issue') == [], text
 
 
 def test_sample_issue_passes():
@@ -332,3 +392,15 @@ def test_cli(tmp_path):
     assert r.returncode == 1 and 'safer' in r.stderr
     r = subprocess.run([sys.executable, '-m', 'hindcast.lint', '--markdown'], capture_output=True, text=True, env=env, cwd=SOFTWARE_DIR)
     assert r.returncode == 0 and r.stdout.startswith('# Hindcast vocabulary')
+
+
+@pytest.mark.parametrize('text', ['padding-bottom: env(safe-area-inset-bottom);',
+                                  'padding: env(SAFE-AREA-INSET-TOP) 16px', 'the safe-area inset of the phone'])
+def test_css_safe_area_is_not_a_safety_claim(text):
+    assert lint_findings(text, 'line') == []
+
+
+@pytest.mark.parametrize('text', ['this is safer', 'a safe setting', 'the safest cap', 'safe-ish values',
+                                  'Safe.', 'safer-area'])
+def test_safe_words_are_still_refused(text):
+    assert [f.name for f in lint_findings(text, 'line')] == ['safer']

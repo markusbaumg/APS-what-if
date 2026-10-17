@@ -5,25 +5,33 @@ cli.py  -  `hc`, the Hindcast command (DESIGN.md section 4.6)
 
     hc study new <name> --days 2026-09-01..09-07 [--holdout 2026-09-05] [--tag 2026-09-05=weekend,sport]
                         --param "profile autoISF_max" 1.1:1.8:0.05 | --from-grid variants/grid_autoISF.json
-                        | --space-file hindcast/spaces/autoisf_tierA.json | --tier A
+                        | --space-file hindcast/spaces/autoisf_tierA.json | --tier A|B|C|S
+                        [--unlock "profile sens" ["profile carb_ratio" ...]] [--unlock-reason TEXT]
                         [--constraint "profile a <= profile b"] [--phase oaat:points=5] [--question explore|earlier|gentler]
                         [--base-vdf file.vdf] [--hours 6] [--workers 4] [--sentinel-every 25] [--note text]
-    hc study run    <name> [--hours H] [--until HH:MM] [--workers N] [--on-stale stop|reeval]
+    hc study run    <name> [--hours H] [--until HH:MM] [--workers N] [--batch N] [--on-stale stop|reeval] [--grow]
+                           [--pred] [--dry] [--no-report]
     hc study status <name> [--json]
     hc study stop   <name>
     hc check [--refreeze] [--no-live] [--write-golden --reason TEXT]          regression gate (H-902)
     hc replay <day> ...     hc search <name>     hc round <name>                one replay, the search plan, the verdict step
     hc report <name> | hc serve <name> | hc explain <name> <iso> | hc card <name>
-    hc gh ... | hc lint ... | hc freeze ... | hc warm ... | hc export (not built yet, H-504)
+    hc gh ... | hc lint ... | hc freeze ... | hc warm ... | hc skill install|vocabulary|lint|checkin
+    hc export (not built yet, H-504)
 
 Dispatcher only: the study commands live in study.py (H-301) and space.py (H-303); every other command is handed
 to its module when that module exists in this package and skipped with "not built yet (H-nnn)" and exit code 1
 when it does not, so the command set grows without touching this file. A module takes part by exposing
 `register(subparsers)` (it adds its own subparsers whose `func(args) -> int` the dispatcher calls) or a
 `main(argv) -> int` (forwarded the remaining arguments). `hc study run` hands over to `hindcast.orchestrator`
-(H-305, `run_study(study_dir, args) -> exit code`) when that exists; until then it runs the study's queue through
-`study.dry_evaluate` (every task recorded as blocked, nothing replayed) so that lock, STATE.json, STOP and resume
-are exercised.
+(H-305, `run_study(study_dir, args) -> exit code`); `--dry` (or an orchestrator that cannot be imported) runs the
+study's queue through `study.dry_evaluate` instead (every task recorded as blocked, nothing replayed) so that lock,
+STATE.json, STOP and resume are exercised.
+
+Unlocks (space.py, contracts.py): `--tier C` (profile ISF / CR / basal scales) and `--tier S` (the safety caps)
+need `--unlock KEY [KEY ...] --unlock-reason TEXT`; without it `hc study new` exits 3 naming the locked keys. The
+keys and the reason are stored in study.json (Study.unlocked / Study.unlock_reason) and the weak-evidence caveat
+(Study.unlock_caveat) is printed after the study is created.
 
 Exit codes: 0 finished/stopped, 2 stopped by a guard, 3 configuration refused (locked key, lock held, bad study),
 1 command not available. The honesty statement (DESIGN.md section 3) closes every human-readable output.
@@ -31,6 +39,7 @@ Exit codes: 0 finished/stopped, 2 stopped by a guard, 3 configuration refused (l
 import argparse
 import datetime
 import importlib
+import inspect
 import os
 import sys
 
@@ -62,6 +71,7 @@ LAZY_COMMANDS = {
     'export':  (('hindcast.export',), 'H-504', 'db rows / tier-1 JSON for the skill'),
     'gh':      (('hindcast.gh',), 'H-601', 'GitHub labels, backlog issues, campaign issue and round comments'),
     'lint':    (('hindcast.lint',), 'H-205', 'the may / may-not vocabulary and privacy lint'),
+    'skill':   (('hindcast.skill_install',), 'H-501', 'the Claude skill: install, vocabulary, lint, one-line check-in'),
 }
 
 
@@ -81,20 +91,24 @@ def _add_common(p):
                    help='ns_settings.json (the phone values and the live safety lock list)')
 
 
-def build_space(args, settings):
-    """--param / --from-grid / --space-file / --tier -> (space dict, constraints, phases_from_grid)."""
+def build_space(args, settings, metas=None):
+    """--param / --from-grid / --space-file / --tier -> (space dict, constraints, phases_from_grid). `metas` (a list)
+    receives the meta dict of every space file loaded (space.load_space_file), for the notice and the unlock check."""
     space, constraints, phases = {}, [], []
+    metas = metas if metas is not None else []
     if getattr(args, 'tier', None):
         path = spc.DEFAULT_SPACE_FILES.get(args.tier.upper())
         if not path:
             raise StudyError(f'--tier {args.tier}: known tiers are {", ".join(spc.DEFAULT_SPACE_FILES)}')
-        s, c, _ = spc.load_space_file(path, settings)
+        s, c, meta = spc.load_space_file(path, settings)
         space.update(s)
         constraints += c
+        metas.append(meta)
     if getattr(args, 'space_file', None):
-        s, c, _ = spc.load_space_file(args.space_file, settings)
+        s, c, meta = spc.load_space_file(args.space_file, settings)
         space.update(s)
         constraints += c
+        metas.append(meta)
     if getattr(args, 'from_grid', None):
         s, phase, _ = spc.load_grid_file(args.from_grid)
         space.update(s)
@@ -109,12 +123,99 @@ def build_space(args, settings):
     return space, constraints, phases
 
 
+def unlock_args(args):
+    """--unlock (repeatable, one or more keys each) / --unlock-reason -> (keys, reason). The union in order, without
+    duplicates; a reason is required (non-empty after stripping) whenever a key is given (StudyError, exit 3)."""
+    keys = []
+    for group in getattr(args, 'unlock', None) or []:
+        for k in (group if isinstance(group, (list, tuple)) else [group]):
+            k = ' '.join(str(k).split())
+            if k and k not in keys:
+                keys.append(k)
+    reason = (getattr(args, 'unlock_reason', None) or '').strip()
+    if keys and not reason:
+        raise StudyError('--unlock ' + ', '.join(f'"{k}"' for k in keys) + ' needs --unlock-reason TEXT '
+                         '(an unlock is explicit and audited: say why)')
+    if reason and not keys:
+        raise StudyError('--unlock-reason without --unlock: name the keys to unlock')
+    for k in keys:
+        contracts.split_param(k)
+    return keys, (reason or None)
+
+
+def _needs_unlock(metas, space, settings, unlocked):
+    """The searched keys that are locked and not in `unlocked`, plus the keys of a space file that says
+    `_requires_unlock` when nothing at all is unlocked."""
+    names = [n for n in space if contracts.locked_reason(n, settings, unlocked)]
+    if not unlocked:
+        for meta in metas:
+            if meta.get('requires_unlock'):
+                names += [n for n in (meta.get('locked_keys') or []) if n not in names]
+    return names
+
+
+def _new_study_unlocked(args, days, space, constraints, phases, holdout, tags, base_lines, settings, extra,
+                        unlocked, unlock_reason):
+    """study.new_study with an explicit unlock, for a study.py whose new_study() does not take one yet: the same
+    checks (ParamSpace with the unlock, the base VDF rows, Study.validate) and the same study.json."""
+    sd = st.StudyDir(st.resolve_study_dir(args.name, args.studies_dir))
+    if sd.exists():
+        raise StudyError(f'{sd.study_json} exists; choose another name (studies are never overwritten)')
+    unknown = sorted((set(tags) | set(holdout)) - set(days))
+    if unknown:
+        raise StudyError(f'--holdout/--tag name days outside --days: {", ".join(unknown)}')
+    study_days = [st.StudyDay(day=d, role='holdout' if d in set(holdout) else 'search', tags=list(tags.get(d, [])))
+                  for d in days]
+    try:
+        ps = spc.ParamSpace(space, constraints, settings=settings, unlocked=unlocked, unlock_reason=unlock_reason)
+    except spc.LockedKeyError as e:
+        raise StudyError(str(e)) from None
+    except contracts.ContractError as e:
+        raise StudyError(f'space refused: {e}') from None
+    shadow = spc.vdf_rows_set_searched(base_lines, ps.names)
+    if shadow:
+        raise StudyError('base VDF rows set searched parameters (the search would be shadowed): ' + '; '.join(shadow))
+    locked = [f'"{line.strip()}": {reason}' for line, reason in
+              ((line, contracts.locked_vdf_row_reason(line, settings, unlocked)) for line in base_lines) if reason]
+    if locked:
+        raise StudyError('base VDF rows set locked keys (refused for unattended runs, DESIGN.md section 3):\n  '
+                         + '\n  '.join(locked))
+    for name_, p in ps.space.items():
+        if p.phone is None:
+            pv = spc.phone_value(name_, settings)
+            if pv is not None:
+                p.phone = pv
+    budget = contracts.Budget(hours=args.hours, workers=args.workers)
+    study = contracts.Study.new(sd.name, study_days, ps.space, source=args.source, question=args.question,
+                                phases=list(phases or [contracts.Phase(kind='oaat', points=5)]), budget=budget,
+                                constraints=[c.tokens() for c in ps.constraints], base_vdf_lines=list(base_lines),
+                                settings_path=args.settings, notes=list(args.note or []), unlocked=list(unlocked),
+                                unlock_reason=unlock_reason, **extra)
+    try:
+        study.validate(settings)
+    except contracts.ContractError as e:
+        raise StudyError(f'study refused: {e}') from None
+    os.makedirs(sd.path, exist_ok=True)
+    sd.write_study(study)
+    return sd
+
+
 def cmd_study_new(args):
     settings = spc.load_settings(args.settings)
+    unlocked, unlock_reason = unlock_args(args)
+    metas = []
     try:
-        space, constraints, phases = build_space(args, settings)
+        space, constraints, phases = build_space(args, settings, metas)
     except (contracts.ContractError, OSError, ValueError) as e:
         raise StudyError(str(e)) from None
+    notice = [line for meta in metas for line in spc.space_file_notice(meta)]
+    needed = _needs_unlock(metas, space, settings, unlocked)
+    if needed:
+        for line in notice:
+            _err(line)
+        raise StudyError('locked keys need an explicit unlock: ' + ', '.join(f'"{k}"' for k in needed)
+                         + '\n  give --unlock ' + ' '.join(f'"{k}"' for k in needed) + ' --unlock-reason TEXT'
+                         ' (a decision-level replay is weak evidence for these keys)')
     phases += [st.parse_phase(p) for p in args.phase or []]
     days = st.parse_days(args.days)
     holdout = st.parse_days(args.holdout) if args.holdout else []
@@ -126,11 +227,23 @@ def cmd_study_new(args):
     extra = {}
     if args.sentinel_every is not None:
         extra['sentinel_every'] = args.sentinel_every
-    sd = st.new_study(args.name, days, space, constraints, phases or None, holdout, tags, args.question, base_lines,
-                      settings=settings, settings_path=args.settings, studies_dir=args.studies_dir, source=args.source,
-                      budget={'hours': args.hours, 'workers': args.workers}, notes=args.note or [], **extra)
+    if unlocked and 'unlocked' not in inspect.signature(st.new_study).parameters:
+        sd = _new_study_unlocked(args, days, space, constraints, phases, holdout, tags, base_lines, settings, extra,
+                                 unlocked, unlock_reason)
+    else:
+        if unlocked:
+            extra.update(unlocked=unlocked, unlock_reason=unlock_reason)
+        sd = st.new_study(args.name, days, space, constraints, phases or None, holdout, tags, args.question,
+                          base_lines, settings=settings, settings_path=args.settings, studies_dir=args.studies_dir,
+                          source=args.source, budget={'hours': args.hours, 'workers': args.workers},
+                          notes=args.note or [], **extra)
     study = st.Study.load(sd.study_json)
     _out(f'created {sd.study_json}')
+    for line in notice:
+        if not (study.unlocked and line.startswith('this space needs an explicit unlock')):
+            _out('  ' + line)
+    if study.unlocked:
+        _out(f'  unlocked: {", ".join(study.unlocked)} (reason: {study.unlock_reason})')
     _out(f'  {len(study.days)} day(s): ' + ', '.join(f'{d.day} ({d.role}{", " + ",".join(d.tags) if d.tags else ""})' for d in study.days))
     _out(f'  {len(study.space)} parameter(s): ' + ', '.join(study.space))
     for c in study.constraints:
@@ -138,6 +251,10 @@ def cmd_study_new(args):
     _out('  phases: ' + ', '.join(p.kind + (f'({p.points} levels)' if p.points else f'({p.n})' if p.n else '') for p in study.phases))
     _out(f'  question: {study.question}   budget: {study.budget.hours} h, {study.budget.workers} worker(s)')
     _out(f'  code_sha {contracts.short(study.code_sha)}   settings_sha {contracts.short(study.settings_sha)}')
+    caveat = study.unlock_caveat()
+    if caveat:
+        _out('')
+        _out(caveat)
     _out('')
     _out(contracts.HONESTY_STATEMENT)
     return EXIT_OK
@@ -174,15 +291,22 @@ def cmd_study_run(args):
     sd = st.StudyDir(st.resolve_study_dir(args.name, args.studies_dir))
     settings = spc.load_settings(args.settings)
     study = sd.load_study(settings)                          # a locked key in study.json is refused here (exit 3)
-    try:
-        orchestrator = importlib.import_module('hindcast.orchestrator')
-    except ImportError:
-        orchestrator = None
+    orchestrator = None
+    if not getattr(args, 'dry', False):
+        try:
+            orchestrator = importlib.import_module('hindcast.orchestrator')
+        except ImportError:
+            orchestrator = None
     if orchestrator is not None and hasattr(orchestrator, 'run_study'):
         return int(orchestrator.run_study(sd, args))
-    _out(f'{sd.name}: the orchestrator (backlog H-305) is not built yet; nothing is replayed. The study queue is run '
-         f'through the dry evaluator: every (variant, day) is recorded as blocked, the lock, STATE.json, STOP and '
-         f'resume rules are exercised, and a later real run re-evaluates the blocked rows.')
+    if getattr(args, 'dry', False):
+        _out(f'{sd.name}: --dry: nothing is replayed. The study queue is run through the dry evaluator: every '
+             f'(variant, day) is recorded as blocked, the lock, STATE.json, STOP and resume rules are exercised, and '
+             f'a later real run re-evaluates the blocked rows.')
+    else:
+        _out(f'{sd.name}: the orchestrator (backlog H-305) could not be imported; nothing is replayed. The study queue '
+             f'is run through the dry evaluator: every (variant, day) is recorded as blocked, the lock, STATE.json, '
+             f'STOP and resume rules are exercised, and a later real run re-evaluates the blocked rows.')
     tasks = st.study_tasks(study, settings)
     runner = st.Runner(sd, study, settings=settings, budget_s=budget_seconds(args, study), log=_out)
     result = runner.run(tasks, st.dry_evaluate)
@@ -230,7 +354,12 @@ def register_study(subparsers):
                    help='a searched parameter: low:high:step (float / int), bool, or a comma list of values')
     n.add_argument('--from-grid', help='import an emulator_optimize grid JSON as a grid (or oaat) phase')
     n.add_argument('--space-file', help='a spaces/*.json file (see hindcast/spaces/)')
-    n.add_argument('--tier', help='the documented default space: A or B')
+    n.add_argument('--tier', help='a documented default space: A, B (autoISF), C (profile ISF / CR / basal scales, '
+                                  'needs --unlock) or S (safety caps, needs --unlock)')
+    n.add_argument('--unlock', action='append', nargs='+', metavar='KEY',
+                   help='lift the lock for these "<array> <item>" keys in this study only (repeatable; audited in '
+                        'study.json; weak evidence)')
+    n.add_argument('--unlock-reason', default=None, metavar='TEXT', help='why the keys are unlocked (required with --unlock)')
     n.add_argument('--constraint', action='append', help='ordering chain, e.g. "profile smb_delivery_ratio_min <= profile smb_delivery_ratio"')
     n.add_argument('--phase', action='append', help='oaat[:points=5] | grid | lhs:n=24[,seed=1] | halving:rungs=2/5/all | validate:top=8,days=holdout')
     n.add_argument('--question', choices=contracts.QUESTIONS, default='explore')
@@ -249,7 +378,18 @@ def register_study(subparsers):
     r.add_argument('--until', help='stop at HH:MM local time')
     r.add_argument('--workers', type=int, default=None)
     r.add_argument('--on-stale', choices=('stop', 'reeval'), default='stop')
-    r.add_argument('--pred', action='store_true', help='keep predictions for every trial (orchestrator option)')
+    r.add_argument('--pred', action='store_true', help='write the prediction files for every trial')
+    r.add_argument('--batch', type=int, default=None, help='at most N tasks per round (shorter reporting cadence)')
+    r.add_argument('--grow', action='store_true', help='freeze --new (offline) at most hourly between rounds')
+    r.add_argument('--dry', action='store_true', help='replay nothing: record every task as blocked (exercises '
+                                                       'lock, STATE.json, STOP and resume)')
+    r.add_argument('--no-report', action='store_true', help='do not render report/index.html on exit')
+    r.add_argument('--trial-timeout', type=float, default=None, metavar='SECONDS',
+                   help='a trial without an answer after this many seconds is failed and the pool restarted '
+                        '(default 600)')
+    r.add_argument('--frozen-dir', default=None, help=argparse.SUPPRESS)
+    r.add_argument('--min-disk-mb', type=float, default=None, help=argparse.SUPPRESS)
+    r.add_argument('--window', nargs=2, default=None, help=argparse.SUPPRESS)     # tests: ISO bounds, not whole days
     _add_common(r)
     r.set_defaults(func=cmd_study_run)
 

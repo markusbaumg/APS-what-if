@@ -35,15 +35,35 @@ lint refused, 3 refused or not checked.
 | `hc check` | `check.py` | regression gate: base replay of 2026-09-06 06-09Z, frozen vs live-day, against `tests/golden/` |
 | `hc search <name>` | `search.py` | the search plan: phases, pending tasks, parameters frozen as not testable |
 | `hc round <name>` | `round.py` | the verdict step: `round.json` and `status.json` from `trials.jsonl` |
-| `hc report <name>` / `hc serve <name>` | `report.py` | render `studies/<name>/report/index.html`; serve it on localhost |
+| `hc report <name>` / `hc serve <name>` | `report.py` | render `studies/<name>/report/index.html` (normal, `--single-file`, `--artifact`); serve it on localhost. The page names its source "Nightscout" only: the Nightscout URL and hostname are scrubbed from the embedded JSON and refused in the rendered HTML |
 | `hc explain <name> <iso>` | `explain.py` | the drill-down of one loop as text (decision pair, factor chain, reason diff) |
 | `hc card <name>` | `cards.py` | linted candidate cards `cards/<rank>.md` plus `.vdf` |
 | `hc gh labels\|issues\|epics\|campaign\|round` | `gh.py` | GitHub labels, backlog issues, the campaign issue and one comment per round |
 | `hc lint` | `lint.py` | the may / may-not vocabulary and privacy lint |
+| `hc skill install\|vocabulary\|lint\|checkin` | `skill_install.py` | the Claude skill: install it to `~/.claude/skills/hindcast/` (user scope; `--project` for the repository's `.claude/skills/`), regenerate `skill/references/vocabulary.md`, lint the skill text, the one-line check-in |
 | `hc export` | - | not built yet (H-504) |
 
 The worker pool (`pool.py`) and the day quarantine (`days.py`) have no command of their own; the
 orchestrator (H-305) drives them.
+
+## Unlocking locked keys
+
+The DESIGN.md section 3 lock (the `safety` section, `profile sens`, `carb_ratio`, `current_basal`, `dia`, every
+`new_parameter` key) stays the default: `hc study new` refuses such a key with exit code 3. A study may lift
+it only explicitly and per study: `study.json` lists the keys in `unlocked` and says why in `unlock_reason`
+(required and non-empty; `Study.validate()` refuses an unlock without one, and an unlock without a reason
+unlocks nothing). On the command line: `hc study new <name> ... --tier C --unlock "profile sens" "profile
+carb_ratio" "profile current_basal" --unlock-reason TEXT` (`--unlock` is repeatable, the union is used);
+`--tier C` or `--tier S` without the unlock exits 3 naming the locked keys, and a created study prints the
+space file's evidence line and the weak-evidence caveat. `new_parameter` keys, non-profile groups and `profile dia` (it enters through the recorded
+IOB) can never be unlocked. Two space files need an unlock: `spaces/profile_tierC.json` searches ISF, CR, basal
+(and the profile percentage, which is not locked) as type `scale`, a multiplier of the value each loop
+recorded, with phone value 1.0 = no VDF row (`profile sens profile['sens']*1.1`; current_basal re-rounded to the
+0.05 pump step); `spaces/safety_tierS.json` searches the caps `max_iob` and `max_basal`, where a study only
+reports how often the cap binds. Both carry `"_evidence": "weak: decision-level replay, no glucose
+response"`: the replay keeps the glucose the phone's own profile produced, so it cannot judge a different
+profile or cap, only how the decisions would have moved. Every surface of an unlocked study quotes
+`Study.unlock_caveat()`; every proposal is reviewed by hand.
 
 ## Running the tests
 

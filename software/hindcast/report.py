@@ -11,7 +11,7 @@ report.py  -  `hc report` and `hc serve`: the study page generator (backlog H-40
 What it writes (default out = studies/<study>/report/):
     index.html                  one page: templates/page.html filled through string.Template with the CSS, theme.js,
                                 page.js, every templates/views/*.js (later views add a file there) and the tier-1 JSON
-                                (export.build_tier1 + build_page_data: overview, assumed, parameters, page) in
+                                (export.build_tier1 + build_page_data: overview, assumed, parameters, scenarios, drilldown, page) in
                                 <script type="application/json" id="tier1">
     series/<day>/<vhash>.json   the tier-2 documents the trials name in `files`, copied next to the page when they live
     series/<day>/orig.json      elsewhere (the fixture keeps them at the study root, the replay under report/); the
@@ -176,6 +176,69 @@ def assumed_keys(settings):
     """{key: text} of the `_assumed` section of ns_settings.json (values inferred rather than exported)."""
     a = (settings or {}).get('_assumed') or {}
     return {str(k): (v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)) for k, v in a.items()}
+
+
+SOURCE_LABEL_NS = 'Nightscout'
+SOURCE_LABEL_LOGS = 'AAPS logfiles'
+
+
+def source_label(source):
+    """What the page shows as the data source: 'Nightscout' for a Nightscout study (never its URL or hostname, the
+    page is meant to be shared, DESIGN.md section 3), 'AAPS logfiles' otherwise (never the local path)."""
+    s = str(source or '').strip().lower()
+    if not s or s.startswith('ns:') or '://' in s:
+        return SOURCE_LABEL_NS
+    return SOURCE_LABEL_LOGS
+
+
+def _host_of(url):
+    url = str(url or '').strip()
+    if '://' not in url:
+        return ''
+    return (urllib.parse.urlsplit(url).hostname or '').lower()
+
+
+def private_strings(study=None, settings=None):
+    """The Nightscout URLs and hostnames no rendered page may carry: the study's source/host and the settings'
+    nightscout.url, longest first (so a URL is replaced before the hostname inside it)."""
+    out = set()
+    url = str(((settings or {}).get('nightscout') or {}).get('url') or '').strip()
+    for u in (url, getattr(study, 'source', '') if study is not None else ''):
+        u = str(u or '').strip()
+        if '://' in u:
+            out.add(u.rstrip('/'))
+            if _host_of(u):
+                out.add(_host_of(u))
+    host = str(getattr(study, 'host', '') or '').strip() if study is not None else ''
+    if host:
+        out.add(host.lower())
+    return sorted((s for s in out if s), key=len, reverse=True)
+
+
+def _scrub_text(text, private):
+    for p in private:
+        rx = re.compile(r'(?:https?://)?' + re.escape(p) + r'(?:/[^\s"\'<>)]*)?', re.IGNORECASE)
+        text = rx.sub(SOURCE_LABEL_NS, text)
+    return text
+
+
+def scrub_private(obj, private):
+    """`obj` with every URL / hostname of `private` replaced by 'Nightscout' (keys and string values, recursively)."""
+    if not private:
+        return obj
+    if isinstance(obj, str):
+        return _scrub_text(obj, private)
+    if isinstance(obj, dict):
+        return {scrub_private(k, private): scrub_private(v, private) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [scrub_private(v, private) for v in obj]
+    return obj
+
+
+def private_problems(page_html, private):
+    """The private strings still present in a rendered page (case-insensitive); empty = fine."""
+    low = page_html.lower()
+    return [p for p in private if p.lower() in low]
 
 
 def glucose_units(settings):
@@ -609,9 +672,128 @@ def parameter_space(study, rows, rounds):
     }
 
 
+# ----------------------------------------------------------------------------- scenario comparison (H-404)
+
+SCENARIO_SLOTS = 3                                         # categorical slots 1-3; the picker refuses a fourth
+IOB_TOLERANCE_FACTOR = 1.3                                 # DESIGN.md 6: the emulated iobTH and its 130 % tolerance
+CAP_KEYS = ('autoISF_max', 'autoISF_min')
+
+
+def _phone_value(study, settings, key):
+    """The phone's value of profile <key>: the study space's `phone` when the key is searched, else the autoisf
+    section of ns_settings.json, else None."""
+    sp = (study.space or {}).get('profile ' + key)
+    if sp is not None and sp.phone is not None:
+        return sp.phone
+    for section in ('autoisf', 'profile'):
+        v = ((settings or {}).get(section) or {}).get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return v
+    return None
+
+
+def _short_label(params, phone_values):
+    """'autoISF_max 1.5, dura_ISF_weight 0.5' from the parameters that differ from the phone ('' for none)."""
+    parts = []
+    for k, v in sorted((params or {}).items()):
+        if phone_values.get(k) is not None and phone_values.get(k) == v:
+            continue
+        name = re.sub(r'^(profile|new_parameter|state)\s+', '', k)
+        parts.append(f'{name} {v}')
+    return ', '.join(parts)
+
+
+def scenario_index(study, rows, collected, days_meta, settings, ps=None):
+    """The data of the Scenarios view (H-404), the per-loop numbers stay in tier 2:
+    {days[{day, role, tags, confounders, orig (page path or None)}], entities[{vhash, variant, label, base, params,
+     position, verdict, caps{autoISF_max, autoISF_min}, series{day: page path}}], phone{caps}, defaults[{vhash, day}],
+     slots, smb_tol_U, iob_tolerance, units{t, insulin, tbr}}.
+    An entity of the page is a (variant, day) pair; `series` names the days a variant has a series document for."""
+    ps = ps or {}
+    space = study.space or {}
+    phone_values = {k: sp.phone for k, sp in space.items()}
+    phone_caps = {k: _phone_value(study, settings, k) for k in CAP_KEYS}
+    paths = {}
+    for dest, (_src, kind, day, vh) in collected.items():
+        if kind == 'series':
+            paths.setdefault(vh, {})[day] = dest
+        elif kind == 'orig':
+            paths.setdefault(None, {})[day] = dest
+    pos = {v['vhash']: v for v in ps.get('variants') or []}
+    by_vh = {}
+    for r in rows:
+        if r.status != 'done' or r.control == 'sentinel':
+            continue
+        is_base = r.control == 'base' or r.vhash == contracts.BASE_VHASH
+        e = by_vh.setdefault(r.vhash, {'vhash': r.vhash, 'variant': r.variant, 'base': is_base,
+                                       'params': dict(r.params or {})})
+        e['base'] = e['base'] or is_base
+    entities = []
+    for vh, e in by_vh.items():
+        p = pos.get(vh) or {}
+        caps = {}
+        for k in CAP_KEYS:
+            v = (e['params'] or {}).get('profile ' + k)
+            caps[k] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else phone_caps[k]
+        label = 'base (the phone\'s settings, replayed)' if e['base'] else (_short_label(e['params'], phone_values)
+                                                                            or e['variant'] + ' (the phone\'s values)')
+        entities.append({'vhash': vh, 'variant': e['variant'], 'label': label, 'base': e['base'], 'params': e['params'],
+                         'position': p.get('position'), 'verdict': 'base' if e['base'] else p.get('verdict'),
+                         'caps': caps, 'series': dict(sorted(paths.get(vh, {}).items()))})
+    entities.sort(key=lambda x: (not x['base'], x['position'] if x['position'] is not None else 10 ** 6, x['variant']))
+    days = []
+    for d in study.days:
+        meta = (days_meta or {}).get(d.day) or {}
+        days.append({'day': d.day, 'role': d.role, 'tags': list(d.tags or []),
+                     'confounders': list(meta.get('confounders') or []), 'orig': (paths.get(None) or {}).get(d.day)})
+    with_orig = [d['day'] for d in days if d['orig']]
+    search = [d['day'] for d in days if d['orig'] and d['role'] == 'search']
+    first_day = (search or with_orig or [None])[0]
+    defaults = []
+    if first_day:
+        order = [vh for vh in (ps.get('order') or []) if first_day in (paths.get(vh) or {})]
+        order += [e['vhash'] for e in entities if not e['base'] and e['vhash'] not in order and first_day in e['series']]
+        base = [e['vhash'] for e in entities if e['base'] and first_day in e['series']]
+        for vh in order[:1] + base[:1]:
+            defaults.append({'vhash': vh, 'day': first_day})
+        if not defaults and order:
+            defaults.append({'vhash': order[0], 'day': first_day})
+    return {'days': days, 'entities': entities, 'phone': {'caps': phone_caps}, 'defaults': defaults,
+            'slots': SCENARIO_SLOTS, 'smb_tol_U': hm.TOL_U, 'iob_tolerance': IOB_TOLERANCE_FACTOR,
+            'units': {'t': export.UNITS['t'], 'insulin': export.UNITS['insulin'], 'tbr': export.UNITS['tbr']}}
+
+
+GUARD_MMOL = (3.8, 5.4)                                    # DESIGN.md 6: the guard hairlines of the prediction fans
+FACTOR_TOL = 0.005                                         # factors are shown with 2 dp: a visible difference
+TBR_TOL = export.CHANGE_TOL                                # U/h, the same 0.05 as `changed` in the series
+
+
+def drilldown_index(study, collected):
+    """The data of the Loop drill-down (H-405); the per-loop numbers stay in tier 2:
+    {pred{day: {vhash: page path}}, pred_text{day: {vhash: path}}, pred_orig{day: path}, pred_orig_text{day: path},
+     orig{day: path}, series{day: {vhash: path}}, base_vhash, guards_mgdl[2], guards_mmol[2], low_mgdl, low_follow_s,
+     tol{insulin, tbr, factor}, match_s}.
+    Prediction documents exist for finalists only, so the page asks this index before it fetches one: a missing
+    entry is 'not written for this variant', not a load failure."""
+    out = {'pred': {}, 'pred_text': {}, 'pred_orig': {}, 'pred_orig_text': {}, 'orig': {}, 'series': {}}
+    for dest, (_src, kind, day, vh) in sorted(collected.items()):
+        if kind in ('pred', 'pred_text', 'series'):
+            out[kind].setdefault(day, {})[vh] = dest
+        elif kind in ('pred_orig', 'pred_orig_text', 'orig'):
+            out[kind][day] = dest
+    out.update({'base_vhash': contracts.BASE_VHASH,
+                'guards_mmol': list(GUARD_MMOL),
+                'guards_mgdl': [round(g * hm.MMOL_TO_MGDL, 1) for g in GUARD_MMOL],
+                'low_mgdl': round(export.LOW_MGDL, 1), 'low_follow_s': export.LOW_AHEAD_S,
+                'tol': {'insulin': hm.TOL_U, 'tbr': TBR_TOL, 'factor': FACTOR_TOL},
+                'match_s': 90,                               # two documents' loops are the same loop within 90 s
+                'days': [d.day for d in study.days]})
+    return out
+
+
 def build_page_data(sd, study, rows, status, rounds, days_meta, settings, collected, generated, single_file=False,
                     inlined=(), artifact=False):
-    """The tier-1 document: export.build_tier1 plus `overview`, `assumed` and `page`; the trial rows' `files` are
+    """The tier-1 document: export.build_tier1 plus `overview`, `assumed`, `parameters`, `scenarios`, `drilldown` and `page`; the trial rows' `files` are
     rewritten to the page-relative paths of `collected`."""
     hours = {}
     for dest, (src, kind, day, vh) in collected.items():
@@ -631,10 +813,15 @@ def build_page_data(sd, study, rows, status, rounds, days_meta, settings, collec
     data['overview'] = overview_numbers(study, rows, rounds, hours, days_meta)
     data['assumed'] = assumed_keys(settings)
     data['parameters'] = parameter_space(study, rows, rounds)
+    data['scenarios'] = scenario_index(study, rows, collected, days_meta, settings, data['parameters'])
+    data['drilldown'] = drilldown_index(study, collected)
     data['page'] = {'generated': data['generated'], 'single_file': bool(single_file), 'inlined': list(inlined),
-                    'artifact': bool(artifact), 'source': study.source, 'host': study.host,
+                    'artifact': bool(artifact), 'source': source_label(study.source), 'host': '',
                     'units': glucose_units(settings), 'study_dir': os.path.basename(sd.path)}
-    return data
+    if isinstance(data.get('study'), dict):                  # the page is shareable: no Nightscout URL or hostname
+        data['study']['source'] = source_label(study.source)
+        data['study']['host'] = ''
+    return scrub_private(data, private_strings(study, settings))
 
 
 def page_sentences(data):
@@ -649,6 +836,10 @@ def page_sentences(data):
             out.append(str(v['why']))
         for reasons in (v.get('reasons') or {}).values():
             out += [str(x) for x in reasons]
+    sc = data.get('scenarios') or {}
+    out += [str(e['label']) for e in sc.get('entities') or [] if e.get('label')]
+    for d in sc.get('days') or []:
+        out += [str(c) for c in d.get('confounders') or []]
     return out
 
 
@@ -692,8 +883,11 @@ def strip_skeleton(page_html):
     return out.lstrip()
 
 
-def render_html(data, inline_docs=None, size_note='', artifact=False):
-    """Fill templates/page.html; -> the page text. inline_docs: {page-relative path: parsed JSON}."""
+def render_html(data, inline_docs=None, size_note='', artifact=False, private=()):
+    """Fill templates/page.html; -> the page text. inline_docs: {page-relative path: parsed JSON}. `private`
+    (private_strings) is scrubbed from the inlined documents and refused in the result (ReportError)."""
+    if private:
+        inline_docs = {p: scrub_private(d, private) for p, d in (inline_docs or {}).items()}
     study = data.get('study') or {}
     page = data.get('page') or {}
     mode = ('single file, ' + _plural(len(inline_docs or {}), 'per-loop document') + ' inlined') if page.get('single_file') \
@@ -728,6 +922,8 @@ def render_html(data, inline_docs=None, size_note='', artifact=False):
     problems = check_external_resources(text)
     if problems:
         raise ReportError('refused: ' + '; '.join(problems))
+    if private_problems(text, private):
+        raise ReportError('refused: the page would carry the Nightscout address; it is shown as "Nightscout" only')
     return text
 
 
@@ -763,12 +959,13 @@ def render_report(study_dir, out_dir=None, single_file=False, days=None, variant
     sizes = {} if single_file else place_tier2(collected, out_dir)
     inline_docs = {p: _read_json(collected[p][0]) for p in inline_paths}
     inline_docs = {p: d for p, d in inline_docs.items() if d is not None}
-    text = render_html(data, inline_docs, '', artifact)
+    private = private_strings(study, settings)
+    text = render_html(data, inline_docs, '', artifact, private)
     tier2_bytes = sum(sizes.values())
     note = f'page {_human_size(len(text.encode("utf-8")))}'
     if sizes:
         note += f', per-loop files {_human_size(tier2_bytes)} in {len(sizes)}'
-    text = render_html(data, inline_docs, note, artifact)
+    text = render_html(data, inline_docs, note, artifact, private)
     size = len(text.encode('utf-8'))
     if size > ARTIFACT_MAX_BYTES:
         warnings.append(f'the page is {_human_size(size)}, over the 16 MB artifact limit: inline fewer days or '

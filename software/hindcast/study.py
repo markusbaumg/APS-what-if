@@ -25,12 +25,27 @@ file left behind: the stop request was addressed to the earlier run.
 Resume rule. A key (contracts.key over params, day, settings_sha, code_sha, freeze_sha, objective_version) with
 a `done` row is never evaluated again; `failed`, `blocked` and `stale` rows are re-evaluated. A row is appended
 only after its evaluation finished, so a `kill -9` loses at most the trial in flight; a partial last line is
-skipped by contracts.read_trials. Where a key has several rows the last one counts.
+skipped by contracts.read_trials. Where a key has several rows the last one counts. The rule holds for the
+sentinel / null controls too: a control's key carries its instance, `r<round>.t<first trial number of the run>:s<n>`
+(or `:null`), so the controls of a re-run after a kill -9 are new keys by design (the controls run again in every
+run: they check the process that does the replays), and Runner.run still drops any scheduled control whose key
+already has a done row. So no key ever gets a second done row.
 
-Exit codes (DESIGN.md section 4.5): 0 finished or stopped (STOP file, Ctrl-C), 2 stopped by a guard
+Session (H-305). `Runner.run(tasks, ...)` alone takes the lock, writes STATE.json and releases with its exit code.
+The orchestrator runs many rounds under ONE lock instead: `runner.open_session()` once (lock, STOP left by an
+earlier run removed, STATE.json), every `runner.run(...)` inside it leaves lock and STATE alone apart from phase /
+queue_len / heartbeat and log a 'round N recorded' line (no exit), and `runner.close_session(exit_code, reason,
+stop_file, before_release)` releases once with the real exit code: the STOP file first (when the flag says it
+stopped the run), then before_release (tier 1 and the report, the lock still held), the release last. Between two
+rounds the study therefore stays locked and STATE.json has no exit_code (`hc study status`: running). A STOP file
+is removed only when a whole run starts (acquire) and by the run it stopped, before that run releases. Its stop
+reason is STOP_REASON ('stopped: STOP file') inside a round and between rounds alike.
+
+Exit codes (DESIGN.md section 4.5): 0 finished or stopped (STOP file, Ctrl-C, budget), 2 stopped by a guard
 (GuardStop: three consecutive failures, disk below the minimum, a sentinel / null control that differs from base,
-unequal loop counts on a day, stale_context), 3 configuration refused (StudyError: locked key, unknown VDF key,
-lock held, bad study).
+unequal loop counts on a day, stale_context; also an unexpected exception of the batch evaluation, whose type and
+first line become the stop reason), 3 configuration refused (StudyError: locked key, unknown VDF key, lock held,
+bad study).
 
 Guards (backlog H-302, DESIGN.md sections 5.1 and 6; details in the Runner and Guards docstrings):
     sentinel        the phone's values of the searched parameters as explicit VDF rows (ns_settings.json with
@@ -56,8 +71,10 @@ RunResult.guards lists it, and `hc study status` prints it (status_text, from gu
 What is NOT here: the search phases (search.py, H-304), the replay (replay.py, H-102), the pool (pool.py) and the
 orchestrator that strings them together (H-305). `Runner.run(tasks, evaluate)` is the loop they plug into:
 `evaluate(task)` returns the row fields of one evaluation, the Runner does lock, STATE, STOP, resume, exit codes,
-status.json. Until the orchestrator exists, `cli.py` runs the study's queue through `dry_evaluate()`, which
-records every task as `blocked` (nothing is replayed) so that the lock/STATE/STOP machinery can be exercised.
+status.json. The orchestrator (orchestrator.py, H-305) uses the batch hook `Runner.run(tasks, None,
+batch_evaluate=..., on_record=...)` instead: the whole queue goes to the worker pool, results come back in
+completion order and are recorded one by one with the same guards. `hc study run --dry` still runs the study's
+queue through `dry_evaluate()`, which records every task as `blocked` (nothing is replayed).
 
 Nothing here changes the phone or ns_settings.json.
 """
@@ -98,6 +115,8 @@ EXIT_OK, EXIT_GUARD, EXIT_REFUSED = 0, 2, 3
 ON_STALE = ('stop', 'reeval')                        # hc study run --on-stale (default stop)
 CONTROL_KINDS = ('sentinel', 'null')                 # the automatic controls of DESIGN.md section 5.1 (H-302)
 STOP_REASON_MAX = 400                                # characters of a stop reason in STATE.json / status.json
+STOP_REASON = 'stopped: STOP file'                   # the one stop reason of a STOP file (inside a round and between)
+FINISHED = 'finished'                                # RunResult.stop_reason of a run (or round) that ran its queue out
 _NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 _DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
@@ -117,6 +136,17 @@ class GuardStop(Exception):
 
     def __init__(self, reason):
         self.reason = reason
+        super().__init__(reason)
+
+
+class RunStop(Exception):
+    """A clean stop noticed while waiting for a result (STOP file, budget): exit code 0. Raised by Runner.idle(),
+    which the orchestrator's pool calls when no result arrived for a while; Runner.run turns it into its result."""
+    exit_code = EXIT_OK
+
+    def __init__(self, reason, stop_file=False):
+        self.reason = reason
+        self.stop_file = bool(stop_file)                 # True: the STOP file asked for it (close removes the file)
         super().__init__(reason)
 
 
@@ -317,6 +347,7 @@ class StudyDir:
         self.guards_path = os.path.join(self.path, GUARDS_JSON)
         self.runs_dir = os.path.join(self.path, 'runs')
         self.report_dir = os.path.join(self.path, 'report')
+        self.closing = None                          # (exit_code, stop_reason) while close_session publishes
 
     def __repr__(self):
         return f'StudyDir({self.path!r})'
@@ -1037,8 +1068,10 @@ class RunResult:
     blocked: int = 0
     controls: int = 0               # sentinel / null rows appended
     marked_stale: int = 0           # done rows superseded by a `stale` row (--on-stale reeval)
+    already_done: int = 0           # keys of the study with a done row when this run started (what resume skips)
     stale_context: list = field(default_factory=list)
     guards: list = field(default_factory=list)          # guard notes of the run (Guards.guard_notes), [] = none
+    stop_file: bool = False         # True when the STOP file stopped it (an explicit flag, never read from the text)
 
 
 class Runner:
@@ -1096,6 +1129,8 @@ class Runner:
         self.max_failures = max_failures
         self.status_every = status_every
         self.budget_s = budget_s
+        self.deadline = None                             # absolute time.time() limit (the orchestrator's budget)
+        self.session = False                             # True between open_session() and close_session()
         self.log = log or (lambda text: None)
         self.started_at = None
         self.state = None
@@ -1205,7 +1240,9 @@ class Runner:
 
     # ---- lock
     def acquire(self, phase='start', queue_len=0):
-        """Take the study lock or raise LockHeld (exit 3). Removes a STOP file addressed to an earlier run.
+        """Take the study lock or raise LockHeld (exit 3). Removes a STOP file addressed to an earlier run: acquire
+        is called once per whole run (a standalone Runner.run, or open_session for the orchestrator's rounds), so a
+        STOP written while the run is going is never removed by it.
 
         Atomic: with no LOCK present the file is created by exactly one process (StudyDir.try_create_lock, a hard
         link: O_EXCL semantics); a LOCK the rule finds free (dead pid, heartbeat older than LOCK_STALE_S, recorded
@@ -1238,6 +1275,46 @@ class Runner:
         self.sd.write_state(self.state)
         return self.state
 
+    def open_session(self, phase='start', queue_len=0):
+        """Take the lock for a run of several rounds (the orchestrator): acquire() once; every run() until
+        close_session() works under this lock and leaves it held. LockHeld (exit 3) as acquire()."""
+        self.refresh_context()
+        self.acquire(phase, queue_len)
+        self.session = True
+        return self.state
+
+    def close_session(self, exit_code, stop_reason, stop_file=False, before_release=None):
+        """Release the session's lock once, with the run's real exit code and reason, in this order:
+        1. the STOP file is removed when `stop_file` says it stopped the run (an explicit flag, never read from the
+           reason text): it was addressed to this run, and removing it while the lock is still ours cannot eat a
+           STOP meant for a run that starts after the release;
+        2. `before_release()` (the orchestrator: tier 1 and the report page) runs while the lock is still held, so
+           no other run can start and write rows while the page is built; during it build_status() in this
+           process already reports the final exit code and reason (StudyDir.closing), STATE.json on disk does
+           not yet (a recorded exit_code would free the lock for other processes);
+        3. release(): STATE.json exit_code / stop_reason, status.json, the LOCK removed - last."""
+        self.session = False
+        if stop_file:
+            self.sd.clear_stop()
+        if before_release is not None:
+            self.sd.closing = (exit_code, _clip(stop_reason))
+            try:
+                self.heartbeat()
+                before_release()
+            except Exception as e:                       # the page is a convenience; the release must happen
+                self.log(f'before release: {type(e).__name__}: {e}')
+            finally:
+                self.sd.closing = None
+        return self.release(exit_code, stop_reason)
+
+    def time_left(self):
+        """Seconds of budget left (None = no budget): the session's deadline, else budget_s from acquire()."""
+        if self.deadline is not None:
+            return self.deadline - time.time()
+        if self.budget_s is not None and self.started_at is not None:
+            return self.budget_s - (time.time() - self.started_at)
+        return None
+
     def heartbeat(self, **updates):
         """Rewrite STATE.json with a fresh heartbeat (call it from long evaluations too)."""
         if self.state is None:
@@ -1245,11 +1322,21 @@ class Runner:
         for k, v in updates.items():
             setattr(self.state, k, v)
         self.state.heartbeat = now_iso()
-        if self.budget_s is not None and self.started_at is not None:
-            self.state.budget_left_s = round(max(0.0, self.budget_s - (time.time() - self.started_at)), 1)
+        left = self.time_left()
+        if left is not None:
+            self.state.budget_left_s = round(max(0.0, left), 1)
         self.state.disk_free_mb = self._disk()
         self.sd.write_state(self.state)
         return self.state
+
+    def idle(self):
+        """Called while waiting for a result that has not come (the pool wakes at least every 30 s): fresh
+        heartbeat, then RunStop on a STOP file or an exhausted budget, GuardStop on low disk."""
+        self.heartbeat()
+        probe = RunResult(exit_code=EXIT_OK, stop_reason=FINISHED)
+        if self._stop_check(probe):
+            raise RunStop(probe.stop_reason, stop_file=probe.stop_file)
+        return None
 
     def release(self, exit_code, stop_reason):
         if self.state is None:
@@ -1385,9 +1472,42 @@ class Runner:
                 self.log(f'guards.json not written: {e}')
         return row, stop
 
-    def run(self, tasks, evaluate, phase=None, on_stale=None, guards=None):
+    def _stop_check(self, result):
+        """None to go on, else sets result.stop_reason and returns True (STOP file, budget); GuardStop on low disk."""
+        if self.sd.stop_requested():
+            result.stop_reason, result.stop_file = STOP_REASON, True
+            return True
+        left = self.time_left()
+        if left is not None and left <= 0:
+            result.stop_reason = 'budget exhausted'
+            return True
+        disk = self._disk()
+        if disk is not None and self.min_disk_mb and disk < self.min_disk_mb:
+            raise GuardStop(f'disk below {self.min_disk_mb} MB free ({disk:.0f} MB)')
+        return None
+
+    def run(self, tasks, evaluate, phase=None, on_stale=None, guards=None, batch_evaluate=None, on_record=None):
         """Evaluate `tasks` in order; see the class docstring. Returns RunResult; never raises for lock/guard
-        conditions (they are the exit codes), only for a broken study (StudyError, exit 3) before the lock."""
+        conditions (they are the exit codes), only for a broken study (StudyError, exit 3) before the lock.
+
+        Batch hook (H-305, the orchestrator's pool path). `batch_evaluate(tasks)` - when given, `evaluate` is not
+        called - receives the whole queue of the run after resume and control scheduling (base tasks, sentinel and
+        null controls included, in order) and returns an iterator of (task, out) pairs in completion order, `out`
+        being what evaluate(task) / guards.evaluate(task) would return (a control's `out` carries `csv` for the
+        verdict). Every pair is recorded exactly like a serial result (record(): row, guards, loop counts); STOP,
+        budget and disk are checked before the first pair is requested and after every recorded pair, so a stop
+        loses only the trials in flight (they have no row and are re-run on resume). The iterator may raise
+        RunStop (Runner.idle: STOP / budget noticed while waiting, exit 0) or GuardStop (exit 2); any other
+        exception out of it is an exit 2 whose stop reason names the exception type and its first line (lint-
+        checked for the public issue; the full text goes to the log), after the rows recorded so far. On any exit
+        from the loop the iterator's close() is called (a generator's finally: the orchestrator terminates its pool
+        there). `on_record(task, row, index, total)` is called after each appended row (index 1-based, total = the
+        queue length of this run), both paths; its exceptions are logged, never fatal.
+
+        Inside a session (open_session) the lock is neither taken nor released here: phase, queue_len and the
+        heartbeat of STATE.json are updated and the lock stays with the session; a STOP file stays where it is
+        (close_session removes it, told by RunResult.stop_file); the log gets a 'round N recorded' line, the
+        session's close has the exit line."""
         on_stale = on_stale or self.on_stale
         if on_stale not in ON_STALE:
             raise StudyError(f'--on-stale must be one of {", ".join(ON_STALE)}, not {on_stale!r}')
@@ -1397,19 +1517,30 @@ class Runner:
         self.refresh_context()
         reasons, stale = self.find_stale()
         self.stale_context = list(reasons)
-        todo = self.pending(tasks)
-        result = RunResult(exit_code=EXIT_OK, stop_reason='finished', skipped=len(tasks) - len(todo),
-                           stale_context=list(reasons))
-        try:
-            self.acquire(phase, queue_len=len(todo))
-        except LockHeld as e:
-            self.log(str(e))
-            return RunResult(exit_code=EXIT_REFUSED, stop_reason=str(e), skipped=result.skipped)
-        trial_no = self.sd.next_trial_number()
+        rows0 = self.sd.trials()
+        done0 = self.sd.done_keys(rows0)
+        todo = [(t, k) for t, k in ((t, self.key_of(t)) for t in tasks) if k not in done0]
+        result = RunResult(exit_code=EXIT_OK, stop_reason=FINISHED, skipped=len(tasks) - len(todo),
+                           stale_context=list(reasons), already_done=len(done0))
+        own = not self.session
+        if own:
+            try:
+                self.acquire(phase, queue_len=len(todo))
+            except LockHeld as e:
+                self.log(str(e))
+                return RunResult(exit_code=EXIT_REFUSED, stop_reason=str(e), skipped=result.skipped,
+                                 already_done=result.already_done)
+        else:
+            self.state.exit_code, self.state.stop_reason = None, None
+            self.state.stale_context = list(self.stale_context)
+            self.state.trials_done = len(done0)
+            self.heartbeat(phase=phase, queue_len=len(todo))
+        trial_no = self.sd.next_trial_number(rows0)
         failures = 0
         drift = []
         rnd = next((t.round for t in tasks if t.round is not None), None)
         self._not_schedulable = {}
+        batch_iter = None
         try:
             if reasons:
                 if on_stale == 'stop':
@@ -1423,34 +1554,43 @@ class Runner:
                 self.log(f'{self.sd.name}: stale context ({"; ".join(reasons)}); {len(stale)} rows marked stale, '
                          f'base replays first')
             if guards is not None:
-                run_tag = f'r{rnd}' if rnd is not None else f'run{trial_no}'
+                # the run tag is unique per run (round number + the first trial number of this run): the controls
+                # of a re-run after a kill -9 are new keys, never a second done row of an old key
+                run_tag = (f'r{rnd}.t{trial_no}' if rnd is not None else f'run{trial_no}')
                 sched = guards.schedule([t for t, _ in todo], run_tag)
                 keys = {id(t): k for t, k in todo}
                 todo = [(t, keys.get(id(t)) or self.key_of(t)) for t in sched]
+                done_now = self.sd.done_keys()
+                todo = [(t, k) for t, k in todo if not (is_control(t) and k in done_now)]
                 self.note_guards(guards, run_tag, rnd, result)
                 self.heartbeat(queue_len=len(todo))
-            for i, (task, key) in enumerate(todo):
-                if self.sd.stop_requested():
-                    result.stop_reason = 'STOP file'
+            if batch_evaluate is not None:
+                keys = {id(t): k for t, k in todo}
+                if self._stop_check(result) or not todo:
+                    batch_iter = iter(())
+                else:
+                    batch_iter = batch_evaluate([t for t, _ in todo])
+                source = ((t, keys.get(id(t)) or self.key_of(t), out) for t, out in batch_iter)
+            else:
+                source = ((t, k, None) for t, k in todo)
+            for i, (task, key, pre) in enumerate(source):
+                if batch_iter is None and self._stop_check(result):
                     break
-                if self.budget_s is not None and time.time() - self.started_at >= self.budget_s:
-                    result.stop_reason = 'budget exhausted'
-                    break
-                disk = self._disk()
-                if disk is not None and self.min_disk_mb and disk < self.min_disk_mb:
-                    raise GuardStop(f'disk below {self.min_disk_mb} MB free ({disk:.0f} MB)')
-                self.heartbeat(phase=task.phase or phase, queue_len=len(todo) - i, last_key=key)
-                started = now_iso()
-                t0 = time.time()
                 control = is_control(task) and guards is not None
-                try:
-                    out = (guards.evaluate(task) if control else evaluate(task)) or {}
-                except GuardStop:
-                    raise
-                except KeyboardInterrupt:
-                    raise
-                except Exception as e:                       # a broken evaluation is a failed trial, not a crash
-                    out = {'status': 'failed', 'error': f'{type(e).__name__}: {e}'[:1000]}
+                if pre is not None:                          # the batch path: the trial has finished already
+                    started = now_iso()
+                    t0 = time.time()
+                    out = pre or {}
+                else:
+                    self.heartbeat(phase=task.phase or phase, queue_len=len(todo) - i, last_key=key)
+                    started = now_iso()
+                    t0 = time.time()
+                    try:
+                        out = (guards.evaluate(task) if control else evaluate(task)) or {}
+                    except (GuardStop, RunStop, KeyboardInterrupt):
+                        raise
+                    except Exception as e:                   # a broken evaluation is a failed trial, not a crash
+                        out = {'status': 'failed', 'error': f'{type(e).__name__}: {e}'[:1000]}
                 row, stop = self.record(task, key, out, trial_no, started, t0, phase, guards if control else None)
                 status = row.status
                 trial_no += 1
@@ -1470,32 +1610,81 @@ class Runner:
                     drift += new_drift
                     self.state.stale_context = list(self.state.stale_context) + new_drift
                     self.log(f'{self.sd.name}: ' + '; '.join(new_drift) + ' - finishing the round, then stopping')
-                self.heartbeat(queue_len=len(todo) - i - 1, last_key=key)
+                self.heartbeat(queue_len=max(0, len(todo) - i - 1), last_key=key)
                 if self.status_every and result.done % self.status_every == 0:
                     try:
                         self.sd.write_status()
                     except Exception as e:                   # pragma: no cover
                         self.log(f'status.json not written: {e}')
+                if on_record is not None:
+                    try:
+                        on_record(task, row, i + 1, len(todo))
+                    except Exception as e:                   # reporting must never stop a run
+                        self.log(f'on_record failed: {type(e).__name__}: {e}')
                 if stop:
                     raise GuardStop(stop)
                 if failures >= self.max_failures:
                     raise GuardStop(f'{failures} consecutive failed trials (last: {row.error})')
-            if drift and result.stop_reason == 'finished':
+                if batch_iter is not None and i + 1 < len(todo) and self._stop_check(result):
+                    break
+            if drift and result.stop_reason == FINISHED:
                 raise GuardStop('stale_context: ' + '; '.join(drift) + '. The round was finished with the context it '
                                 'started with; the next run reports its rows as stale (--on-stale stop) or '
                                 're-evaluates them (--on-stale reeval)')
         except GuardStop as e:
             result.exit_code, result.stop_reason = EXIT_GUARD, _clip(f'guard: {e.reason}')
+        except RunStop as e:
+            result.exit_code, result.stop_reason = EXIT_OK, _clip(e.reason)
+            result.stop_file = e.stop_file
         except KeyboardInterrupt:
             result.exit_code, result.stop_reason = EXIT_OK, 'interrupted (Ctrl-C); the trial in flight is lost, re-run resumes'
+        except StudyError as e:                              # a row refused / a task off the space: configuration
+            result.exit_code, result.stop_reason = EXIT_REFUSED, _clip(f'refused: {e}')
+            self.log(f'{self.sd.name}: refused: {e}')
+        except Exception as e:                               # the evaluation machinery itself broke (pool, spec ...)
+            self.log(f'{self.sd.name}: the evaluation raised {type(e).__name__}: {e}')
+            result.exit_code, result.stop_reason = EXIT_GUARD, exception_reason(e)
         finally:
+            close = getattr(batch_iter, 'close', None)
+            if close is not None:                            # the pool path: stop the work still in flight
+                try:
+                    close()
+                except Exception as e:                       # pragma: no cover
+                    self.log(f'batch iterator close failed: {e}')
             result.stale_context = list(self.state.stale_context) if self.state else result.stale_context
-            self.release(result.exit_code, result.stop_reason)
-            if result.stop_reason == 'STOP file':
-                self.sd.clear_stop()
-        self.log(f'{self.sd.name}: {result.stop_reason}; {result.done} rows appended, {result.skipped} already done, '
-                 f'{result.failed} failed, {result.blocked} blocked; exit {result.exit_code}')
+            if own:
+                if result.stop_file:                     # addressed to this run: removed before the lock goes
+                    self.sd.clear_stop()
+                self.release(result.exit_code, result.stop_reason)
+            else:
+                self.heartbeat()
+        counts = (f'{result.done} rows appended, {result.already_done} already done, {result.failed} failed, '
+                  f'{result.blocked} blocked')
+        if own:
+            self.log(f'{self.sd.name}: {result.stop_reason}; {counts}; exit {result.exit_code}')
+        else:                                            # a round of a session: the exit line is the session's close
+            self.log(f'{self.sd.name}: round{"" if rnd is None else f" {rnd}"} recorded: {counts}'
+                     + ('' if result.stop_reason == FINISHED else f'; {result.stop_reason}'))
         return result
+
+
+def exception_reason(exc):
+    """The public stop reason for an unexpected exception of the evaluation machinery: 'guard: the evaluation
+    raised <Type>: <first line>' with the home directory shortened to ~; when the first line does not pass the lint
+    (kind 'issue': the reason may reach the public campaign issue) only the type is named (the log has the text)."""
+    first = (str(exc).strip().splitlines() or [''])[0]
+    home = os.path.expanduser('~')
+    if home and home != '~':
+        first = first.replace(home, '~')
+    first = _clip(first, 200)
+    text = f'guard: the evaluation raised {type(exc).__name__}' + (f': {first}' if first else '')
+    try:
+        from hindcast import lint
+        if lint.lint_findings(text, 'issue'):
+            text = f'guard: the evaluation raised {type(exc).__name__} (message in the log of the run)'
+    except Exception:                                        # pragma: no cover - lint absent: type only
+        text = f'guard: the evaluation raised {type(exc).__name__} (message in the log of the run)'
+    return _clip(text)
 
 # ----------------------------------------------------------------------------- the dry queue (until H-304/H-305)
 
@@ -1571,12 +1760,32 @@ def guard_lines(study_dir):
     return [f'sentinel: not schedulable on {d} ({"; ".join(map(str, r))})' for d, r in sorted(days.items())]
 
 
+def _day_label(d, not_frozen):
+    """status.days value: the role; 'quarantined: <reason>'; '<role>, not frozen' (or 'partial freeze' / 'stale
+    freeze') for a day the orchestrator found unreplayable at the start of its last round (guards.json)."""
+    if d.role == 'quarantined' and d.quarantine_reason:
+        return f'quarantined: {d.quarantine_reason}'
+    why = (not_frozen or {}).get(d.day)
+    if why and d.role != 'quarantined':
+        text = str(why)
+        label = ('not frozen' if 'not frozen' in text else 'partial freeze' if 'non-final' in text
+                 else 'stale freeze' if 'stale' in text else 'not replayable')
+        return f'{d.role}, {label}'
+    return d.role
+
+
 def build_status(study_dir, now=None):
-    """Status (<= 2 KB) from study.json, STATE.json, trials.jsonl and, when present, round.json."""
+    """Status (<= 2 KB) from study.json, STATE.json, trials.jsonl and, when present, round.json. While this
+    process closes its session (StudyDir.closing, Runner.close_session) the final exit code and reason are taken
+    from there: STATE.json gets them only at the release."""
     sd = study_dir if isinstance(study_dir, StudyDir) else StudyDir(study_dir)
     sd.require()
+    not_frozen = sd.read_guards().get('not_frozen') or {}
     study = Study.load(sd.study_json, strict=False)
     state = sd.read_state()
+    closing = getattr(sd, 'closing', None)
+    if closing is not None and state is not None and state.pid == os.getpid() and state.exit_code is None:
+        state.exit_code, state.stop_reason = closing
     latest = sd.latest_by_key(sd.trials())
     rows = list(latest.values())
     holder = sd.lock_holder(now)
@@ -1587,8 +1796,8 @@ def build_status(study_dir, now=None):
     planned = len(latest)                                    # every key attempted so far (done, failed, blocked, stale)
     if state is not None:
         phase = state.phase
-        if state.exit_code is None:
-            planned += state.queue_len                       # plus what the live run still has queued
+        planned += max(0, int(state.queue_len or 0))         # plus what the run still had queued: a live run's queue,
+                                                             # or what a stopped run left (0 after a finished run)
     else:
         pending = [p.kind for p in study.phases if p.state == 'pending']
         phase = pending[0] if pending else ('done' if study.phases else 'new')
@@ -1598,8 +1807,7 @@ def build_status(study_dir, now=None):
                     pid=(state.pid if state and holder else None), round=(state.round if state else None),
                     stale_context=list(state.stale_context) if state else [],
                     floor=aggregate_floor(rows),
-                    days={d.day: (f'quarantined: {d.quarantine_reason}' if d.role == 'quarantined' and d.quarantine_reason
-                                  else d.role) for d in study.days},
+                    days={d.day: _day_label(d, not_frozen) for d in study.days},
                     exit_code=(state.exit_code if state else None), stop_reason=(state.stop_reason if state else None),
                     report=(os.path.join('report', 'index.html') if os.path.isfile(os.path.join(sd.report_dir, 'index.html')) else None))
     rnd = sd.read_round()

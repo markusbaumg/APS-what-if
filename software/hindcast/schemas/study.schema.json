@@ -101,6 +101,18 @@
    "items": {
     "type": "string"
    }
+  },
+  "unlocked": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "unlock_reason": {
+   "type": [
+    "string",
+    "null"
+   ]
   }
  },
  "additionalProperties": false,
@@ -273,7 +285,8 @@
       "float",
       "int",
       "bool",
-      "choice"
+      "choice",
+      "scale"
      ]
     },
     "low": {
@@ -301,10 +314,16 @@
      ],
      "items": {}
     },
-    "phone": {}
+    "phone": {},
+    "target": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
    },
    "additionalProperties": false,
-   "description": "One searched parameter. float/int: low, high, step (step grid); bool: nothing; choice: choices.",
+   "description": "One searched parameter. float/int: low, high, step (step grid); bool: nothing; choice: choices; scale: low, high, step of a multiplier of the recorded profile value (1.0 on the grid, phone 1.0), target = the key itself.",
    "required": [
     "type"
    ]

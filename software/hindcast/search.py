@@ -98,6 +98,14 @@ Phase-runner interface (what the orchestrator, H-305, calls; everything here is 
     that off. `batch_size` cuts the batch for a shorter reporting cadence; the next call continues. The sentinel
     and null controls (H-302) are the orchestrator's, not phase tasks.
 
+    The base of a day comes first (base_state). Its failed row is not settled: the base is handed out again until
+    it has failed BASE_RETRY_LIMIT (3) times. While the latest base row of a day is failed or blocked, next_batch
+    hands out the base alone and holds the day's variants (they would be compared with no base, or an old one);
+    the variant rows that came back blocked because the base failed are re-planned once the base is done. A day in
+    `unfrozen` ({day: reason}: freeze.blocked_reason at the start of the orchestrator's round) gets its base handed
+    out once - one `blocked` row that says why - and nothing more until the freeze exists; `held` ({}) receives
+    {day: why} for every day whose tasks were held, so a no-progress stop can name the cause.
+
 Vocabulary: every string that can reach a human (notes, `why`, the plan text) passes lint.lint_findings(..., 'line');
 test_search.py checks it. Nothing here changes the phone or ns_settings.json.
 """
@@ -130,6 +138,7 @@ DEFAULT_LHS_N = 24                                     # lhs points (DESIGN.md: 
 DEFAULT_SEED = 1                                       # lhs seed when the phase names none (reproducible by default)
 SCREENING_DAYS = 3                                     # phase.days == 'screening': at most this many search days
 SETTLED = ('done', 'failed')                           # a row with one of these statuses is not handed out again
+BASE_RETRY_LIMIT = 3                                   # a failed base replay is handed out again until it failed this often
 RETRY = ('blocked', 'stale')                           # these are handed out again (frozen since, context re-evaluated)
 BUILT_KINDS = ('floor', 'oaat', 'grid', 'lhs')
 LATER_ISSUE = {'halving': 'H-306', 'coordinate': 'H-307', 'optuna': 'H-307', 'validate': 'H-308', 'cv': 'H-308',
@@ -191,6 +200,11 @@ class RowLookup:
         for r in sorted(self.by_key.values(), key=lambda r: r.trial):
             if r.control in (None, 'base'):
                 self.any_pair[(r.vhash, r.day)] = r
+        self.failures: Dict[Any, int] = {}             # failed rows per key (or per (vhash, day) without key_of)
+        for r in rows:
+            if r.status == 'failed':
+                ident = r.key if key_of is not None else (r.vhash, r.day)
+                self.failures[ident] = self.failures.get(ident, 0) + 1
         self.base_rows: Dict[str, TrialRow] = {}
         for r in sorted(self.by_key.values(), key=lambda r: r.trial):
             if r.status == 'done' and (r.vhash == BASE_VHASH or r.control == 'base') and r.metrics:
@@ -224,13 +238,52 @@ class RowLookup:
             return True
         return s is None and (self.vhash(task.params), task.day) in self.any_pair
 
+    def failed_count(self, task) -> int:
+        ident = self.key_of(task) if self.key_of is not None else (self.vhash(task.params), task.day)
+        return self.failures.get(ident, 0)
+
+    def base_task(self, day) -> Task:
+        return Task(params={}, day=day, phase=FLOOR_PHASE, control='base')
+
+    def base_retry(self, task, retry=RETRY) -> bool:
+        """True for a base task whose latest row is failed and that failed fewer than BASE_RETRY_LIMIT times."""
+        return (bool(retry) and _is_base(task) and self.status(task) == 'failed'
+                and self.failed_count(task) < BASE_RETRY_LIMIT)
+
+    def base_state(self, day, unfrozen=None, retry=RETRY) -> Tuple[str, str]:
+        """(state, why) of a day's base replay: 'done'; 'new' (no row); 'retry' (latest row failed under the limit,
+        or blocked on a frozen day); 'held' (the day is in `unfrozen` and its base has a row: nothing is handed out);
+        'exhausted' (failed BASE_RETRY_LIMIT times)."""
+        t = self.base_task(day)
+        r = self.row(t)
+        s = r.status if r is not None else None
+        unfrozen = unfrozen or {}
+        if s == 'done':
+            return 'done', ''
+        if s is None or s == 'stale':
+            if day in unfrozen and s is None:
+                return 'new', f'{day}: {unfrozen[day]}'
+            return 'new', ''
+        if day in unfrozen:
+            return 'held', f'{day}: {unfrozen[day]}'
+        if s == 'failed':
+            n = self.failed_count(t)
+            if n >= BASE_RETRY_LIMIT or not retry:
+                return 'exhausted', f'{day}: the base replay failed {n} time(s); its variants are held'
+            return 'retry', f'{day}: the base replay failed {n} time(s); replaying it again before its variants'
+        return 'retry', f'{day}: the base replay came back {s}; replaying it again before its variants'
+
     def pending(self, tasks, retry=RETRY):
         out = []
         for t in tasks:
             s = self.status(t)
-            if s is None or s in retry:
+            if s is None or s in retry or self.base_retry(t, retry):
                 out.append(t)
         return out
+
+
+def _is_base(task):
+    return getattr(task, 'control', None) == 'base' or not getattr(task, 'params', None)
 
 
 # ----------------------------------------------------------------------------- days
@@ -594,10 +647,12 @@ def plan(study, trials, settings=None, key_of=None, retry=RETRY) -> SearchPlan:
     return SearchPlan(phases=plans, current=current, frozen=frozen, dead=dead_all)
 
 
-def next_batch(study, trials, settings=None, key_of=None, batch_size=None, round_no=None, retry=RETRY) -> List[Task]:
+def next_batch(study, trials, settings=None, key_of=None, batch_size=None, round_no=None, retry=RETRY,
+               unfrozen=None, held=None) -> List[Task]:
     """The tasks to evaluate next: the pending tasks of the first phase that has any (base replays first, then the
-    points, point-major), cut to `batch_size` when given; [] when every built phase is settled.
-    See the module docstring for the contract with the orchestrator."""
+    points, point-major), cut to `batch_size` when given; [] when every built phase is settled or everything left
+    is held. A day's variants are handed out only while its base is done or has no row yet; `unfrozen` and `held`:
+    see the module docstring."""
     p = plan(study, trials, settings, key_of, retry)
     if p.current is None:
         return []
@@ -606,10 +661,41 @@ def next_batch(study, trials, settings=None, key_of=None, batch_size=None, round
     tasks, _ = phase_tasks(study, ph, p.current.frozen, settings, space, round_no)
     lookup = RowLookup(study, trials, space, key_of)
     pending = lookup.pending(tasks, retry)
-    pending.sort(key=lambda t: 0 if t.control == 'base' else 1)        # stable: base first, then design order
+    states = {}
+    out = []
+    for t in pending:
+        if t.day not in states:
+            states[t.day] = lookup.base_state(t.day, unfrozen, retry)
+        state, why = states[t.day]
+        if _is_base(t):
+            ok = state in ('new', 'retry')
+        else:
+            ok = state == 'done' or (state == 'new' and t.day not in (unfrozen or {}))
+        if ok:
+            out.append(t)
+        elif held is not None and why:
+            held.setdefault(t.day, why)
+    out.sort(key=lambda t: 0 if t.control == 'base' else 1)            # stable: base first, then design order
     if batch_size:
-        pending = pending[:max(1, int(batch_size))]
-    return pending
+        out = out[:max(1, int(batch_size))]
+    return out
+
+
+def untried_keys(study, trials, settings=None, key_of=None) -> set:
+    """The keys (or (vhash, day) pairs without key_of) of every task of the built phases that has no row yet:
+    what a stopped run still had to do (STATE.json queue_len, so `hc study status` keeps the planned count)."""
+    space = spc.ParamSpace.from_study(study, settings=settings, check_locked=False)
+    lookup = RowLookup(study, trials, space, key_of)
+    p = plan(study, trials, settings, key_of)
+    out = set()
+    for pp in p.phases:
+        if pp.skipped:
+            continue
+        tasks, _ = phase_tasks(study, study.phases[pp.index], pp.frozen, settings, space)
+        for t in tasks:
+            if lookup.row(t) is None:
+                out.add(key_of(t) if key_of is not None else (lookup.vhash(t.params), t.day))
+    return out
 
 
 # ----------------------------------------------------------------------------- round.json
@@ -749,10 +835,14 @@ def register(subparsers):
     return p
 
 
-def runner_for(sd, study, settings, settings_path=contracts.NS_SETTINGS_PATH):
-    """The Runner `hc study run` builds (cli.cmd_study_run: the live tree's code_sha / settings_sha, the default
-    freeze_sha_of), for its key_of and find_stale. Constructing it takes no lock and writes nothing."""
-    return st.Runner(sd, study, settings=settings, settings_path=settings_path)
+def runner_for(sd, study, settings, settings_path=contracts.NS_SETTINGS_PATH, freeze_sha_of=None, **runner_kw):
+    """The Runner `hc study run` builds (the live tree's code_sha / settings_sha), for its key_of and find_stale.
+    Constructing it takes no lock and writes nothing. `freeze_sha_of` (replay.freeze_sha_of(...)) is what the
+    orchestrator (H-305) and `hc search` pass so the keys carry the frozen day's sha and both agree on what is done;
+    without it the Runner's default ('' for every day) is used. `runner_kw` go to study.Runner (budget_s, log,
+    on_stale, guards, ...)."""
+    return st.Runner(sd, study, settings=settings, settings_path=settings_path, freeze_sha_of=freeze_sha_of,
+                     **runner_kw)
 
 
 def run_search(args, out=None):
@@ -763,7 +853,10 @@ def run_search(args, out=None):
     settings = spc.load_settings(getattr(args, 'settings', contracts.NS_SETTINGS_PATH))
     study = sd.load_study(settings)
     trials = sd.trials()
-    runner = runner_for(sd, study, settings, getattr(args, 'settings', contracts.NS_SETTINGS_PATH))
+    from hindcast import replay
+    runner = runner_for(sd, study, settings, getattr(args, 'settings', contracts.NS_SETTINGS_PATH),
+                        freeze_sha_of=replay.freeze_sha_of(study.source or 'ns:', settings,
+                                                           getattr(args, 'frozen_dir', None)))
     key_of = runner.key_of
     stale_reasons, _ = runner.find_stale(trials)
     p = plan(study, trials, settings=settings, key_of=key_of)
@@ -814,7 +907,7 @@ def main(argv=None):
 __all__ = ['DEAD_FACTOR', 'DEAD_COMPONENTS', 'DEFAULT_LEVELS', 'DEFAULT_LHS_N', 'DEFAULT_SEED', 'SCREENING_DAYS',
            'SearchError', 'RowLookup', 'PhasePlan', 'SearchPlan', 'search_days', 'screening_days', 'phase_days',
            'lhs_design', 'lhs_points', 'oaat_points', 'grid_points', 'phase_points', 'phase_tasks', 'dead_parameters',
-           'plan', 'next_batch', 'round_for_phase', 'write_round', 'plan_text', 'register', 'runner_for', 'run_search']
+           'plan', 'next_batch', 'untried_keys', 'BASE_RETRY_LIMIT', 'round_for_phase', 'write_round', 'plan_text', 'register', 'runner_for', 'run_search']
 
 
 if __name__ == '__main__':

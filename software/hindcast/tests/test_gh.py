@@ -4,6 +4,7 @@ Nothing here calls the real `gh`: every Gh instance gets a FakeRunner. The one t
 CLI (`needs_gh`) only runs `gh --version`.
 """
 import json
+import re
 import subprocess
 
 import pytest
@@ -539,7 +540,9 @@ def test_round_body_words_and_sanitised_free_text(tmp_path):
     assert '(12 in this round)' in body and 'variants in this round: 12 (' in body
     assert '[recommended for review]' in body and '[recommended]' not in body
     assert 'dropped parameters (not testable on these days): `profile dura_ISF_weight` - all points inside 1.5 x floor' in body
-    assert '2.65 U' not in body and 'Microbolusing' not in body and body.count(ghmod.SEE_ARTIFACT) >= 4
+    assert '2.65 U' not in body and 'Microbolusing' not in body and body.count(ghmod.SEE_ARTIFACT) >= 3
+    # a tie whose why fails the lint falls back to what a tie means, not to 'see the artifact'
+    assert '[tie] - indistinguishable from base within the noise floor' in body
     assert 'the factor would have sat on the cap' in body and '- note: fidelity floor held' in body
     import re
     assert len(re.findall(r'\n  \d+\. `', body)) == ghmod.ROUND_MAX_VARIANTS and '... 2 more in the artifact' in body
@@ -605,7 +608,7 @@ def test_post_round_without_round_json(tmp_path):
     assert action == 'posted'
     body = fake.comments[101][0]
     assert body.startswith(ghmod.round_marker('autoISF_oct', 2)) and 'phase oaat' in body
-    assert '- run: stopped, exit 2 (guard: sentinel replay differs from base' in body
+    assert '- run: stopped by a guard, exit 2 (sentinel replay differs from base' in body
     assert issue_lint(body) == []
 
 
@@ -740,3 +743,209 @@ def test_campaign_day_tags_that_fail_the_lint_are_withheld(tmp_path):
     assert 'Microbolusing 0.3U' in ghmod.campaign_body(study)
     action, _, note = ghmod.ensure_campaign(Gh(runner=FakeRunner(labels=CAMPAIGN_LABELS_READY)), sd, study, linter=linter)
     assert (action, note) == ('created', '')
+
+
+# ----------------------------------------------------------------------------- no quantities in public bodies (W3 fix)
+
+MVP_FLOORS = {'2026-09-06': {'floor_smb_U': 0.3, 'floor_tbr_U': 0.015, 'floor_total_U': 0.285, 'floor_rise_U': 0.295,
+                             'floor_rest_U': 0.01, 'floor_P_U': 0.0, 'floor_loops': 30.0, 'agreement_pct': 97.483,
+                             'loops': 1311.0}}
+# the shapes round.py wrote into studies/mvp/round.json (the 10th line used to reach the public comment verbatim:
+# 0.06 U and 0.02 U passed the old 'amounts under 0.5 U' threshold of the insulin-units rule)
+MVP_VARIANTS = [
+    ('candidate', {'profile autoISF_max': 1.4, 'profile dura_ISF_weight': 0.5},
+     'would have asked for 0.06 U less than base per day in the other loops (1.3 x floor) over 1 day; rising loops -0.02 U',
+     {'rise_vs_base_U': -0.02, 'rest_vs_base_U': -0.064, 'delta_vs_base_U': -0.084, 'changed_vs_base': 70.0,
+      'env_day_pct_tdd': 0.349, 'review_score': 1.285}),
+    ('candidate', {'profile autoISF_max': 1.3, 'profile dura_ISF_weight': 0.5},
+     'would have asked for 0.86 U less than base per day in rising loops (2.9 x floor) over 1 day; the other loops -0.11 U',
+     {'rise_vs_base_U': -0.86, 'rest_vs_base_U': -0.111, 'changed_vs_base': 42.0, 'review_score': 2.912}),
+    ('recommended', {'profile autoISF_max': 1.5, 'profile dura_ISF_weight': 0.9},
+     'feasible on all days, in the top 3 on at least 80 % of the leave-one-day-out folds: recommended for review',
+     {'rise_vs_base_U': 3.216, 'rest_vs_base_U': 0.349, 'review_score': 10.889}),
+    ('infeasible', {'profile autoISF_max': 1.6, 'profile dura_ISF_weight': 0.9},
+     "infeasible: 2026-09-06: out of envelope: 1.05 U vs base in a 3 h window (limit 1.0 U); out of envelope: 16.4 % "
+     "of the phone's TDD vs base (limit 15.0 %) | 2026-09-07: loop count 1311 differs from base 1310",
+     {'rise_vs_base_U': 3.562, 'rest_vs_base_U': 0.402, 'review_score': 12.061}),
+    ('tie', {'profile autoISF_max': 1.3, 'profile dura_ISF_weight': 0.7},
+     'indistinguishable from base within the noise floor on every component and every day',
+     {'rise_vs_base_U': 0.0, 'rest_vs_base_U': 0.0, 'review_score': 0.0}),
+]
+
+
+def make_mvp_round(sd, round_no=1):
+    variants = [c.Candidate(vhash=c.vhash(p), variant=sp.variant_name(p), verdict=v, why=why, params=p, rank=i + 1,
+                            days=1, effect=eff) for i, (v, p, why, eff) in enumerate(MVP_VARIANTS)]
+    rnd = c.Round(round=round_no, phase='grid', started=c.now_iso(), trials=len(variants), variants=variants,
+                  floors=MVP_FLOORS, front=[v.vhash for v in variants])
+    rnd.validate().save(sd.round_path)
+    return rnd
+
+
+def test_round_verdict_lines_carry_direction_and_floor_multiple_not_amounts(tmp_path):
+    sd, study = make_study(tmp_path)
+    rnd = make_mvp_round(sd)
+    linter = ghmod.study_linter(study)
+    # the old line is refused by the issue lint now (it used to pass and was posted)
+    assert linter(MVP_VARIANTS[0][2]) and {'insulin units', 'U/day'} <= {
+        f.name for f in lint.lint_findings(MVP_VARIANTS[0][2], 'issue')}
+    body = ghmod.round_body(study, st.build_status(sd), rnd, 1, None, linter)
+    assert issue_lint(body) == []
+    lines = {l.split('] - ', 1)[0].split('`')[1]: l.split('] - ', 1)[1] for l in body.splitlines() if '] - ' in l}
+    assert lines['autoISF_max_1.4__dura_ISF_weight_0.5'] == (
+        'would have asked for less insulin than base in the other loops (1.3 x the floor) over 1 day; '
+        'rising loops: within the floor')
+    assert lines['autoISF_max_1.3__dura_ISF_weight_0.5'] == (
+        'would have asked for less insulin than base in rising loops (2.9 x the floor) over 1 day; the other loops: less')
+    assert lines['autoISF_max_1.5__dura_ISF_weight_0.9'] == (
+        'would have asked for more insulin than base in rising loops (10.9 x the floor) over 1 day; the other loops: more; '
+        'recommended for review')
+    assert lines['autoISF_max_1.6__dura_ISF_weight_0.9'] == (
+        'infeasible on 2 days: a loop count different from base; out of envelope')
+    assert lines['autoISF_max_1.3__dura_ISF_weight_0.7'].startswith('indistinguishable from base within the noise floor')
+    assert ghmod.SEE_ARTIFACT not in ''.join(lines.values())          # nothing withheld: phrased, not hidden
+    import re
+    assert not re.search(r'\d\s?U\b', body) and 'TDD' not in body and '1311' not in body
+    # the amounts stay in the private study files
+    on_disk = sd.read_round()
+    assert on_disk.variants[0].why == MVP_VARIANTS[0][2] and on_disk.variants[0].effect['rest_vs_base_U'] == -0.064
+
+
+def test_verdict_text_without_effect_or_floors_falls_back():
+    cand = c.Candidate(vhash='a' * 40, variant='v', verdict='candidate', why='would have asked for 0.3 U more',
+                       days=2, effect={})
+    linter = ghmod.study_linter()
+    assert ghmod.verdict_text(cand, None, linter) == ghmod.SEE_ARTIFACT      # no numbers to phrase: withheld
+    cand.effect = {'rise_vs_base_U': 0.4, 'rest_vs_base_U': -0.01}
+    assert ghmod.verdict_text(cand, None, linter) == (
+        'would have asked for more insulin than base in rising loops over 2 days; the other loops: less')
+    inf = c.Candidate(vhash='b' * 40, variant='w', verdict='infeasible', why='infeasible: 2026-09-06: the replay failed (boom 3 U)')
+    assert ghmod.verdict_text(inf, None, linter) == 'infeasible on 1 day: the replay failed'
+
+
+def _inject(fn, extra):
+    def wrapped(*a, **k):
+        return fn(*a, **k) + extra
+    return wrapped
+
+
+@pytest.mark.parametrize('extra', ['\n- rising loops -0.02 U', '\n- 0.06 U less per day', '\n- 114 loops changed',
+                                   '\n- 3.6 mmol', "\n- 0.3 % of the phone's TDD"])
+def test_post_round_lints_the_final_body_and_refuses_an_injected_quantity(tmp_path, monkeypatch, extra):
+    sd, study = make_study(tmp_path)
+    make_mvp_round(sd)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    monkeypatch.setattr(ghmod, 'round_body', _inject(ghmod.round_body, extra))
+    # default linter (None = the study's issue lint): refused, nothing created or commented
+    action, row, note = ghmod.post_round(Gh(runner=fake), sd, study)
+    assert action == 'refused' and 'privacy' in note and fake.created() == [] and fake.commented() == []
+    action, _, _ = ghmod.post_round(Gh(runner=fake), sd, study, linter=ghmod.study_linter(study))
+    assert action == 'refused' and fake.commented() == []
+    # through the CLI too
+    monkeypatch.setattr(ghmod, '_gh_from_args', lambda args: Gh(runner=fake))
+    assert ghmod.main(['round', str(sd.path), '--pause', '0']) == ghmod.EXIT_FAILED and fake.commented() == []
+
+
+def test_ensure_campaign_lints_the_final_body_and_refuses_an_injected_quantity(tmp_path, monkeypatch):
+    sd, study = make_study(tmp_path)
+    make_mvp_round(sd)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    monkeypatch.setattr(ghmod, 'campaign_body', _inject(ghmod.campaign_body, '\nSMB total 0.06 U'))
+    action, row, note = ghmod.ensure_campaign(Gh(runner=fake), sd, study)
+    assert action == 'refused' and 'insulin units' in note and fake.created() == []
+    action, _, note = ghmod.post_round(Gh(runner=fake), sd, study)
+    assert action == 'refused' and note.startswith('campaign body:') and fake.created() == [] and fake.commented() == []
+    monkeypatch.setattr(ghmod, '_gh_from_args', lambda args: Gh(runner=fake))
+    assert ghmod.main(['campaign', str(sd.path), '--pause', '0']) == ghmod.EXIT_FAILED and fake.created() == []
+
+
+def test_unlinted_posting_is_refused_for_a_public_study(tmp_path, monkeypatch):
+    sd, study = make_study(tmp_path)
+    make_mvp_round(sd)
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    assert ghmod.ensure_campaign(Gh(runner=fake), sd, study, linter=False) == ('refused', None, ghmod.NO_LINT_PUBLIC)
+    assert ghmod.post_round(Gh(runner=fake), sd, study, linter=False)[0] == 'refused'
+    monkeypatch.setattr(ghmod, '_gh_from_args', lambda args: Gh(runner=fake))
+    assert ghmod.main(['round', str(sd.path), '--no-lint', '--pause', '0']) == ghmod.EXIT_FAILED
+    assert ghmod.main(['campaign', str(sd.path), '--no-lint', '--pause', '0']) == ghmod.EXIT_FAILED
+    assert fake.created() == [] and fake.commented() == []
+    # a private-repo study may post unlinted on request
+    study.private_repo = True
+    action, _, _ = ghmod.post_round(Gh(runner=fake), sd, study, linter=False)
+    assert action == 'posted' and len(fake.commented()) == 1
+
+
+def test_study_linter_fails_closed_without_the_lint_module(tmp_path, monkeypatch):
+    sd, study = make_study(tmp_path)
+    make_mvp_round(sd)
+    monkeypatch.setattr(ghmod, 'default_linter', lambda: None)
+    linter = ghmod.study_linter(study)
+    assert linter('a clean body') == ghmod.LINT_UNAVAILABLE
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    action, _, note = ghmod.post_round(Gh(runner=fake), sd, study)
+    assert action == 'refused' and fake.created() == [] and fake.commented() == []
+
+
+# ----------------------------------------------------------------------------- round comment: run word, controls (verifier fixes)
+
+def _status_with(sd, exit_code, reason):
+    c.State(phase='grid', trials_done=1, queue_len=0, pid=4711, heartbeat=c.now_iso(), round=1, exit_code=exit_code,
+            stop_reason=reason).save(sd.state_path)
+    return st.build_status(sd)
+
+
+def test_run_line_word_follows_the_real_exit_reason(tmp_path):
+    """A finished run is not 'stopped'; a STOP file, a guard, a refusal and a budget stop each get their own word,
+    and the reason's own lead word is not repeated."""
+    sd, study = make_study(tmp_path)
+    linter = ghmod.study_linter(study)
+    cases = [
+        (0, 'finished: every built phase is settled; sentinel equals base on 2026-09-06 (1 check)',
+         '- run: finished, exit 0 (every built phase is settled; sentinel equals base on 2026-09-06 (1 check))'),
+        (0, 'finished', '- run: finished, exit 0'),
+        (0, st.STOP_REASON, '- run: stopped by the STOP file, exit 0'),
+        (0, st.STOP_REASON + '; null equals base on 2026-09-06 (1 check)',
+         '- run: stopped by the STOP file, exit 0 (null equals base on 2026-09-06 (1 check))'),
+        (0, 'budget exhausted', '- run: stopped, exit 0 (budget exhausted)'),
+        (2, 'guard: 3 consecutive failed trials', '- run: stopped by a guard, exit 2 (3 consecutive failed trials)'),
+        (3, 'refused: a locked key', '- run: refused, exit 3 (a locked key)'),
+        (0, '', '- run: stopped, exit 0 (no reason recorded)'),
+    ]
+    for code, reason, want in cases:
+        status = _status_with(sd, code, reason)
+        assert ghmod.run_line(status, linter) == want
+        body = ghmod.round_body(study, status, None, 1, None, linter)
+        assert want in body and 'stopped, exit 0 (finished' not in body and issue_lint(body) == []
+
+
+def _row(trial, round_no, control=None, params=None):
+    params = params if params is not None else {'profile autoISF_max': 1.3 + trial / 100}
+    import hashlib
+    return c.TrialRow(trial=trial, key=hashlib.sha1(b'k%d' % trial).hexdigest(), phase='lhs', vhash=c.vhash(params),
+                      variant='v%d' % trial, params=params, day='2026-09-06', status='blocked', error='test row',
+                      code_sha='c', settings_sha='s', freeze_sha='f', round=round_no, control=control)
+
+
+def test_round_controls_are_counted_next_to_the_variants(tmp_path):
+    """The round's variants leave the sentinel / null replays out while the trial counts include them: the comment
+    says 'plus N control replays' so the two numbers add up."""
+    sd, study = make_study(tmp_path)
+    for i in range(4):
+        sd.append(_row(i, 2))
+    sd.append(_row(4, 2, control='sentinel'))
+    sd.append(_row(5, 2, control='null'))
+    sd.append(_row(6, 1, control='sentinel'))                                   # another round: not counted
+    assert ghmod.round_controls(sd, 2) == {'sentinel': 1, 'null': 1}
+    assert ghmod.round_controls(sd, 3) == {} and ghmod.round_controls(sd, None) == {}
+    rnd = make_round(sd, round_no=2, n=4)
+    linter = ghmod.study_linter(study)
+    body = ghmod.round_body(study, st.build_status(sd), rnd, 2, None, linter, controls=ghmod.round_controls(sd, 2))
+    assert re.search(r'- variants in this round: 4 \([^)]*\), plus 2 control replays \(sentinel 1, null 1\)', body)
+    assert issue_lint(body) == []
+    one = ghmod.round_body(study, st.build_status(sd), rnd, 2, None, linter, controls={'sentinel': 1})
+    assert 'plus 1 control replay (sentinel 1)' in one
+    assert 'control replay' not in ghmod.round_body(study, st.build_status(sd), rnd, 2, None, linter)
+    # post_round counts them itself
+    fake = FakeRunner(labels=CAMPAIGN_LABELS_READY)
+    action, _, _ = ghmod.post_round(Gh(runner=fake), sd, study, linter=linter)
+    assert action == 'posted' and 'plus 2 control replays (sentinel 1, null 1)' in fake.comments[101][0]

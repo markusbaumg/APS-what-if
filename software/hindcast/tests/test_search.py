@@ -11,6 +11,7 @@ import pytest
 import emulator_optimize as opt
 from hindcast import contracts as c
 from hindcast import lint
+from hindcast import replay
 from hindcast import search
 from hindcast import space as sp
 from hindcast import study as st
@@ -45,21 +46,22 @@ def phone_point(study):
 
 
 class Rows:
-    """synthetic trials.jsonl rows for a study, keyed like Runner (freeze_sha '')"""
+    """synthetic trials.jsonl rows for a study, keyed like Runner (freeze_sha '' by default; a callable
+    day -> sha, e.g. replay.freeze_sha_of(...), keys them the way `hc study run` / `hc search` do on frozen days)"""
 
     def __init__(self, study, freeze_sha=''):
         self.study = study
         self.space = sp.ParamSpace.from_study(study, settings=SETTINGS, check_locked=False)
-        self.freeze_sha = freeze_sha
+        self.freeze_of = freeze_sha if callable(freeze_sha) else (lambda day, sha=freeze_sha: sha)
         self.rows = []
 
     def add(self, params, day, metrics, status='done', control=None, phase='oaat', error=None, code_sha=None):
         params = self.space.normalize(params) if params else {}
         row = TrialRow(trial=len(self.rows), key=c.key(params, day, self.study.settings_sha, code_sha or self.study.code_sha,
-                                                        self.freeze_sha, self.study.objective_version),
+                                                        self.freeze_of(day), self.study.objective_version),
                        phase=phase, vhash=c.vhash(params), variant='base' if not params else self.space.variant_name(params),
                        params=params, day=day, status=status, code_sha=code_sha or self.study.code_sha,
-                       settings_sha=self.study.settings_sha, freeze_sha=self.freeze_sha, metrics=dict(metrics or {}),
+                       settings_sha=self.study.settings_sha, freeze_sha=self.freeze_of(day), metrics=dict(metrics or {}),
                        control=control, error=error).validate()
         self.rows.append(row)
         return row
@@ -70,7 +72,7 @@ class Rows:
 
     def key_of(self, task):
         params = self.space.normalize(task.params) if task.params else {}
-        return c.key(params, task.day, self.study.settings_sha, self.study.code_sha, self.freeze_sha,
+        return c.key(params, task.day, self.study.settings_sha, self.study.code_sha, self.freeze_of(task.day),
                      self.study.objective_version)
 
 
@@ -481,9 +483,14 @@ def test_every_human_facing_string_passes_the_line_lint(tmp_path):
 
 # ----------------------------------------------------------------------------- hc search
 
+def frozen_rows(study):
+    """Rows keyed with the frozen days' sha1, as `hc study run` and `hc search` key them."""
+    return Rows(study, freeze_sha=replay.freeze_sha_of('ns:', SETTINGS))
+
+
 def test_register_and_run_search(tmp_path, capsys):
     sd, study = make_study(tmp_path, phases=[Phase(kind='oaat'), Phase(kind='lhs', n=4)])
-    rows = Rows(study)
+    rows = frozen_rows(study)
     rows.base()
     screen_all(rows, study)
     for r in rows.rows:
@@ -521,7 +528,7 @@ def test_run_search_uses_the_live_context_after_a_code_change(tmp_path, capsys):
     """study.json keeps its creation stamps; rows written after a code change (or --on-stale reeval) carry the live
     tree's stamps. `hc search` must judge them like the Runner does, not by study.json's stamps."""
     sd, study = make_study(tmp_path)
-    rows = Rows(study)                                    # keyed with the live stamps new_study wrote
+    rows = frozen_rows(study)                             # keyed with the live stamps new_study wrote
     rows.base()
     screen_all(rows, study)
     for r in rows.rows:
@@ -566,3 +573,99 @@ def test_plan_counts_a_stale_status_row_as_stale(tmp_path):
     p = search.plan(study, rows.rows, settings=SETTINGS, key_of=rows.key_of)
     assert (p.phases[0].done, p.phases[0].stale, p.phases[0].pending) == (2, 1, 7)
     assert_lint_clean(search.plan_text(p, study))
+
+
+def test_run_search_keys_carry_the_freeze_sha_like_the_orchestrator(tmp_path, capsys):
+    """`hc search` builds its Runner with replay.freeze_sha_of, as `hc study run` does: rows keyed without the
+    frozen day's sha (another context) are stale for both, rows keyed with it are done for both."""
+    sd, study = make_study(tmp_path)
+    of = replay.freeze_sha_of('ns:', SETTINGS)
+    assert all(of(d) for d in DAYS), 'the test days must be frozen'
+    rows = Rows(study)                                    # freeze_sha '' on frozen days
+    rows.base()
+    screen_all(rows, study)
+    for r in rows.rows:
+        sd.append(r)
+    ph = _search_json(tmp_path, capsys)['phases'][0]
+    assert ph['done'] == 0 and ph['stale'] == 10 and ph['complete'] is False
+    runner = search.runner_for(sd, study, SETTINGS, NS_SETTINGS, freeze_sha_of=of)
+    p = search.plan(study, sd.trials(), settings=SETTINGS, key_of=runner.key_of)
+    assert (p.phases[0].done, p.phases[0].stale) == (ph['done'], ph['stale'])      # the orchestrator's view
+    # the frozen-sha rows: done for both
+    sd2, study2 = make_study(tmp_path, name='s2')
+    rows2 = frozen_rows(study2)
+    rows2.base()
+    screen_all(rows2, study2)
+    for r in rows2.rows:
+        sd2.append(r)
+    parser = argparse.ArgumentParser()
+    search.register(parser.add_subparsers(dest='command'))
+    args = parser.parse_args(['search', 's2', '--studies-dir', str(tmp_path), '--settings', NS_SETTINGS, '--json'])
+    assert search.run_search(args) == 0
+    ph2 = json.loads(capsys.readouterr().out)['phases'][0]
+    assert ph2['done'] == ph2['total'] == 10 and ph2['complete'] is True
+
+
+# ----------------------------------------------------------------------------- the base of a day comes first (H-305 fix)
+
+def _variants(batch, day):
+    return [t for t in batch if t.day == day and t.params]
+
+
+def test_a_failed_base_is_retried_alone_and_its_variants_held(tmp_path):
+    sd, study = make_study(tmp_path)
+    rows = Rows(study)
+    rows.add({}, DAYS[0], {}, status='failed', control='base', phase='floor', error='SYNTAX (fake)')
+    rows.base(days=DAYS[1:])
+    held = {}
+    batch = search.next_batch(study, rows.rows, settings=SETTINGS, key_of=rows.key_of, held=held)
+    assert [t.day for t in batch if t.control == 'base'] == [DAYS[0]]               # retried, not settled
+    assert _variants(batch, DAYS[0]) == [] and _variants(batch, DAYS[1])            # held vs handed out
+    assert 'failed 1 time(s)' in held[DAYS[0]] and DAYS[1] not in held
+    assert search.plan(study, rows.rows, settings=SETTINGS, key_of=rows.key_of).phases[0].complete is False
+    # the variants that came back blocked because the base failed are re-planned once the base is done
+    for p in [t.params for t in _variants(batch, DAYS[1])][:2]:
+        rows.add(p, DAYS[0], {}, status='blocked', error='the base replay of the day did not finish')
+    rows.add({}, DAYS[0], BASE_METRICS, control='base', phase='floor')
+    batch = search.next_batch(study, rows.rows, settings=SETTINGS, key_of=rows.key_of)
+    assert len(_variants(batch, DAYS[0])) == 4 and not any(t.control == 'base' for t in batch)
+    assert_lint_clean('\n'.join(held.values()))
+
+
+def test_a_base_that_failed_the_retry_limit_holds_its_day(tmp_path):
+    sd, study = make_study(tmp_path)
+    rows = Rows(study)
+    for _ in range(search.BASE_RETRY_LIMIT):
+        rows.add({}, DAYS[0], {}, status='failed', control='base', phase='floor', error='SYNTAX (fake)')
+    rows.base(days=DAYS[1:])
+    screen_all(rows, study, days=DAYS[1:])
+    held = {}
+    assert search.next_batch(study, rows.rows, settings=SETTINGS, key_of=rows.key_of, held=held) == []
+    assert f'failed {search.BASE_RETRY_LIMIT} time(s)' in held[DAYS[0]]
+    assert search.plan(study, rows.rows, settings=SETTINGS, key_of=rows.key_of).phases[0].complete is False
+
+
+def test_an_unfrozen_day_gets_one_blocked_base_then_nothing(tmp_path):
+    sd, study = make_study(tmp_path)
+    rows = Rows(study)
+    unfrozen = {DAYS[0]: f'{DAYS[0]} is not frozen; run `hc freeze {DAYS[0]}`'}
+    held = {}
+    batch = search.next_batch(study, rows.rows, settings=SETTINGS, key_of=rows.key_of, unfrozen=unfrozen, held=held)
+    assert [t.day for t in batch if t.control == 'base'] == list(DAYS) and _variants(batch, DAYS[0]) == []
+    assert 'not frozen' in held[DAYS[0]]
+    rows.add({}, DAYS[0], {}, status='blocked', control='base', phase='floor', error=unfrozen[DAYS[0]])
+    held = {}
+    batch = search.next_batch(study, rows.rows, settings=SETTINGS, key_of=rows.key_of, unfrozen=unfrozen, held=held)
+    assert not [t for t in batch if t.day == DAYS[0]] and 'not frozen' in held[DAYS[0]]
+    # frozen now: the blocked base is handed out again (alone), then the variants
+    batch = search.next_batch(study, rows.rows, settings=SETTINGS, key_of=rows.key_of, unfrozen={})
+    assert [t.day for t in batch if t.control == 'base'] == list(DAYS) and _variants(batch, DAYS[0]) == []
+
+
+def test_untried_keys_counts_what_is_left(tmp_path):
+    sd, study = make_study(tmp_path)
+    rows = Rows(study)
+    assert len(search.untried_keys(study, rows.rows, settings=SETTINGS, key_of=rows.key_of)) == 10
+    rows.base()
+    rows.add({AMAX: 1.3}, DAYS[0], {}, status='failed', error='SYNTAX (fake)')
+    assert len(search.untried_keys(study, rows.rows, settings=SETTINGS, key_of=rows.key_of)) == 7

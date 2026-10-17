@@ -210,6 +210,13 @@ def test_param_space_has_no_override_for_locked_keys():
     import inspect
     sig = inspect.signature(sp.ParamSpace.__init__)
     assert 'allow_locked' not in sig.parameters and 'force' not in sig.parameters and 'override' not in sig.parameters
+    # the only way past the lock is the explicit, audited per-study unlock, and it needs a reason
+    assert sig.parameters['unlocked'].default == () and sig.parameters['unlock_reason'].default is None
+    with pytest.raises(sp.SpaceError, match='unlock reason'):
+        sp.ParamSpace({'profile max_iob': dict(type='float', low=3, high=12, step=0.5)}, unlocked=['profile max_iob'])
+    with pytest.raises(sp.SpaceError, match='unlock reason'):
+        sp.ParamSpace({'profile max_iob': dict(type='float', low=3, high=12, step=0.5)}, unlocked=['profile max_iob'],
+                      unlock_reason='   ')
     # check_locked=False exists only for re-reading a study.json; the contract layer refuses such a study anyway
     with pytest.raises(c.ContractError) as e:
         c.Study.new('x', ['2026-09-06'], {'profile max_iob': {'type': 'bool'}}).validate()
@@ -313,8 +320,17 @@ def test_default_space_files_exist_and_load():
     for tier, path in sp.DEFAULT_SPACE_FILES.items():
         assert os.path.isfile(path), path
         space, constraints, meta = sp.load_space_file(path)
-        ps = sp.ParamSpace(space, constraints)
-        assert len(ps) >= 10 and meta['tier'] == tier
+        if tier in sp.REQUIRES_UNLOCK:
+            assert meta['requires_unlock'] is True and meta['evidence'] == sp.EVIDENCE_WEAK
+            with pytest.raises(sp.LockedKeyError):
+                sp.ParamSpace(space, constraints, settings=SETTINGS)
+            ps = sp.ParamSpace(space, constraints, settings=SETTINGS, unlocked=meta['locked_keys'], unlock_reason='test')
+            assert len(ps) >= 2
+        else:
+            assert meta['requires_unlock'] is False and meta['evidence'] is None and meta['locked_keys'] == []
+            ps = sp.ParamSpace(space, constraints)
+            assert len(ps) >= 10
+        assert meta['tier'] == tier
         assert all(isinstance(v, str) for v in meta['_about'])
         assert not any(w in ' '.join(meta['_about']).lower() for w in ('better', 'optimal', 'safer', 'recommended setting'))
     space, constraints, _ = sp.load_space_file(sp.DEFAULT_SPACE_FILES['A'])
@@ -333,5 +349,150 @@ def test_default_space_files_are_centred_on_the_phone():
 
 def test_write_default_spaces_round_trip(tmp_path):
     paths = sp.write_default_spaces(str(tmp_path), settings=SETTINGS or {})
-    assert len(paths) == 2 and sp.stale_default_spaces(str(tmp_path), settings=SETTINGS or {}) == []
-    assert sp.stale_default_spaces(str(tmp_path / 'nowhere'), settings={}) == ['autoisf_tierA.json', 'autoisf_tierB.json']
+    assert len(paths) == 4 and sp.stale_default_spaces(str(tmp_path), settings=SETTINGS or {}) == []
+    assert sp.stale_default_spaces(str(tmp_path / 'nowhere'), settings={}) == [
+        'autoisf_tierA.json', 'autoisf_tierB.json', 'profile_tierC.json', 'safety_tierS.json']
+
+
+# ----------------------------------------------------------------------------- unlock, scale, tiers C and S
+
+def test_refuse_locked_honours_the_unlock_list():
+    names = ['profile autoISF_max', 'profile max_iob', 'profile sens']
+    with pytest.raises(sp.LockedKeyError) as e:
+        sp.refuse_locked(names)
+    assert e.value.keys == ['profile max_iob', 'profile sens'] and '--unlock' in str(e.value)
+    assert sp.refuse_locked(names, SETTINGS, unlocked=['profile max_iob', 'profile sens']) == names
+    with pytest.raises(sp.LockedKeyError) as e:                  # unlocking one key leaves the other locked
+        sp.refuse_locked(names, SETTINGS, unlocked=['profile sens'])
+    assert e.value.keys == ['profile max_iob']
+    assert sp.refuse_locked(['profile max_iob'], SETTINGS, unlocked=['profile  max_iob']) == ['profile max_iob']
+
+
+@pytest.mark.parametrize('name', ['new_parameter SMBRatio', 'profile dia', 'iob_data iob'])
+def test_some_keys_can_never_be_unlocked(name):
+    assert c.unlock_refusal(name)
+    assert c.locked_reason(name, unlocked=[name])
+    with pytest.raises(sp.LockedKeyError):
+        sp.ParamSpace({name: dict(type='bool')}, unlocked=[name], unlock_reason='asked for')
+
+
+def test_param_space_with_unlock_and_reason():
+    ps = sp.ParamSpace({'profile max_iob': dict(type='float', low=3, high=12, step=0.5),
+                        'profile sens': dict(type='scale', low=0.7, high=1.4, step=0.05)},
+                       settings=SETTINGS, unlocked=['profile max_iob', 'profile sens'], unlock_reason='Markus asked')
+    assert ps.unlocked == ['profile max_iob', 'profile sens'] and ps.scale_names() == ['profile sens']
+    with pytest.raises(sp.LockedKeyError):                       # the plain call keeps refusing (exit 3 path)
+        sp.ParamSpace(ps.space, settings=SETTINGS)
+
+
+def test_scale_param_grid_and_identity():
+    p = SpaceParam('scale', 0.7, 1.4, 0.05, target='profile sens')
+    vals = p.values()
+    assert vals[0] == 0.7 and vals[-1] == 1.4 and 1.0 in vals and len(vals) == 15
+    assert sp.snap(p, 1.12) == 1.1 and sp.on_grid(p, 1.05) and not sp.on_grid(p, 1.07)
+    ps = sp.ParamSpace({'profile sens': p}, unlocked=['profile sens'], unlock_reason='x')
+    assert ps.vhash({'profile sens': 1.1}) == c.vhash({'profile sens': 1.1}) == ps.vhash({'profile sens': 1.1000000001})
+    assert c.canonical_params({'profile sens': 1.1}) == 'profile sens 1.1'
+    assert ps.variant_name({'profile sens': 1.1}) == 'sens_1.1'
+    assert ps.oaat_points(levels=3, centre={'profile sens': 1.0}) == [{'profile sens': 0.7}, {'profile sens': 1.05}, {'profile sens': 1.4}]
+
+
+@pytest.mark.parametrize('space, needle', [
+    ({'profile autoISF_max': dict(type='scale', low=0.7, high=1.4, step=0.05)}, 'type scale is for'),
+    ({'profile sens': dict(type='float', low=20, high=80, step=5)}, 'search it as type scale'),
+    ({'profile sens': dict(type='scale', low=1.1, high=1.4, step=0.05)}, 'must contain 1.0'),
+    ({'profile sens': dict(type='scale', low=0.75, high=1.45, step=0.1)}, 'must contain 1.0'),
+    ({'profile sens': dict(type='scale', low=0.0, high=1.4, step=0.05)}, '0 < low < high'),
+    ({'profile sens': dict(type='scale', low=0.7, high=1.4, step=0.05, target='profile carb_ratio')}, 'target'),
+    ({'profile autoISF_max': dict(type='float', low=1, high=2, step=0.1, target='profile sens')}, 'only for type scale'),
+])
+def test_scale_definition_errors(space, needle):
+    with pytest.raises(sp.SpaceError) as e:
+        sp.ParamSpace(space, unlocked=list(space), unlock_reason='x')
+    assert needle in str(e.value)
+
+
+def test_scale_vdf_rows_exact():
+    assert sp.scale_expression('profile sens', 1.1) == "profile['sens']*1.1"
+    assert sp.scale_expression('profile carb_ratio', 0.85) == "profile['carb_ratio']*0.85"
+    assert sp.scale_expression('profile current_basal', 1.1) == "round(profile['current_basal']*1.1/0.05)*0.05"
+    assert sp.scale_expression('profile profile_percentage', 1.2) == "profile['profile_percentage']*1.2"
+    assert sp.scale_expression('profile sens', 1.0) is None and sp.scale_expression('profile sens', 1) is None
+    with pytest.raises(sp.SpaceError):
+        sp.scale_expression('profile autoISF_max', 1.1)
+    text = sp.vdf_text({'profile sens': 1.1, 'profile current_basal': 0.9, 'profile carb_ratio': 1.0,
+                        'profile autoISF_max': 1.3},
+                       names=['profile sens', 'profile current_basal', 'profile carb_ratio', 'profile autoISF_max'])
+    assert text.splitlines() == [
+        "profile      sens                             profile['sens']*1.1 ### emulator_optimize hindcast scale x1.1",
+        "profile      current_basal                    round(profile['current_basal']*0.9/0.05)*0.05 "
+        "### emulator_optimize hindcast scale x0.9",
+        'profile      autoISF_max                      1.3              ### emulator_optimize hindcast',
+    ]                                                            # carb_ratio at 1.0 = the phone: no row
+    assert sp.parse_vdf_text(text) == {'profile sens': 1.1, 'profile current_basal': 0.9, 'profile autoISF_max': 1.3}
+    # what setVariant() does with the row: eval on the freshly parsed profile of the loop
+    profile = {'sens': 54.0, 'current_basal': 0.65, 'carb_ratio': 9.0}
+    for line in text.splitlines()[:2]:
+        array, item, value = sp.parse_vdf_row(line)
+        profile[item] = eval(value, {}, {'profile': dict(profile)})
+    assert profile['sens'] == pytest.approx(59.4)
+    assert profile['current_basal'] == pytest.approx(0.6)          # 0.585 rounded to the 0.05 pump step
+    assert sp.PUMP_BASAL_STEP == ((SETTINGS.get('safety') or {}).get('basal_step') or 0.05)
+
+
+def test_scale_phone_is_one_and_controls_write_no_row():
+    for name in ('profile sens', 'profile carb_ratio', 'profile current_basal', 'profile profile_percentage'):
+        assert sp.phone_value(name, SETTINGS) == 1.0 and sp.phone_value(name, {}, at_ms=0) == 1.0
+    ps = sp.ParamSpace({'profile sens': dict(type='scale', low=0.7, high=1.4, step=0.05),
+                        'profile autoISF_max': dict(type='float', low=1.0, high=2.0, step=0.05)},
+                       unlocked=['profile sens'], unlock_reason='x')
+    point = ps.phone_point(SETTINGS or {'autoisf': {'autoISF_max': 1.5}})
+    assert point['profile sens'] == 1.0
+    rows = [l for l in sp.vdf_text(point, names=ps.names).splitlines() if l.strip()]
+    assert all('sens' not in l for l in rows)                    # the sentinel's scale rows are empty by design
+
+
+def _settings_value(item):
+    for section in sp.SETTINGS_SECTIONS:
+        sec = SETTINGS.get(section) or {}
+        if item in sec:
+            return sec[item]
+    return None
+
+
+@pytest.mark.skipif(not SETTINGS, reason='software/ns_settings.json missing')
+def test_tier_c_and_s_files_load_with_phone_semantics():
+    space, constraints, meta = sp.load_space_file(sp.DEFAULT_SPACE_FILES['C'], SETTINGS)
+    assert set(space) == {'profile sens', 'profile carb_ratio', 'profile current_basal', 'profile profile_percentage'}
+    assert meta['requires_unlock'] is True and meta['evidence'] == 'weak: decision-level replay, no glucose response'
+    assert meta['locked_keys'] == ['profile sens', 'profile carb_ratio', 'profile current_basal']
+    assert sp.space_file_notice(meta)[0] == 'evidence: weak: decision-level replay, no glucose response'
+    with open(sp.DEFAULT_SPACE_FILES['C'], encoding='utf-8') as fh:
+        raw = json.load(fh)['space']
+    for name, p in space.items():
+        assert p.type == 'scale' and p.phone == 1.0 and p.target == name
+        assert (p.low, p.high, p.step) == (0.7, 1.4, 0.05)
+        assert 'weak evidence' in raw[name]['_note'].lower()
+    space, constraints, meta = sp.load_space_file(sp.DEFAULT_SPACE_FILES['S'], SETTINGS)
+    assert set(space) == {'profile max_iob', 'profile max_basal'}       # maxSMB/UAMSMBBasalMinutes are tier B
+    assert meta['requires_unlock'] is True and meta['locked_keys'] == ['profile max_iob', 'profile max_basal']
+    assert space['profile max_iob'].phone == SETTINGS['safety']['max_iob'] == 7.0
+    assert space['profile max_basal'].phone == SETTINGS['safety']['max_basal'] == 3.0
+    assert (space['profile max_iob'].low, space['profile max_iob'].high, space['profile max_iob'].step) == (3.0, 12.0, 0.5)
+    assert (space['profile max_basal'].low, space['profile max_basal'].high, space['profile max_basal'].step) == (1.0, 6.0, 0.25)
+    for name, p in space.items():
+        assert p.phone == _settings_value(name.split()[1]) and sp.on_grid(p, p.phone)
+    with open(sp.DEFAULT_SPACE_FILES['S'], encoding='utf-8') as fh:
+        raw = json.load(fh)
+    assert all('cap binds' in v['_note'] for v in raw['space'].values())
+    for tier in ('C', 'S'):
+        text = ' '.join(sp.default_space(tier, SETTINGS)['_about']).lower()
+        assert not any(w in text for w in ('better', 'optimal', 'safer', 'recommended setting'))
+
+
+def test_profile_percentage_is_read_by_determine_basal():
+    """tier C lists profile_percentage only because determine_basal.py reads it (iobTH_reduction_ratio)."""
+    path = os.path.join(sp.SOFTWARE_DIR, 'determine_basal.py')
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        code = [l for l in fh if "profile['profile_percentage']" in l and not l.lstrip().startswith('#')]
+    assert code and 'profile profile_percentage' in sp._TIER_C

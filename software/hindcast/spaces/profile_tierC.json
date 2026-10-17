@@ -1,0 +1,56 @@
+{
+ "_about": [
+  "Hindcast default parameter space, tier C (ShadowLoop proposal section 4, DESIGN.md section 5.4).",
+  "One entry per VDF key \"<array> <item>\": type float/int (low, high, step: the searched step grid), bool, or",
+  "choice (explicit values). \"phone\" is the current value in ns_settings.json (the centre of the one-at-a-time",
+  "screen and the sentinel); regenerate with `python -m hindcast.space --write-defaults` after a preferences import.",
+  "Constraints are ordering chains the sampler keeps by construction. Locked keys (DESIGN.md section 3: safety",
+  "section, profile sens/carb_ratio/current_basal/dia, every new_parameter key) stay locked unless a study unlocks them explicitly.",
+  "This file says what a replay may vary; it recommends nothing. Nothing in Hindcast changes the phone.",
+  "Tier C: the profile itself as multipliers of the value each loop recorded (type scale, phone 1.0 = the recorded profile, which writes no VDF row). sens, carb_ratio and current_basal are locked by default: a study needs --unlock KEY --unlock-reason TEXT (stored in study.json); profile_percentage is not locked.",
+  "A decision-level replay cannot judge a different profile: it shows how the loop would have decided with the scaled value over the glucose the phone's own profile produced. Weak evidence; for review by hand."
+ ],
+ "tier": "C",
+ "phone_source": "ns_settings.json",
+ "_requires_unlock": true,
+ "_evidence": "weak: decision-level replay, no glucose response",
+ "space": {
+  "profile sens": {
+   "type": "scale",
+   "low": 0.7,
+   "high": 1.4,
+   "step": 0.05,
+   "phone": 1.0,
+   "target": "profile sens",
+   "_note": "Weak evidence: decision-level replay, no glucose response - the replay keeps the glucose and insulin history the phone's own settings produced, so it says how the decisions would have moved, never what glucose would have done. Multiplier of the profile ISF of each loop (Nightscout schedule, mg/dl/U): the VDF row is profile['sens']*x. It moves the autoISF-final ISF, insulinReq, SMB and TBR and the carb sensitivity (csf = sens / carb_ratio) of the COB prediction."
+  },
+  "profile carb_ratio": {
+   "type": "scale",
+   "low": 0.7,
+   "high": 1.4,
+   "step": 0.05,
+   "phone": 1.0,
+   "target": "profile carb_ratio",
+   "_note": "Weak evidence: decision-level replay, no glucose response - the replay keeps the glucose and insulin history the phone's own settings produced, so it says how the decisions would have moved, never what glucose would have done. Multiplier of the profile CR of each loop. In determine_basal.py it enters the COB prediction (csf = sens / carb_ratio) and the meal insulin echo only; COB itself is the phone's (devicestatus), so the replay cannot follow a different carb absorption or bolus."
+  },
+  "profile current_basal": {
+   "type": "scale",
+   "low": 0.7,
+   "high": 1.4,
+   "step": 0.05,
+   "phone": 1.0,
+   "target": "profile current_basal",
+   "_note": "Weak evidence: decision-level replay, no glucose response - the replay keeps the glucose and insulin history the phone's own settings produced, so it says how the decisions would have moved, never what glucose would have done. Multiplier of the scheduled basal of each loop, re-rounded to the 0.05 U/h pump step (round(profile['current_basal']*x/0.05)*0.05). It moves the neutral temp, the TBR arithmetic and maxBolus (smb_max_range_extension * basal * minutes), but not max_basal (ns_profile derived it from the unscaled basal) and not the IOB of past temp basals (net IOB is relative to the recorded schedule). At small rates neighbouring multipliers round to the same pump rate (0.15 U/h x 0.9 -> 0.15, x 0.8 -> 0.10): a dead stretch of the grid is the pump step, not a result."
+  },
+  "profile profile_percentage": {
+   "type": "scale",
+   "low": 0.7,
+   "high": 1.4,
+   "step": 0.05,
+   "phone": 1.0,
+   "target": "profile profile_percentage",
+   "_note": "Weak evidence: decision-level replay, no glucose response - the replay keeps the glucose and insulin history the phone's own settings produced, so it says how the decisions would have moved, never what glucose would have done. Multiplier of the Profile Switch percentage the loop ran under (100 % = 1.0). determine_basal.py reads it only in iobTH_reduction_ratio (percentage/100 * exercise * activity ratio, active because iob_threshold_percent is not 100); it does NOT rescale sens / CR / basal here, ns_profile already applied the recorded percentage. To mimic a Profile Switch of x combine it with sens and carb_ratio near 1/x and current_basal near x. Not locked itself."
+  }
+ },
+ "constraints": []
+}

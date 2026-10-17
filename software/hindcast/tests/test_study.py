@@ -221,9 +221,9 @@ def test_stop_file_stops_after_current_trial(tmp_path):
         return ok_evaluate(task)
 
     res = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0).run(tasks, evaluate)
-    assert res.exit_code == 0 and res.stop_reason == 'STOP file' and res.done == 3
+    assert res.exit_code == 0 and res.stop_reason == st.STOP_REASON and res.stop_file and res.done == 3
     assert not sd.stop_requested()                                              # consumed
-    assert sd.read_state().stop_reason == 'STOP file'
+    assert sd.read_state().stop_reason == st.STOP_REASON
     res2 = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0).run(tasks, ok_evaluate)
     assert res2.done == 7 and res2.skipped == 3 and len(sd.done_keys()) == 10
 
@@ -679,3 +679,163 @@ def test_second_concurrent_run_exits_3(tmp_path):
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=10)
     assert sd.read_state().pid == proc.pid                                      # the first run's state was never touched
+
+
+# ----------------------------------------------------------------------------- session, batch exceptions (wave 3 fixes)
+
+def test_session_holds_one_lock_across_runs_and_keeps_a_stop(tmp_path):
+    """open_session ... close_session: the runs inside neither release the lock nor remove a STOP file; the one
+    release carries the real exit code and removes the STOP that stopped the run (told by RunResult.stop_file)."""
+    sd = make_study(tmp_path)
+    study = sd.load_study(SETTINGS)
+    tasks = st.study_tasks(study, SETTINGS)
+    runner = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0)
+    sd.request_stop('left over')
+    runner.open_session('planning round 1')
+    assert not sd.stop_requested()                                              # a whole run starts: cleared once
+    res = runner.run(tasks[:4], ok_evaluate)
+    assert res.exit_code == 0 and res.done == 4 and res.already_done == 0
+    state = sd.read_state()
+    assert state.exit_code is None and sd.read_lock()['pid'] == os.getpid()     # still held between the runs
+    sd.request_stop('between rounds')
+    res2 = runner.run(tasks, ok_evaluate)                                       # checked before the first trial
+    assert res2.stop_reason == st.STOP_REASON and res2.stop_file and res2.done == 0 and res2.already_done == 4
+    assert sd.stop_requested() and sd.read_state().exit_code is None            # kept for the orchestrator
+    runner.close_session(0, st.STOP_REASON, stop_file=res2.stop_file)
+    assert sd.read_state().exit_code == 0 and sd.read_lock() is None and not sd.stop_requested()
+
+
+def test_an_exception_out_of_batch_evaluate_is_exit_2_with_the_rows_kept(tmp_path):
+    """The batch path: rows recorded before the exception stay, the run exits 2 with the exception's type and first
+    line (home directory shortened, lint-clean) as the stop reason, and the lock is released."""
+    from hindcast import lint
+    sd = make_study(tmp_path)
+    study = sd.load_study(SETTINGS)
+    tasks = st.study_tasks(study, SETTINGS)
+    home = os.path.expanduser('~')
+
+    def batch_evaluate(queue):
+        yield queue[0], ok_evaluate(queue[0])
+        yield queue[1], ok_evaluate(queue[1])
+        raise RuntimeError(f'pool broke reading {home}/x.json\nsecond line')
+
+    res = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0).run(tasks, None, batch_evaluate=batch_evaluate)
+    assert res.exit_code == st.EXIT_GUARD and res.done == 2 and len(sd.trials()) == 2
+    assert res.stop_reason == 'guard: the evaluation raised RuntimeError: pool broke reading ~/x.json'
+    assert not lint.lint_findings(res.stop_reason, 'issue')
+    state = sd.read_state()
+    assert state.exit_code == st.EXIT_GUARD and state.stop_reason == res.stop_reason and sd.read_lock() is None
+
+
+def test_a_runstop_from_the_batch_iterator_is_a_clean_exit(tmp_path):
+    sd = make_study(tmp_path)
+    study = sd.load_study(SETTINGS)
+    tasks = st.study_tasks(study, SETTINGS)
+    runner = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0)
+
+    def batch_evaluate(queue):
+        yield queue[0], ok_evaluate(queue[0])
+        sd.request_stop('while waiting')
+        runner.idle()                                                           # what the pool calls on a wake
+
+    res = runner.run(tasks, None, batch_evaluate=batch_evaluate)
+    assert (res.exit_code, res.stop_reason, res.done, res.stop_file) == (0, st.STOP_REASON, 1, True) and not sd.stop_requested()
+
+
+def test_status_keeps_the_planned_count_after_a_stop(tmp_path):
+    sd = make_study(tmp_path)
+    study = sd.load_study(SETTINGS)
+    tasks = st.study_tasks(study, SETTINGS)
+
+    def evaluate(task):
+        if len(sd.trials()) == 2:
+            sd.request_stop()
+        return ok_evaluate(task)
+    st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0).run(tasks, evaluate)
+    status = st.build_status(sd)
+    assert status.exit_code == 0 and status.trials_done == 3 and status.trials_planned == 10
+
+
+# ----------------------------------------------------------------------------- stop reason, close order, round lines (verifier fixes)
+
+def test_close_session_removes_stop_by_the_flag_not_by_the_reason_text(tmp_path):
+    """close_session decides on the explicit stop_file flag: a reason that only mentions a STOP file leaves the
+    file alone, the flag removes it whatever the reason text says."""
+    sd = make_study(tmp_path)
+    study = sd.load_study(SETTINGS)
+    runner = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0)
+    runner.open_session('planning round 1')
+    sd.request_stop('for the next run')
+    runner.close_session(0, 'budget exhausted; the STOP file came later', stop_file=False)
+    assert sd.stop_requested() and sd.read_lock() is None
+    runner.open_session('planning round 1')                                     # a whole run starts: cleared
+    sd.request_stop('now')
+    runner.close_session(0, 'any wording', stop_file=True)
+    assert not sd.stop_requested() and sd.read_state().stop_reason == 'any wording'
+
+
+def test_one_stop_reason_inside_a_round_and_from_idle(tmp_path):
+    """The STOP file gives study.STOP_REASON and stop_file=True on the serial path and through idle(); a budget
+    stop gives neither."""
+    sd = make_study(tmp_path)
+    study = sd.load_study(SETTINGS)
+    tasks = st.study_tasks(study, SETTINGS)
+    runner = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0)
+    runner.open_session('planning round 1')
+    sd.request_stop('x')
+    with pytest.raises(st.RunStop) as e:
+        runner.idle()
+    assert e.value.reason == st.STOP_REASON and e.value.stop_file is True
+    runner.close_session(0, e.value.reason, stop_file=e.value.stop_file)
+    res = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0, budget_s=0).run(tasks, ok_evaluate)
+    assert res.stop_reason == 'budget exhausted' and res.stop_file is False
+
+
+def test_close_session_order_stop_then_publish_under_the_lock_then_release(tmp_path):
+    """Delete STOP first, run before_release (tier 1, report) while the lock is held - build_status in this process
+    already shows the final exit code and reason, STATE.json on disk does not - and release last. An exception in
+    before_release still releases."""
+    sd = make_study(tmp_path)
+    study = sd.load_study(SETTINGS)
+    tasks = st.study_tasks(study, SETTINGS)
+    runner = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0)
+    runner.open_session('planning round 1')
+    sd.request_stop('test')
+    res = runner.run(tasks, ok_evaluate)
+    assert res.stop_file and sd.stop_requested()
+    seen = {}
+
+    def before_release():
+        status = st.build_status(sd)
+        seen.update(stop=sd.stop_requested(), lock=(sd.read_lock() or {}).get('pid'),
+                    disk_exit=sd.read_state().exit_code, exit=status.exit_code, reason=status.stop_reason,
+                    running=status.running)
+        raise RuntimeError('the page broke')
+
+    runner.close_session(0, res.stop_reason, stop_file=res.stop_file, before_release=before_release)
+    assert seen == {'stop': False, 'lock': os.getpid(), 'disk_exit': None, 'exit': 0, 'reason': st.STOP_REASON,
+                    'running': False}
+    state = sd.read_state()
+    assert state.exit_code == 0 and state.stop_reason == st.STOP_REASON and sd.read_lock() is None
+    assert sd.closing is None and json.load(open(sd.status_path))['exit_code'] == 0
+
+
+def test_a_round_inside_a_session_logs_a_round_line_not_an_exit(tmp_path):
+    """Inside a session runner.run logs 'round N recorded: ...' (the exit line belongs to the session's close); a
+    standalone run keeps its 'finished; ...; exit 0' line."""
+    import dataclasses
+    sd = make_study(tmp_path)
+    study = sd.load_study(SETTINGS)
+    tasks = [dataclasses.replace(t, round=4) for t in st.study_tasks(study, SETTINGS)]
+    lines = []
+    runner = st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0, log=lines.append)
+    runner.open_session('planning round 4')
+    runner.run(tasks[:2], ok_evaluate)
+    sd.request_stop('x')
+    runner.run(tasks, ok_evaluate)
+    runner.close_session(0, st.STOP_REASON, stop_file=True)
+    assert lines == ['s1: round 4 recorded: 2 rows appended, 0 already done, 0 failed, 0 blocked',
+                     's1: round 4 recorded: 0 rows appended, 2 already done, 0 failed, 0 blocked; ' + st.STOP_REASON]
+    lines.clear()
+    st.Runner(sd, study, settings=SETTINGS, min_disk_mb=0, log=lines.append).run(tasks[:3], ok_evaluate)
+    assert lines == ['s1: finished; 1 rows appended, 2 already done, 0 failed, 0 blocked; exit 0']

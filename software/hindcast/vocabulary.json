@@ -52,7 +52,7 @@
     },
     {
       "phrase": "safer",
-      "pattern": "\\bsafe(?:r|st)?\\b",
+      "pattern": "\\b(?:safe(?!-area\\b)|safer|safest)\\b",
       "why": "a safety judgement about glucose outcomes; the replay cannot make one ('safety reading' for a number a human checks is fine)",
       "example": "The lower cap is safer."
     },
@@ -138,21 +138,21 @@
   "privacy": [
     {
       "name": "U/day",
-      "pattern": "\\bU\\s*/\\s*(?:day|d)\\b|\\bunits?\\s+per\\s+day\\b|\\bTDD\\b",
-      "why": "insulin per day is Nightscout data; it belongs in the private artifact, not in a public issue",
+      "pattern": "\\bU\\s*/\\s*(?:day|d)\\b|\\bunits?\\s+per\\s+day\\b|\\bU\\s+(?:[a-z]+\\s+){0,4}per\\s+day\\b|\\bTDD\\b|\\btotal\\s+daily\\s+(?:dose|insulin)\\b|%\\s*of\\s+(?:the\\s+)?(?:phone'?s\\s+)?(?:TDD|total\\s+daily|daily\\s+insulin)",
+      "why": "insulin per day (and a share of the total daily dose) is Nightscout data; it belongs in the private artifact, not in a public issue",
       "example": "SMB total +4.05 U/day on the first day.",
       "passes": "the day count and the parameter ranges are in the campaign table"
     },
     {
       "name": "mmol",
-      "pattern": "\\bmmol\\b",
+      "pattern": "(?<![a-z])mmol",
       "why": "a glucose value or unit; glucose data never leaves the private artifact",
       "example": "minGuard fell to 3.6 mmol.",
       "passes": "autoISF_max 1.3 -> 1.5 (preference values may be named)"
     },
     {
       "name": "mg/dl",
-      "pattern": "\\bmg\\s*/\\s*dl\\b",
+      "pattern": "(?<![a-z])mg\\s*/\\s*dl\\b|\\bmgdl\\b",
       "why": "a glucose value or unit",
       "example": "BG 65 mg/dl at the time of the loop.",
       "passes": "smb_delivery_ratio_bg_range stays at its current value"
@@ -180,17 +180,17 @@
     },
     {
       "name": "insulin units",
-      "pattern": "(?<![\\w.])(?:[1-9]\\d*(?:\\.\\d+)?|0\\.[5-9]\\d*)\\s?U\\b(?:\\s*/\\s*h)?",
-      "why": "an insulin amount in units is dosing data (amounts under 0.5 U pass so tolerances such as 0.05 U can be named)",
-      "example": "The variant asks for 2.65 U more.",
-      "passes": "within 0.05 U of the phone"
+      "pattern": "(?<![\\w.])(?!(?<=within )0\\.0\\d+\\s?U\\b)[+\\-−±]?\\d+(?:[.,]\\d+)?\\s?U\\b(?:\\s*/\\s*h)?",
+      "why": "an insulin amount in units is dosing data, however small; say the direction and the floor multiple ('asked for less insulin in rising loops, 2.9 x the floor') and leave the amount to the private artifact (only a fixed tolerance under 0.1 U after 'within', such as 'SMB within 0.05 U', passes)",
+      "example": "would have asked for 0.06 U less than base in the other loops",
+      "passes": "would have asked for less insulin than base in rising loops (2.9 x the floor) over 1 day; SMB within 0.05 U; UAM and enable_UAM may be named"
     },
     {
       "name": "loop count",
-      "pattern": "\\b\\d+(?:[ ,.]\\d{3})*\\s*(?:(?:more|fewer|less|additional|extra|changed|differing)\\s+)?loops\\b|\\bloops?\\s*[:=]\\s*\\d",
-      "why": "loop counts per day describe the person's data volume; issues carry day counts and trial counts only",
+      "pattern": "(?<![:.])(?<!\\d,)(?<!\\d-)\\b\\d+(?:[ ,.]\\d{3})*\\s*(?:(?:more|fewer|less|additional|extra|changed|differing|different|affected|other)\\s+)?loops?\\b|\\bloops?\\s*(?:changed|differ(?:s|ed|ing)?|affected)?\\s*[:=]\\s*\\d|\\bloops?\\s+(?:changed|differ(?:s|ed|ing)?|affected)\\s+(?:by\\s+|in\\s+)?\\d|\\bloop\\s+counts?\\s*(?:of\\s+|[:=]\\s*)?\\d",
+      "why": "loop counts describe the person's data volume; issues carry day counts, trial counts and decision shares (% of loops) only",
       "example": "1 311 loops on the search day.",
-      "passes": "replayed over 7 days, 240 trials done"
+      "passes": "replayed over 7 days, 240 trials done; the 09:00 loop differs; cap binding 9.7 % of loops"
     },
     {
       "name": "carbs",

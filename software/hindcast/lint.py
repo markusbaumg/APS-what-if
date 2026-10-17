@@ -17,7 +17,9 @@ module only applies them.
 Kinds (`KINDS`):
     'card'      candidate card: vocabulary rules + the honesty paragraph must be present
     'proposal'  proposal body:  vocabulary rules + the honesty paragraph must be present
-    'issue'     anything posted to GitHub: vocabulary rules + privacy rules (the repository is public)
+    'issue'     anything posted to GitHub: vocabulary rules + privacy rules (the repository is public): no insulin
+                amount in units however small, no U per day or share of the TDD, no glucose value or unit, no loop
+                count; direction words and floor multiples ('2.9 x the floor') pass
     'line'      a one-line chat / status string: vocabulary rules only
 
 Contract:
@@ -177,8 +179,10 @@ def render_vocabulary_markdown(vocab=None):
     for e in v['may_not']:
         out.append('- **%s** - %s' % (e['phrase'], e.get('why', '')))
     out += ['', '## Privacy (GitHub issues and comments; the repository is public)', '',
-            'Preference names and values may appear. Glucose values, insulin units per day, loop counts per day,',
-            'transcript excerpts and prediction arrays may not; link to the private artifact instead.', '']
+            'Preference names and values may appear. Glucose values and units, insulin amounts in units (any size,',
+            'per loop or per day), shares of the TDD, loop counts, transcript excerpts and prediction arrays may not;',
+            'say the direction and the floor multiple ("asked for less insulin in rising loops, 2.9 x the floor") and',
+            'link to the private artifact for the amounts.', '']
     for e in v['privacy']:
         line = '- **%s** - %s' % (e['name'], e.get('why', ''))
         if e.get('passes'):

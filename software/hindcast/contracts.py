@@ -31,11 +31,25 @@ Canonical parameter text: one line per parameter, sorted by name, `<array> <item
 `emulator_optimize.vdf_value` as the value repr, so `1.3` and `1.30` hash alike but `1` and `1.0` do not (the
 VDF rows differ too).
 
-Locked keys (DESIGN.md section 3, enforced here with no override): every `new_parameter` key, `profile sens`,
-`profile carb_ratio`, `profile current_basal`, `profile dia` and every key of the `safety` section of
-ns_settings.json (copied 1:1 into the profile by ns_profile). `locked_reason(name)` returns the reason text or None.
-The same locks hold for the rows of a study's base VDF (`locked_vdf_row_reason(line)`): what may not be searched may
-not be set through the base VDF either.
+Locked keys (DESIGN.md section 3): every `new_parameter` key, `profile sens`, `profile carb_ratio`,
+`profile current_basal`, `profile dia` and every key of the `safety` section of ns_settings.json (copied 1:1 into
+the profile by ns_profile). `locked_reason(name)` returns the reason text or None. The same locks hold for the rows
+of a study's base VDF (`locked_vdf_row_reason(line)`): what may not be searched may not be set through the base VDF
+either.
+
+Unlocking (the person whose data this is asked for studies over profile ISF / CR / basal and the safety caps; he
+reviews every proposal by hand): the lock stays the default. A study lifts it only explicitly, per study, and
+audited in study.json: `Study.unlocked` lists the '<array> <item>' keys, `Study.unlock_reason` (required, non-empty
+when the list is) says why. `locked_reason(name, settings, unlocked)` returns None for a listed key that may be
+unlocked at all (`unlock_refusal(name)`: never a `new_parameter` key, never a non-profile group, never
+`profile dia`, which enters through the recorded IOB and would be silently inert), the reason text otherwise.
+Every surface that shows an unlocked study adds `WEAK_EVIDENCE` (`Study.unlock_caveat()`): a decision-level
+replay keeps the glucose the phone's own profile produced, so it cannot judge a different profile.
+
+Scale parameters (`SpaceParam(type='scale')`, DESIGN.md section 5.4 tier C): the profile values Nightscout carries
+per loop from a time-varying schedule (`SCALE_KEYS`: sens, carb_ratio, current_basal, profile_percentage) are
+searched only as a multiplier of the recorded value (phone value `SCALE_PHONE` = 1.0); a scale on any other key and
+any other type on these keys are refused. The VDF row text is space.py's (`space.scale_expression`).
 
 The honesty statement every user-facing surface quotes verbatim is `HONESTY_STATEMENT`; `NOT_TESTABLE` is the
 "cannot be tested with this method" list for the page.
@@ -97,7 +111,14 @@ PHASE_STATES = ('pending', 'running', 'done', 'skipped', 'stopped')
 TRIAL_STATUSES = ('done', 'failed', 'blocked', 'stale', 'running')
 VERDICTS = ('pending', 'base', 'dead', 'candidate', 'tie', 'infeasible', 'recommended')
 DAY_ROLES = ('search', 'holdout', 'quarantined')
-PARAM_TYPES = ('float', 'int', 'bool', 'choice')
+PARAM_TYPES = ('float', 'int', 'bool', 'choice', 'scale')
+SCALE_KEYS = ('sens', 'carb_ratio', 'current_basal', 'profile_percentage')   # profile items searched only as a multiplier
+SCALE_PHONE = 1.0                                        # the phone's value of every scale: the recorded profile value
+NEVER_UNLOCKABLE_PROFILE_KEYS = ('dia',)                 # enters through the recorded IOB; a VDF row would be inert
+WEAK_EVIDENCE = ('weak evidence: this study varies keys that are locked by default (%s). A decision-level replay '
+                 'keeps the glucose and insulin history the phone\'s own profile and caps produced; it cannot judge a '
+                 'different profile or cap, only say how often and by how much the loop would have decided differently. '
+                 'Unlocked by the person whose data this is (reason: %s); every proposal is reviewed by hand.')
 STATUS_MAX_BYTES = 2048
 ROUND_MAX_BYTES_PER_VARIANT = 2048
 TRIAL_LINE_MAX_BYTES = 4096
@@ -213,15 +234,65 @@ def _locked_profile_keys(settings=None):
     return safety
 
 
-def locked_reason(name, settings=None):
-    """Why a parameter may not be searched by an unattended run, or None when it may.
-
-    `settings` (a loaded ns_settings.json) extends the safety list with whatever that file's `safety` section
-    holds, so a key added there later is locked without a code change."""
+def unlock_refusal(name):
+    """Why `name` can never be unlocked (a new_parameter key, a non-profile group, `profile dia`, a malformed
+    name), or None when a study may list it in `unlocked`."""
     try:
         array, item = split_param(name)
     except ContractError as e:
         return str(e)
+    if array in LOCKED_GROUPS:
+        return f'"{name}": {array} keys cannot be unlocked (emulator internals, DESIGN.md section 3)'
+    if array not in SEARCHABLE_GROUPS:
+        return f'"{name}": only {", ".join(SEARCHABLE_GROUPS)} keys can be unlocked'
+    if item in NEVER_UNLOCKABLE_PROFILE_KEYS:
+        return f'"{name}" cannot be unlocked: it enters through the recorded IOB, a VDF row would not change the replay'
+    return None
+
+
+def _is_unlocked(name, unlocked):
+    if not unlocked:
+        return False
+    target = ' '.join(str(name).split())
+    return any(' '.join(str(u).split()) == target for u in unlocked) and unlock_refusal(name) is None
+
+
+def is_scale_key(name):
+    """True for '<array> <item>' names that are searched only as a multiplier (profile sens, carb_ratio, ...)."""
+    parts = str(name).split()
+    return len(parts) == 2 and parts[0] == 'profile' and parts[1] in SCALE_KEYS
+
+
+def scale_problems(name, param):
+    """[problem, ...] for the scale rule: a scale only on SCALE_KEYS, SCALE_KEYS only as a scale, target = name."""
+    out = []
+    ptype = getattr(param, 'type', None)
+    if ptype == 'scale':
+        if not is_scale_key(name):
+            out.append(f'"{name}": type scale is for {", ".join("profile " + k for k in SCALE_KEYS)} only')
+        target = getattr(param, 'target', None)
+        if target is not None and ' '.join(str(target).split()) != ' '.join(str(name).split()):
+            out.append(f'"{name}": scale target "{target}" must be the parameter name itself')
+    elif is_scale_key(name):
+        out.append(f'"{name}" is a per-loop profile value: search it as type scale (a multiplier, phone 1.0), not {ptype}')
+    elif getattr(param, 'target', None) is not None:
+        out.append(f'"{name}": target is only for type scale')
+    return out
+
+
+def locked_reason(name, settings=None, unlocked=()):
+    """Why a parameter may not be searched by an unattended run, or None when it may.
+
+    `settings` (a loaded ns_settings.json) extends the safety list with whatever that file's `safety` section
+    holds, so a key added there later is locked without a code change. `unlocked` (a study's explicit list,
+    Study.unlocked) lifts the lock for a listed key unless `unlock_refusal(name)` forbids unlocking it; the
+    reason that a study carries alongside is checked by Study, not here."""
+    try:
+        array, item = split_param(name)
+    except ContractError as e:
+        return str(e)
+    if _is_unlocked(name, unlocked):
+        return None
     if array in LOCKED_GROUPS:
         return f'"{name}": every {array} key is locked for unattended runs (DESIGN.md section 3)'
     if array not in VDF_GROUPS:
@@ -242,15 +313,18 @@ def vdf_row_name(line):
     return f'{parts[0]} {parts[1]}'
 
 
-def locked_vdf_row_reason(line, settings=None):
+def locked_vdf_row_reason(line, settings=None, unlocked=()):
     """Why a base VDF row may not be carried by an unattended run (the DESIGN.md section 3 locks: every
     `new_parameter` row, a `profile` row on a safety key or on sens / carb_ratio / current_basal / dia), or None.
 
     The locks hold for the base rows exactly as for the searched space: a study that may not search `profile
     max_iob` may not set it through its base VDF either. Rows of the other groups (state, temp, STAIR..., the input
-    dicts) are not settings and pass here; the emulator applies them as any VDF."""
+    dicts) are not settings and pass here; the emulator applies them as any VDF. A key in `unlocked` (Study.unlocked)
+    passes like in locked_reason."""
     name = vdf_row_name(line)
     if name is None:
+        return None
+    if _is_unlocked(name, unlocked):
         return None
     array, item = name.split(' ', 1)
     if array in LOCKED_GROUPS:
@@ -456,16 +530,31 @@ class StudyDay(Document):
 
 @dataclass
 class SpaceParam(Document):
-    """One searched parameter. float/int: low, high, step (step grid); bool: nothing; choice: choices."""
-    type: Literal['float', 'int', 'bool', 'choice']
+    """One searched parameter. float/int: low, high, step (step grid); bool: nothing; choice: choices; scale: low,
+    high, step of a multiplier of the recorded profile value (1.0 on the grid, phone 1.0), target = the key itself."""
+    type: Literal['float', 'int', 'bool', 'choice', 'scale']
     low: Optional[float] = None
     high: Optional[float] = None
     step: Optional[float] = None
     choices: Optional[list[Any]] = None
     phone: Any = None                                    # the phone's current value (the centre of oaat), informational
+    target: Optional[str] = None                         # scale: the '<array> <item>' the multiplier applies to
 
     def _check(self, problems, name='param'):
-        if self.type in ('float', 'int'):
+        if self.type == 'scale':
+            if self.low is None or self.high is None or self.step is None:
+                problems.append(f'{name}: scale needs low, high and step')
+            else:
+                if not 0 < self.low < self.high:
+                    problems.append(f'{name}: scale needs 0 < low < high (got {self.low}, {self.high})')
+                if not self.step > 0:
+                    problems.append(f'{name}: step must be positive')
+                elif not self.low - 1e-9 <= SCALE_PHONE <= self.high + 1e-9 or \
+                        abs((SCALE_PHONE - self.low) / self.step - round((SCALE_PHONE - self.low) / self.step)) > 1e-6:
+                    problems.append(f'{name}: scale grid must contain {SCALE_PHONE} (the phone value)')
+            if self.choices:
+                problems.append(f'{name}: scale takes no choices')
+        elif self.type in ('float', 'int'):
             if self.low is None or self.high is None or self.step is None:
                 problems.append(f'{name}: {self.type} needs low, high and step')
             else:
@@ -482,7 +571,7 @@ class SpaceParam(Document):
             problems.append(f'{name}: bool takes no choices')
 
     def values(self):
-        """The step grid (float/int), [False, True] (bool) or the choices."""
+        """The step grid (float/int/scale), [False, True] (bool) or the choices."""
         if self.type == 'bool':
             return [False, True]
         if self.type == 'choice':
@@ -563,6 +652,14 @@ class Study(Document):
     outputs: str = 'seconds/bg/iob/autosens/acce/bg_ISF/pp/dura/ISFs/insReq/SMB/basal'
     private_repo: bool = False                           # relaxes the GitHub privacy lint to "no transcripts"
     notes: list[str] = field(default_factory=list)
+    unlocked: list[str] = field(default_factory=list)    # locked keys this study may vary ('<array> <item>'), audited
+    unlock_reason: Optional[str] = None                  # required, non-empty, when `unlocked` is
+
+    def unlock_caveat(self):
+        """The weak-evidence text every surface shows for a study with unlocked keys, or None."""
+        if not self.unlocked:
+            return None
+        return WEAK_EVIDENCE % (', '.join(self.unlocked), (self.unlock_reason or '').strip())
 
     @classmethod
     def new(cls, name, days, space, source='ns:', host='', question='explore', phases=None, budget=None,
@@ -608,11 +705,24 @@ class Study(Document):
             seen.add(d.day)
         if not self.space:
             problems.append('space: at least one parameter')
+        if self.unlocked and not (self.unlock_reason or '').strip():
+            problems.append('unlocked lists ' + ', '.join(self.unlocked) + ' but unlock_reason is empty '
+                            '(an unlock is explicit and audited: say why)')
+        seen_u = set()
+        for name in self.unlocked:
+            why = unlock_refusal(name)
+            if why:
+                problems.append(f'unlocked: {why}')
+            if name in seen_u:
+                problems.append(f'unlocked: "{name}" listed twice')
+            seen_u.add(name)
+        unlocked = self.unlocked if (self.unlock_reason or '').strip() else ()
         for name, p in self.space.items():
-            reason = locked_reason(name, settings)
+            reason = locked_reason(name, settings, unlocked)
             if reason:
                 problems.append(f'locked key {reason}')
             p._check(problems, name=f'space "{name}"')
+            problems.extend(scale_problems(name, p))
         for c in self.constraints:
             if len(c) < 3 or len(c) % 2 == 0:
                 problems.append(f'constraint {c}: expected "<key> <op> <key> [<op> <key>...]"')
@@ -629,19 +739,20 @@ class Study(Document):
         for line in self.base_vdf_lines:
             if vdf_row_name(line) in self.space:
                 problems.append(f'base VDF line "{line.strip()}" sets a searched parameter')
-            reason = locked_vdf_row_reason(line, settings)
+            reason = locked_vdf_row_reason(line, settings, unlocked)
             if reason:
                 problems.append(f'locked key in base VDF line "{line.strip()}": {reason}')
 
     def validate(self, settings=None):
         problems = self.problems()
+        unlocked = self.unlocked if (self.unlock_reason or '').strip() else ()
         if settings is not None:                          # re-run the lock checks with the settings-derived safety list
             for name in self.space:
-                reason = locked_reason(name, settings)
+                reason = locked_reason(name, settings, unlocked)
                 if reason and not any(reason in p for p in problems):
                     problems.append(f'locked key {reason}')
             for line in self.base_vdf_lines:
-                reason = locked_vdf_row_reason(line, settings)
+                reason = locked_vdf_row_reason(line, settings, unlocked)
                 if reason and not any(reason in p for p in problems):
                     problems.append(f'locked key in base VDF line "{line.strip()}": {reason}')
         if problems:

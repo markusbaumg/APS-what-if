@@ -41,9 +41,9 @@ def test_study_new_run_status_stop(tmp_path, capsys):
     study = sd.load_study(SETTINGS)
     assert study.phases[0].kind == 'grid' and len(study.space) == 2
 
-    rc = hc('study', 'run', 'demo', studies_dir=tmp_path)
+    rc = hc('study', 'run', 'demo', '--dry', studies_dir=tmp_path)            # the dry evaluator (H-305 kept it as --dry)
     out = capsys.readouterr().out
-    assert rc == 0 and 'not built yet' in out and 'blocked' in out and c.HONESTY_STATEMENT in out
+    assert rc == 0 and 'nothing is replayed' in out and 'blocked' in out and c.HONESTY_STATEMENT in out
     rows = sd.trials()
     assert len(rows) == 1 + 15 and all(r.status == 'blocked' for r in rows)   # base + the 15 grid points
     assert sd.read_state().exit_code == 0
@@ -146,11 +146,11 @@ def test_study_run_resumes_and_honours_stop(tmp_path, capsys):
     hc('study', 'new', 'r', '--days', '2026-09-06', '--param', 'profile autoISF_max', '1.1:1.3:0.1', studies_dir=tmp_path)
     sd = st.StudyDir(tmp_path / 'r')
     sd.request_stop()                                                          # a stale STOP: cleared at start
-    assert hc('study', 'run', 'r', studies_dir=tmp_path) == 0
+    assert hc('study', 'run', 'r', '--dry', studies_dir=tmp_path) == 0
     expected = len(st.study_tasks(sd.load_study(SETTINGS), SETTINGS))         # base + the oaat levels (phone value excluded)
     assert 3 <= expected <= 4 and len(sd.trials()) == expected
     n = len(sd.trials())
-    assert hc('study', 'run', 'r', studies_dir=tmp_path) == 0                  # blocked rows are re-evaluated (still blocked)
+    assert hc('study', 'run', 'r', '--dry', studies_dir=tmp_path) == 0         # blocked rows are re-evaluated (still blocked)
     assert len(sd.trials()) == 2 * n
     status = st.build_status(sd)
     assert status.trials_blocked == n and status.trials_planned == n          # per key, the latest row counts
@@ -180,3 +180,75 @@ def test_module_entry_point(tmp_path):
     assert r.returncode == 3 and 'profile max_iob' in r.stderr
     r = subprocess.run([sys.executable, '-m', 'hindcast'], env=env, cwd=SOFTWARE_DIR, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and 'usage: hc' in r.stdout
+
+
+# ----------------------------------------------------------------------------- tiers C / S, the explicit unlock, hc skill
+
+TIER_C_LOCKED = ['profile sens', 'profile carb_ratio', 'profile current_basal']
+
+
+@pytest.mark.parametrize('tier', ['C', 'S', 'c'])
+def test_study_new_tier_c_s_without_unlock_exits_3_naming_the_keys(tmp_path, capsys, tier):
+    rc = hc('study', 'new', 'locked', '--days', '2026-09-06', '--tier', tier, studies_dir=tmp_path)
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert not (tmp_path / 'locked').exists()
+    names = TIER_C_LOCKED if tier.upper() == 'C' else ['profile max_iob', 'profile max_basal']
+    for name in names:
+        assert f'"{name}"' in captured.err
+    assert '--unlock' in captured.err and '--unlock-reason' in captured.err
+    assert 'evidence:' in captured.err                         # space_file_notice(meta) is printed with the refusal
+
+
+def test_study_new_tier_c_with_unlock_writes_the_audit_fields(tmp_path, capsys):
+    rc = hc('study', 'new', 'scales', '--days', '2026-09-06', '--tier', 'C',
+            '--unlock', 'profile sens', 'profile carb_ratio', '--unlock', 'profile current_basal', 'profile sens',
+            '--unlock-reason', 'x', studies_dir=tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    with open(tmp_path / 'scales' / 'study.json', encoding='utf-8') as fh:
+        doc = json.load(fh)
+    assert doc['unlocked'] == TIER_C_LOCKED                    # union, order kept, duplicates dropped
+    assert doc['unlock_reason'] == 'x'
+    study = st.StudyDir(tmp_path / 'scales').load_study(SETTINGS)
+    assert study.unlock_caveat() in out and 'weak evidence' in out
+    assert 'evidence: ' in out                                 # the space file's _evidence line
+    assert 'this space needs an explicit unlock' not in out
+    assert c.HONESTY_STATEMENT in out
+    from hindcast import lint
+    for line in out.splitlines():
+        if line.strip() and line.strip() != c.HONESTY_STATEMENT:
+            assert lint.lint_findings(line, 'line') == [], line
+
+
+def test_study_new_tier_c_with_sens_only_names_the_rest(tmp_path, capsys):
+    rc = hc('study', 'new', 'part', '--days', '2026-09-06', '--tier', 'C', '--unlock', 'profile sens',
+            '--unlock-reason', 'x', studies_dir=tmp_path)
+    err = capsys.readouterr().err
+    assert rc == 3 and '"profile carb_ratio"' in err and '"profile current_basal"' in err
+    assert '"profile sens"' not in err.split('need an explicit unlock:', 1)[-1].split('\n', 1)[0]
+
+
+@pytest.mark.parametrize('extra', [['--unlock', 'profile sens'], ['--unlock', 'profile sens', '--unlock-reason', '  '],
+                                   ['--unlock-reason', 'x']])
+def test_unlock_needs_keys_and_a_reason(tmp_path, capsys, extra):
+    rc = hc('study', 'new', 'u', '--days', '2026-09-06', '--tier', 'C', *extra, studies_dir=tmp_path)
+    assert rc == 3 and '--unlock' in capsys.readouterr().err
+    assert not (tmp_path / 'u').exists()
+
+
+def test_unlock_cannot_lift_a_never_unlockable_key(tmp_path, capsys):
+    rc = hc('study', 'new', 'dia', '--days', '2026-09-06', '--param', 'profile dia', '5:9:1',
+            '--unlock', 'profile dia', '--unlock-reason', 'x', studies_dir=tmp_path)
+    assert rc == 3 and 'profile dia' in capsys.readouterr().err
+
+
+def test_hc_skill_is_wired(capsys):
+    with pytest.raises(SystemExit) as info:
+        hc('skill', '--help')
+    assert info.value.code == 0
+    out = capsys.readouterr().out
+    for word in ('install', 'vocabulary', 'checkin'):
+        assert word in out
+    assert hc('skill', 'vocabulary', '--check') == 0
+    capsys.readouterr()

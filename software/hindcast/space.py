@@ -12,17 +12,61 @@ Parameter types (contracts.SpaceParam): `float` and `int` are searched on the st
 preference screen cannot set finer values anyway), `bool` is {False, True}, `choice` an explicit list. Every
 point a sampler produces is snapped to the grid, so the same point always gives the same VDF row and vhash.
 
+`scale` (tier C) is a multiplier of the value the profile carries in each loop, for the per-loop profile values
+Nightscout carries from a time-varying schedule (contracts.SCALE_KEYS: sens, carb_ratio, current_basal,
+profile_percentage; only these, and these only as a scale). Space file entry:
+
+    "profile sens": {"type": "scale", "low": 0.7, "high": 1.4, "step": 0.05, "phone": 1.0, "target": "profile sens"}
+
+The grid is searched like a float grid (snap, oaat, decode, encode; canonical_params / vhash take the multiplier
+like any float, so `{'profile sens': 1.1}` hashes as `profile sens 1.1`). The VDF row is a Python expression the
+emulator evaluates per loop on the freshly parsed profile (`scale_expression`):
+
+    profile      sens          profile['sens']*1.1
+    profile      current_basal round(profile['current_basal']*1.1/0.05)*0.05      (pump basal step, PUMP_BASAL_STEP)
+
+The phone value of a scale is 1.0 (`phone_value` returns contracts.SCALE_PHONE for every scale key), and a scale
+at 1.0 writes NO row: the replay then reads the profile exactly as base does. That is how the sentinel and null
+controls express "the phone's value" for a scale - their rows for scale keys are empty, so for a scale they check
+the VDF-free path only (the vhash still carries the 1.0: a control is its own variant). Caveats the tier C file
+repeats per entry: only the decision reads the scaled value; ns_profile derived max_basal from the unscaled
+basal, COB/IOB/deviations come from the recorded history, so a scale study is weak evidence (contracts.WEAK_EVIDENCE).
+
 Ordering constraints are chains `k1 <= k2 <= k3` (or `<`) over float/int parameters. A sampler never sees them:
 `ParamSpace.decode(u)` takes a point of the unit cube (one 0..1 coordinate per parameter), samples the chain's
 centre directly and the outer members as half-widths from the centre ("ratio + half-widths", ShadowLoop section 4),
 snapping towards the centre, so every decoded point satisfies the chain. `satisfies()` re-checks any point.
 
-LOCKED KEYS (DESIGN.md section 3) are enforced here with no override: `refuse_locked()` raises `LockedKeyError`
-naming every locked parameter; the CLI maps it to exit code 3. The list lives in `contracts.locked_reason()` and
-is extended by the `safety` section of a loaded ns_settings.json; this module only applies it.
+LOCKED KEYS (DESIGN.md section 3) are enforced here: `refuse_locked()` raises `LockedKeyError` naming every locked
+parameter; the CLI maps it to exit code 3. The list lives in `contracts.locked_reason()` and is extended by the
+`safety` section of a loaded ns_settings.json; this module only applies it. The lock is the default. The only way
+past it is an explicit, per-study, audited unlock: `refuse_locked(names, settings, unlocked)` and
+`ParamSpace(..., unlocked=[...], unlock_reason='...')` honour a list of '<array> <item>' keys, ParamSpace refuses a
+non-empty list without a non-empty reason (SpaceError), and contracts.unlock_refusal() keeps new_parameter keys,
+non-profile groups and `profile dia` locked whatever the list says. The list and the reason are stored in
+study.json (Study.unlocked / Study.unlock_reason), and Study.unlock_caveat() is the weak-evidence text.
+
+CLI wiring expected from the cli.py / orchestrator owner (not done here):
+
+    hc study new <name> ... --unlock KEY [KEY ...] --unlock-reason TEXT
+
+  * `--unlock` takes one or more '<array> <item>' keys (quoted, e.g. --unlock "profile sens" "profile max_iob");
+    repeatable, the union is used, order kept, duplicates dropped. `--unlock-reason` is required whenever
+    `--unlock` is given (argparse error / exit 3 otherwise) and must be non-empty after stripping.
+  * They go to `ParamSpace(space, constraints, settings=settings, unlocked=keys, unlock_reason=text)`, to
+    `contracts.locked_vdf_row_reason(line, settings, keys)` for the base VDF rows, and into the study as
+    `Study.new(..., unlocked=keys, unlock_reason=text)`; Study.validate() refuses an empty reason.
+  * Without `--unlock` nothing changes: a locked key (also from `--tier C` / `--tier S`, whose files carry
+    `"_requires_unlock": true`) raises LockedKeyError -> exit 3, and the message names the keys and the flags.
+  * `hc study new` prints `space_file_notice(meta)` for a space file it loaded (the `_evidence` line) and
+    `study.unlock_caveat()` after creating an unlocked study; the page and the cards quote the caveat too.
+  * Keys listed in `--unlock` that are not locked anyway are accepted and stay in the audit list (harmless).
 
 Default spaces: `spaces/autoisf_tierA.json` (tier A of ShadowLoop section 4: the autoISF weights, caps and the
-SMB delivery ratio family) and `spaces/autoisf_tierB.json` (second pass). Each `phone` value is the phone's
+SMB delivery ratio family), `spaces/autoisf_tierB.json` (second pass), `spaces/profile_tierC.json` (scales of
+profile ISF, CR, basal and the profile percentage; needs an unlock except for profile_percentage, weak evidence)
+and `spaces/safety_tierS.json` (the caps max_iob / max_basal; needs an unlock; a cap study only reports how
+often the cap binds). Each `phone` value is the phone's
 current setting from ns_settings.json; `load_space_file(..., settings=...)` refreshes them and
 `test_space.py` fails when the committed file and ns_settings.json disagree, so the files are re-centred by
 `python -m hindcast.space --write-defaults` after a preferences import.
@@ -47,11 +91,17 @@ os.environ.setdefault('PYTHONUTF8', '1')
 
 import emulator_optimize as _opt                                                           # noqa: E402
 from hindcast.contracts import (ContractError, SpaceParam, Phase, NS_SETTINGS_PATH, PARAM_TYPES, VDF_GROUPS,  # noqa: E402
+                                SCALE_KEYS, SCALE_PHONE, WEAK_EVIDENCE, is_scale_key, scale_problems,
                                 locked_reason, split_param, vhash, canonical_params)
 
 SPACES_DIR = os.path.join(HINDCAST_DIR, 'spaces')
 DEFAULT_SPACE_FILES = {'A': os.path.join(SPACES_DIR, 'autoisf_tierA.json'),
-                       'B': os.path.join(SPACES_DIR, 'autoisf_tierB.json')}
+                       'B': os.path.join(SPACES_DIR, 'autoisf_tierB.json'),
+                       'C': os.path.join(SPACES_DIR, 'profile_tierC.json'),
+                       'S': os.path.join(SPACES_DIR, 'safety_tierS.json')}
+TIER_FILE_NAMES = {'A': 'autoisf_tierA.json', 'B': 'autoisf_tierB.json', 'C': 'profile_tierC.json',
+                   'S': 'safety_tierS.json'}
+PUMP_BASAL_STEP = 0.05                                   # ns_settings.json safety.basal_step; ns_profile rounds current_basal to it
 SETTINGS_SECTIONS = ('autoisf', 'smb', 'activity_monitor', 'flags', 'safety', 'insulin', 'glucose')
 OPS = ('<=', '<')
 VDF_LABEL = 'hindcast'
@@ -62,29 +112,35 @@ class SpaceError(ContractError):
 
 
 class LockedKeyError(SpaceError):
-    """A locked key (DESIGN.md section 3) was asked for; `.keys` names them. No override exists."""
+    """A locked key (DESIGN.md section 3) was asked for; `.keys` names them. The only way past it is an explicit,
+    audited per-study unlock (study.json `unlocked` + `unlock_reason`; `hc study new --unlock KEY --unlock-reason
+    TEXT`), and some keys can never be unlocked (contracts.unlock_refusal)."""
 
     def __init__(self, reasons):
         self.reasons = list(reasons)
         self.keys = [r.split('"')[1] for r in self.reasons if '"' in r]
-        super().__init__('refused, locked for unattended runs (DESIGN.md section 3):\n  ' + '\n  '.join(self.reasons))
+        super().__init__('refused, locked for unattended runs (DESIGN.md section 3):\n  ' + '\n  '.join(self.reasons)
+                         + '\n(a study may unlock a key explicitly: --unlock KEY --unlock-reason TEXT; '
+                         'a decision-level replay is weak evidence for such keys)')
 
 
 # ----------------------------------------------------------------------------- the locked list, applied
 
-def locked_reasons(names, settings=None):
-    """[reason, ...] for every name in `names` that may not be searched (empty = all allowed)."""
+def locked_reasons(names, settings=None, unlocked=()):
+    """[reason, ...] for every name in `names` that may not be searched (empty = all allowed); `unlocked` lifts
+    the lock for the keys a study unlocked explicitly (contracts.locked_reason)."""
     out = []
     for name in names:
-        reason = locked_reason(name, settings)
+        reason = locked_reason(name, settings, unlocked)
         if reason:
             out.append(reason)
     return out
 
 
-def refuse_locked(names, settings=None):
-    """Raise LockedKeyError naming every locked key; return the names unchanged otherwise."""
-    reasons = locked_reasons(names, settings)
+def refuse_locked(names, settings=None, unlocked=()):
+    """Raise LockedKeyError naming every locked key not in `unlocked`; return the names unchanged otherwise. The
+    reason of an unlock is checked by ParamSpace / Study, which hold it."""
+    reasons = locked_reasons(names, settings, unlocked)
     if reasons:
         raise LockedKeyError(reasons)
     return list(names)
@@ -105,11 +161,14 @@ def phone_value(name, settings, at_ms=None):
     """The phone's current value of `<array> <item>` from the settings sections ns_profile copies 1:1 into the
     profile (autoisf, smb, activity_monitor, flags, safety, insulin, glucose), or None when Nightscout carries it
     (basal, sens, targets...) or the key is unknown. With `at_ms` the value is rewound through
-    `profile_history.changes` the way ns_profile.ProfileBuilder._apply_history does for a loop at that time."""
+    `profile_history.changes` the way ns_profile.ProfileBuilder._apply_history does for a loop at that time.
+    A scale key (contracts.SCALE_KEYS) is a multiplier of the recorded value: its phone value is always 1.0."""
     try:
         _, item = split_param(name)
     except ContractError:
         return None
+    if is_scale_key(name):
+        return SCALE_PHONE
     value, found = None, False
     for section in SETTINGS_SECTIONS:
         sec = settings.get(section) if isinstance(settings, dict) else None
@@ -215,7 +274,23 @@ def load_space_file(path, settings=None):
             if v is not None:
                 p.phone = v
     meta = {k: v for k, v in data.items() if k not in ('space', 'constraints')}
+    meta['requires_unlock'] = bool(data.get('_requires_unlock'))
+    meta['evidence'] = data.get('_evidence')
+    meta['locked_keys'] = [n for n in space if locked_reason(n, settings)]
     return space, constraints, meta
+
+
+def space_file_notice(meta):
+    """Lines `hc study new` prints for a loaded space file: the evidence caveat and the keys that need an unlock
+    (empty list for tiers A / B)."""
+    out = []
+    if meta.get('evidence'):
+        out.append(f'evidence: {meta["evidence"]}')
+    if meta.get('requires_unlock') or meta.get('locked_keys'):
+        keys = meta.get('locked_keys') or []
+        out.append('this space needs an explicit unlock' + (': --unlock ' + ' '.join(f'"{k}"' for k in keys) if keys else '')
+                   + ' --unlock-reason TEXT')
+    return out
 
 
 # ----------------------------------------------------------------------------- grid arithmetic
@@ -302,9 +377,14 @@ class ParamSpace:
     Construction validates the definition (SpaceError) and applies the locked list (LockedKeyError) unless
     `check_locked=False` (only for reading an old study.json whose lock the contract already checked)."""
 
-    def __init__(self, space, constraints=None, settings=None, check_locked=True):
+    def __init__(self, space, constraints=None, settings=None, check_locked=True, unlocked=(), unlock_reason=None):
         if not space:
             raise SpaceError('space: at least one parameter')
+        self.unlocked = list(dict.fromkeys(unlocked or ()))
+        self.unlock_reason = unlock_reason
+        if self.unlocked and not str(unlock_reason or '').strip():
+            raise SpaceError('unlocking ' + ', '.join(self.unlocked) + ' needs a non-empty unlock reason '
+                             '(an unlock is explicit and audited)')
         self.space = {}
         for name, p in space.items():
             split_param(name)
@@ -314,12 +394,17 @@ class ParamSpace:
                 raise SpaceError(f'"{name}": type must be one of {PARAM_TYPES}')
             problems = []
             p._check(problems, name=f'"{name}"')
+            problems += scale_problems(name, p)
             if problems:
                 raise SpaceError('; '.join(problems))
             self.space[name] = p
         self.names = list(self.space)
         if check_locked:
-            refuse_locked(self.names, settings)
+            from hindcast.contracts import unlock_refusal
+            refused = [r for r in (unlock_refusal(u) for u in self.unlocked) if r]
+            if refused:
+                raise LockedKeyError(refused)
+            refuse_locked(self.names, settings, self.unlocked)
         self.constraints = []
         chained = set()
         for tokens in constraints or []:
@@ -337,7 +422,8 @@ class ParamSpace:
 
     @classmethod
     def from_study(cls, study, settings=None, check_locked=True):
-        return cls(study.space, study.constraints, settings=settings, check_locked=check_locked)
+        return cls(study.space, study.constraints, settings=settings, check_locked=check_locked,
+                   unlocked=getattr(study, 'unlocked', ()) or (), unlock_reason=getattr(study, 'unlock_reason', None))
 
     def __len__(self):
         return len(self.names)
@@ -505,6 +591,9 @@ class ParamSpace:
         return {'space': {n: p.to_dict() for n, p in self.space.items()},
                 'constraints': [c.tokens() for c in self.constraints]}
 
+    def scale_names(self):
+        return [n for n, p in self.space.items() if p.type == 'scale']
+
 
 # ----------------------------------------------------------------------------- VDF text
 
@@ -522,9 +611,44 @@ def variant_name(params, names=None):
     return _opt.variant_name(assignment(params, names), {n: None for n in names})
 
 
+def scale_expression(name, value):
+    """The VDF value expression of a scale parameter (contracts.SCALE_KEYS) at multiplier `value`, or None for the
+    phone value 1.0 (no row). current_basal is re-rounded to the pump basal step as ns_profile does.
+
+        scale_expression('profile sens', 1.1)           -> "profile['sens']*1.1"
+        scale_expression('profile current_basal', 1.1)  -> "round(profile['current_basal']*1.1/0.05)*0.05"
+    """
+    if not is_scale_key(name):
+        raise SpaceError(f'"{name}" is not a scale key ({", ".join(SCALE_KEYS)})')
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SpaceError(f'"{name}": a scale needs a number, got {value!r}')
+    if abs(float(value) - SCALE_PHONE) < 1e-12:
+        return None
+    array, item = split_param(name)
+    factor = _opt.vdf_value(value)
+    if item == 'current_basal':
+        step = _opt.vdf_value(PUMP_BASAL_STEP)
+        return f"round({array}['{item}']*{factor}/{step})*{step}"
+    return f"{array}['{item}']*{factor}"
+
+
+def scale_row(name, value, label=VDF_LABEL):
+    """One VDF row for a scale (write_vdf's field layout and comment), or None for the phone value 1.0."""
+    expr = scale_expression(name, value)
+    if expr is None:
+        return None
+    array, item = split_param(name)
+    return f'{array:<12} {item:<32} {expr:<16} ### emulator_optimize {label} scale x{_opt.vdf_value(value)}'
+
+
 def write_variant_vdf(path, params, base_lines=(), label=VDF_LABEL, names=None):
-    """Write base lines + one row per parameter with emulator_optimize.write_vdf (its field layout, its comment)."""
-    _opt.write_vdf(path, list(base_lines), assignment(params, names), label)
+    """Write base lines + one row per parameter with emulator_optimize.write_vdf (its field layout, its comment).
+    Scale keys (contracts.SCALE_KEYS, decided by the name so a spawned worker needs no space) become expression
+    rows (scale_row) after the base lines, a scale at 1.0 writes no row; every other value is a literal row."""
+    items = assignment(params, names)
+    scale_rows = [r for r in (scale_row(n, v, label) for n, v in items if is_scale_key(n)) if r]
+    literal = [(n, v) for n, v in items if not is_scale_key(n)]
+    _opt.write_vdf(path, list(base_lines) + scale_rows, literal, label)
     return path
 
 
@@ -564,9 +688,27 @@ def parse_vdf_row(line):
     return array, item, value
 
 
+_SCALE_RE = re.compile(r"^(\w+)\['(\w+)'\]\*([0-9.eE+-]+)$")
+_SCALE_BASAL_RE = re.compile(r"^round\((\w+)\['(\w+)'\]\*([0-9.eE+-]+)/([0-9.eE+-]+)\)\*([0-9.eE+-]+)$")
+
+
+def parse_scale_expression(array, item, value):
+    """The multiplier of a row scale_expression wrote for '<array> <item>', or None for any other text."""
+    if not is_scale_key(f'{array} {item}'):
+        return None
+    m = _SCALE_BASAL_RE.match(value) if item == 'current_basal' else _SCALE_RE.match(value)
+    if not m or m.group(1) != array or m.group(2) != item:
+        return None
+    try:
+        return ast.literal_eval(m.group(3))
+    except (ValueError, SyntaxError):
+        return None
+
+
 def parse_vdf_text(text):
     """VDF text -> {'<array> <item>': literal value} for the rows whose value is a Python literal (what write_vdf
-    emits); rows with expressions (`profile['min_bg'] + 10`) are returned with their text under the same key."""
+    emits) and the multiplier of a scale row (scale_expression); rows with other expressions
+    (`profile['min_bg'] + 10`) are returned with their text under the same key."""
     out = {}
     for line in text.splitlines():
         row = parse_vdf_row(line)
@@ -576,7 +718,8 @@ def parse_vdf_text(text):
         try:
             out[f'{array} {item}'] = ast.literal_eval(value)
         except (ValueError, SyntaxError):
-            out[f'{array} {item}'] = value
+            factor = parse_scale_expression(array, item, value)
+            out[f'{array} {item}'] = value if factor is None else factor
     return out
 
 
@@ -641,19 +784,74 @@ _TIER_B_NOTES = {
     'profile smb_max_range_extension': 'the phone value 1.8 is fitted to the printed maxBolus (ns_settings.json _assumed)',
 }
 
+_WEAK = ('Weak evidence: decision-level replay, no glucose response - the replay keeps the glucose and insulin '
+         'history the phone\'s own settings produced, so it says how the decisions would have moved, never what '
+         'glucose would have done. ')
+_SCALE = dict(type='scale', low=0.7, high=1.4, step=0.05)
+_TIER_C = {
+    'profile sens':               dict(_SCALE, target='profile sens'),
+    'profile carb_ratio':         dict(_SCALE, target='profile carb_ratio'),
+    'profile current_basal':      dict(_SCALE, target='profile current_basal'),
+    'profile profile_percentage': dict(_SCALE, target='profile profile_percentage'),
+}
+_TIER_C_NOTES = {
+    'profile sens': _WEAK + 'Multiplier of the profile ISF of each loop (Nightscout schedule, mg/dl/U): the VDF row '
+                    "is profile['sens']*x. It moves the autoISF-final ISF, insulinReq, SMB and TBR and the carb "
+                    'sensitivity (csf = sens / carb_ratio) of the COB prediction.',
+    'profile carb_ratio': _WEAK + 'Multiplier of the profile CR of each loop. In determine_basal.py it enters the COB '
+                          'prediction (csf = sens / carb_ratio) and the meal insulin echo only; COB itself is the '
+                          "phone's (devicestatus), so the replay cannot follow a different carb absorption or bolus.",
+    'profile current_basal': _WEAK + 'Multiplier of the scheduled basal of each loop, re-rounded to the 0.05 U/h pump '
+                             "step (round(profile['current_basal']*x/0.05)*0.05). It moves the neutral temp, the TBR "
+                             'arithmetic and maxBolus (smb_max_range_extension * basal * minutes), but not max_basal '
+                             '(ns_profile derived it from the unscaled basal) and not the IOB of past temp basals '
+                             '(net IOB is relative to the recorded schedule). At small rates neighbouring multipliers '
+                             'round to the same pump rate (0.15 U/h x 0.9 -> 0.15, x 0.8 -> 0.10): a dead stretch of the '
+                             'grid is the pump step, not a result.',
+    'profile profile_percentage': _WEAK + 'Multiplier of the Profile Switch percentage the loop ran under (100 % = '
+                                  '1.0). determine_basal.py reads it only in iobTH_reduction_ratio (percentage/100 * '
+                                  'exercise * activity ratio, active because iob_threshold_percent is not 100); it does '
+                                  'NOT rescale sens / CR / basal here, ns_profile already applied the recorded '
+                                  'percentage. To mimic a Profile Switch of x combine it with sens and carb_ratio near '
+                                  '1/x and current_basal near x. Not locked itself.',
+}
+_TIER_S = {
+    'profile max_iob':   dict(type='float', low=3.0, high=12.0, step=0.5),
+    'profile max_basal': dict(type='float', low=1.0, high=6.0, step=0.25),
+}
+_TIER_S_NOTES = {
+    'profile max_iob': _WEAK + 'Safety cap (U): a cap study only reports how often and in which loops the cap binds '
+                       '(insulinReq / SMB limited by max_iob, iobTH = iob_threshold_percent of it) and how much more '
+                       'or less the loop would have asked; it cannot show what the extra or missing insulin would '
+                       'have done.',
+    'profile max_basal': _WEAK + 'Safety cap (U/h) on every temp basal: a cap study only reports how often the TBR '
+                         'cap binds. ns_profile derives the profile value as min(max(preference, max_daily_basal), '
+                         'floor(current_basal_safety_multiplier * basal), floor(max_daily_safety_multiplier * '
+                         'max_daily_basal)); a VDF row replaces that derived value with the raw number (also the '
+                         'sentinel row), so it can differ from base where the derivation does not return the preference.',
+}
+_TIERS = {'A': (_TIER_A, _TIER_A_CONSTRAINTS, _TIER_A_NOTES), 'B': (_TIER_B, [], _TIER_B_NOTES),
+          'C': (_TIER_C, [], _TIER_C_NOTES), 'S': (_TIER_S, [], _TIER_S_NOTES)}
+REQUIRES_UNLOCK = ('C', 'S')
+EVIDENCE_WEAK = 'weak: decision-level replay, no glucose response'
+
 
 def default_space(tier='A', settings=None):
     """The documented default space of a tier as a JSON-ready dict (what the spaces/ files hold), `phone` filled
-    from `settings` (ns_settings.json) when given."""
+    from `settings` (ns_settings.json) when given. Tiers C and S carry `_requires_unlock` and `_evidence`."""
     tier = tier.upper()
-    params, constraints, notes = ((_TIER_A, _TIER_A_CONSTRAINTS, _TIER_A_NOTES) if tier == 'A'
-                                  else (_TIER_B, [], _TIER_B_NOTES))
-    refuse_locked(params, settings)
+    if tier not in _TIERS:
+        raise SpaceError(f'unknown tier "{tier}" (one of {", ".join(_TIERS)})')
+    params, constraints, notes = _TIERS[tier]
+    if tier not in REQUIRES_UNLOCK:
+        refuse_locked(params, settings)
     space = {}
     for name, spec in params.items():
-        entry = dict(spec)
+        entry = {k: v for k, v in spec.items() if k != 'target'}
         pv = phone_value(name, settings or {})
         entry['phone'] = pv
+        if 'target' in spec:
+            entry['target'] = spec['target']
         if name in notes:
             entry['_note'] = notes[name]
         space[name] = entry
@@ -668,19 +866,38 @@ def default_space(tier='A', settings=None):
     ]
     if tier == 'A':
         about.append('Tier A: the autoISF caps and weights with the most leverage, plus the SMB delivery-ratio family.')
-    else:
+    elif tier == 'B':
         about.append('Tier B: the second pass (pp/range/drift weights, SMB timing caps, activity factors, fit source).')
-    return {'_about': about, 'tier': tier, 'phone_source': 'ns_settings.json',
-            'space': space, 'constraints': constraints}
+    elif tier == 'C':
+        about[5] = ('section, profile sens/carb_ratio/current_basal/dia, every new_parameter key) stay locked unless a '
+                    'study unlocks them explicitly.')
+        about += ['Tier C: the profile itself as multipliers of the value each loop recorded (type scale, phone 1.0 = the '
+                  'recorded profile, which writes no VDF row). sens, carb_ratio and current_basal are locked by default: '
+                  'a study needs --unlock KEY --unlock-reason TEXT (stored in study.json); profile_percentage is not locked.',
+                  'A decision-level replay cannot judge a different profile: it shows how the loop would have decided '
+                  'with the scaled value over the glucose the phone\'s own profile produced. Weak evidence; for review by hand.']
+    else:
+        about[5] = ('section, profile sens/carb_ratio/current_basal/dia, every new_parameter key) stay locked unless a '
+                    'study unlocks them explicitly.')
+        about += ['Tier S: the safety caps max_iob and max_basal (locked by default: a study needs --unlock KEY '
+                  '--unlock-reason TEXT, stored in study.json). maxSMBBasalMinutes / maxUAMSMBBasalMinutes are in tier B.',
+                  'A cap study only reports how often the cap binds and how the decisions move when it does; it cannot say '
+                  'what the extra or missing insulin would have done. Weak evidence; for review by hand.']
+    out = {'_about': about, 'tier': tier, 'phone_source': 'ns_settings.json'}
+    if tier in REQUIRES_UNLOCK:
+        out['_requires_unlock'] = True
+        out['_evidence'] = EVIDENCE_WEAK
+    out.update({'space': space, 'constraints': constraints})
+    return out
 
 
 def write_default_spaces(directory=SPACES_DIR, settings=None):
-    """Write spaces/autoisf_tierA.json and autoisf_tierB.json; returns the paths."""
+    """Write spaces/autoisf_tierA.json, autoisf_tierB.json, profile_tierC.json, safety_tierS.json; returns the paths."""
     settings = settings if settings is not None else load_settings()
     os.makedirs(directory, exist_ok=True)
     paths = []
-    for tier in ('A', 'B'):
-        path = os.path.join(directory, f'autoisf_tier{tier}.json')
+    for tier, fname in TIER_FILE_NAMES.items():
+        path = os.path.join(directory, fname)
         with open(path, 'w', encoding='utf-8') as fh:
             json.dump(default_space(tier, settings), fh, indent=1, ensure_ascii=False)
             fh.write('\n')
@@ -692,8 +909,8 @@ def stale_default_spaces(directory=SPACES_DIR, settings=None):
     """Names of the default space files whose phone values or ranges differ from what default_space() generates."""
     settings = settings if settings is not None else load_settings()
     stale = []
-    for tier in ('A', 'B'):
-        path = os.path.join(directory, f'autoisf_tier{tier}.json')
+    for tier, fname in TIER_FILE_NAMES.items():
+        path = os.path.join(directory, fname)
         try:
             with open(path, 'r', encoding='utf-8') as fh:
                 current = json.load(fh)
@@ -701,7 +918,7 @@ def stale_default_spaces(directory=SPACES_DIR, settings=None):
             stale.append(os.path.basename(path))
             continue
         want = default_space(tier, settings)
-        if current.get('space') != want['space'] or current.get('constraints') != want['constraints']:
+        if any(current.get(k) != want.get(k) for k in ('space', 'constraints', '_requires_unlock', '_evidence')):
             stale.append(os.path.basename(path))
     return stale
 

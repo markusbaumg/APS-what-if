@@ -6,6 +6,7 @@ and no emulator initialiser. The real 2 workers x 4 trials vs serial check needs
 skips without it; the 100-trial memory watch is marked slow.
 """
 import os
+import time
 
 import pytest
 
@@ -169,3 +170,42 @@ def test_worker_memory_stays_flat_over_100_trials():
     rss = [r.rss_mb for r in res]
     print(f'\nworker max RSS after trial 10: {rss[9]} MB, after trial 100: {rss[-1]} MB')
     assert rss[-1] - rss[9] < 60
+
+
+def toy_run_hang(spec, worker=None):
+    """A trial that never returns (a hung worker) when spec['hang']."""
+    import time as _t
+    if spec.get('hang'):
+        _t.sleep(3600)
+    return toy_run(spec, worker)
+
+
+def test_waking_scheduler_times_out_a_hung_trial_and_restarts_the_pool():
+    """run(wake_s, trial_timeout_s, on_wake): the parent wakes while waiting, a trial without an answer comes back
+    failed after the timeout, the pool is restarted (the hung worker is killed) and the others finish."""
+    wakes = []
+    specs = [{'n': 0}, {'n': 1, 'hang': True, 'day': DAY, 'variant': 'v1'}, {'n': 2}, {'n': 3}]
+    t0 = time.time()
+    with pool.WorkerPool(workers=2, run=toy_run_hang, init=None, nice=0) as wp:
+        out = list(wp.run(specs, wake_s=0.2, trial_timeout_s=4, on_wake=lambda: wakes.append(time.time())))
+        restarts = wp.restarts
+    assert time.time() - t0 < 40
+    by_status = {}
+    for r in out:
+        by_status.setdefault(r.status, []).append(r)
+    assert sorted(r.metrics['n'] for r in by_status['done']) == [0, 2, 3]
+    assert len(by_status['failed']) == 1 and 'no answer within 4 s' in by_status['failed'][0].error
+    assert by_status['failed'][0].variant == 'v1' and restarts == 1 and len(wakes) >= 3
+
+
+def test_on_wake_may_stop_the_wait():
+    class Stop(Exception):
+        pass
+
+    def wake():
+        raise Stop()
+    with pool.WorkerPool(workers=1, run=toy_run_hang, init=None, nice=0) as wp:
+        gen = wp.run([{'n': 1, 'hang': True}], wake_s=0.2, on_wake=wake)
+        with pytest.raises(Stop):
+            next(gen)
+        wp.terminate()

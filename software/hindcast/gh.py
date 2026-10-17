@@ -48,7 +48,12 @@ reported and NOT posted (--no-lint skips the check; the backlog text itself is a
 Free text that other modules wrote (a candidate's `why`, a dead parameter's `why`, a stop reason, a round
 note) is linted on its own first and replaced by 'see the artifact' when it fails, so a round comment stays
 postable; the whole body is linted again before posting. A study with `private_repo: true` relaxes the lint
-to the transcript rules only (`study_linter`).
+to the transcript rules only (`study_linter`). The study paths (campaign, round) fail closed: `ensure_campaign`
+and `post_round` lint the final body with the study's linter unless a caller passes `linter=False`, which is
+refused for a public study (so is `--no-lint`), and a missing hindcast.lint refuses every body. Round verdict
+lines are rebuilt by `verdict_text` from direction words, floor multiples and day counts ('would have asked for
+less insulin than base in rising loops (2.9 x the floor) over 1 day'); the amounts in U stay in round.json and
+the cards, which never leave the study directory.
 
 Exit codes of the run_* functions: 0 done (or nothing to do), 1 a body was refused by the lint or `gh` failed,
 3 the study does not exist / cannot be read (EXIT_REFUSED, like the other hc commands).
@@ -670,9 +675,153 @@ def _note_lines(notes, linter, prefix):
     return out
 
 
-def round_body(study, status, rnd, round_no, artifact_url=None, linter=None):
-    """One round comment: phase, trials, variants by verdict word, dropped parameters, review order, run state,
-    artifact link. `rnd` (contracts.Round) may be None (then STATE.json's round number is reported alone)."""
+_REVIEW_KEYS = (('rise_vs_base_U', 'floor_rise_U', 'rising loops'), ('rest_vs_base_U', 'floor_rest_U', 'the other loops'))
+_INFEASIBLE_WORDS = (                                    # metrics.feasibility_day reason -> its public, quantity-free label
+    ('loop count', 'a loop count different from base'),
+    ('failed replay', 'the replay failed'),
+    ('the replay failed', 'the replay failed'),
+    ('before a recorded low', 'more insulin than base in the two hours before a recorded low'),
+    ('out of envelope', 'out of envelope'),
+    ('maxbolus', "an emulated SMB above the phone's maxBolus"),
+    ('factor on a cap', 'the factor on a cap too often (not really tested)'),
+)
+_DAY_PREFIX_RE = re.compile(r'\b\d{4}-\d{2}-\d{2}:')
+
+
+def _effective_floor(value, key):
+    try:
+        from hindcast import metrics as M                # lazy: metrics imports emulator_optimize
+        return M.effective_floor(value, key)
+    except Exception:                                    # pragma: no cover - same rule as metrics.effective_floor
+        return max(float(value or 0.0), 0.05)
+
+
+def _days_text(n):
+    return '%d day%s' % (n, '' if n == 1 else 's')
+
+
+def _mean_floor(floors, fkey):
+    vals = [_effective_floor(f.get(fkey), fkey) for f in (floors or {}).values() if isinstance(f, dict)]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _direction_text(c, floors):
+    """'would have asked for less insulin than base in rising loops (2.9 x the floor) over 1 day; the other loops:
+    less' from a Candidate's effect means and the round's floors, or None when the effect numbers are missing.
+    Direction words and floor multiples only: the amounts in U stay in round.json and the cards (private)."""
+    eff = c.effect or {}
+    comps = []
+    for key, fkey, words in _REVIEW_KEYS:
+        v = eff.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        floor = _mean_floor(floors, fkey)
+        comps.append((abs(v) / floor if floor else abs(v), v, floor, words))
+    if not comps:
+        return None
+    ratio, v, floor, words = max(comps, key=lambda t: t[0])
+    if not v:
+        return None
+    score = eff.get('review_score')
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or score <= 0:
+        score = ratio if floor else None
+    text = 'would have asked for %s insulin than base in %s' % ('more' if v > 0 else 'less', words)
+    if score is not None:
+        text += ' (%.1f x the floor)' % score
+    text += ' over ' + _days_text(c.days or 1)
+    for o_ratio, ov, o_floor, o_words in comps:
+        if o_words == words:
+            continue
+        if o_floor and o_ratio < 1.0:
+            text += '; %s: within the floor' % o_words
+        elif ov:
+            text += '; %s: %s' % (o_words, 'more' if ov > 0 else 'less')
+    return text
+
+
+def _infeasible_text(c):
+    """'infeasible on 1 day: out of envelope' from the ranking step's reason text, without its amounts; None when
+    the why is not in the round.py form."""
+    why = str(c.why or '')
+    if not why.startswith('infeasible'):
+        return None
+    low = why.lower()
+    labels = []
+    for needle, label in _INFEASIBLE_WORDS:
+        if needle in low and label not in labels:
+            labels.append(label)
+    n = len(set(_DAY_PREFIX_RE.findall(why)))
+    head = 'infeasible on %s' % _days_text(n) if n else 'infeasible'
+    return head + ': ' + ('; '.join(labels) if labels else SEE_ARTIFACT)
+
+
+def verdict_text(c, floors=None, linter=None):
+    """The public line of one variant in a round comment (DESIGN.md sections 3 and 8): for a candidate or a
+    recommended variant the direction of the larger review component, its floor multiple and the day count; for
+    an infeasible one the reason labels and the day count; otherwise the ranking step's `why` when it passes the
+    linter on its own. Never an insulin amount, a glucose value or a loop count, so the default comment passes the
+    issue lint instead of being withheld. `floors` is round.json's per-day floors (for the floor multiples)."""
+    text = None
+    if c.verdict in ('candidate', 'recommended'):
+        text = _direction_text(c, floors)
+        if text is not None and c.verdict == 'recommended':
+            text += '; recommended for review'
+    elif c.verdict == 'infeasible':
+        text = _infeasible_text(c)
+    elif c.verdict == 'tie':
+        text = _safe_text(c.why, linter, fallback='indistinguishable from base within the noise floor')
+    if text is None:
+        return _safe_text(c.why, linter)
+    return _safe_text(text, linter)
+
+
+def round_controls(sd, round_no):
+    """{'sentinel': n, 'null': n} - the control replays (latest row per key) of round `round_no`; the round's
+    variants (round.json) leave them out, the trial counts include them."""
+    out = {}
+    if round_no is None:
+        return out
+    for r in st.StudyDir.latest_by_key(sd.trials()).values():
+        if r.control in st.CONTROL_KINDS and r.round == round_no:
+            out[r.control] = out.get(r.control, 0) + 1
+    return out
+
+
+def _controls_text(controls):
+    n = sum((controls or {}).values())
+    if not n:
+        return ''
+    return ', plus %d control replay%s (%s)' % (n, '' if n == 1 else 's', ', '.join(
+        '%s %d' % (k, controls[k]) for k in st.CONTROL_KINDS if controls.get(k)))
+
+
+def run_line(status, linter=None):
+    """'run: finished, exit 0 (...)' / 'run: stopped by the STOP file, exit 0' / 'run: stopped by a guard, exit 2
+    (...)' / 'run: refused, exit 3 (...)' / 'run: stopped, exit 0 (budget exhausted)': the word follows the exit
+    code and the recorded reason; the reason's own lead word is not repeated."""
+    reason = ' '.join(str(status.stop_reason or '').split())
+    code = status.exit_code
+    if code == st.EXIT_GUARD:
+        word, lead = 'stopped by a guard', 'guard:'
+    elif code == st.EXIT_REFUSED:
+        word, lead = 'refused', 'refused:'
+    elif code == st.EXIT_OK and reason.startswith(st.STOP_REASON):
+        word, lead = 'stopped by the STOP file', st.STOP_REASON
+    elif code == st.EXIT_OK and reason.startswith(st.FINISHED):
+        word, lead = 'finished', st.FINISHED
+    else:
+        word, lead = 'stopped', ''
+    rest = reason[len(lead):].lstrip(' :;') if lead and reason.startswith(lead) else reason
+    if not rest:
+        return '- run: %s, exit %d%s' % (word, code, '' if reason else ' (no reason recorded)')
+    return '- run: %s, exit %d (%s)' % (word, code, _safe_text(rest, linter))
+
+
+def round_body(study, status, rnd, round_no, artifact_url=None, linter=None, controls=None):
+    """One round comment: phase, trials, variants by verdict word (plus the control replays of the round when
+    `controls` - round_controls() - is given, so the count matches the trial counts), dropped parameters, review
+    order, run state, artifact link. `rnd` (contracts.Round) may be None (then STATE.json's round number is
+    reported alone)."""
     phase = rnd.phase if rnd is not None else status.phase
     lines = [round_marker(study.name, round_no),
              '### Round %s - phase %s' % (round_no, phase),
@@ -685,8 +834,9 @@ def round_body(study, status, rnd, round_no, artifact_url=None, linter=None):
         for c in rnd.variants:
             label = st.verdict_label(c.verdict)
             counts[label] = counts.get(label, 0) + 1
-        lines.append('- variants in this round: %d%s' % (
-            len(rnd.variants), (' (' + ', '.join('%s %d' % (k, v) for k, v in counts.items()) + ')') if counts else ''))
+        lines.append('- variants in this round: %d%s%s' % (
+            len(rnd.variants), (' (' + ', '.join('%s %d' % (k, v) for k, v in counts.items()) + ')') if counts else '',
+            _controls_text(controls)))
         if rnd.dead_parameters:
             lines.append('- dropped parameters (not testable on these days): ' + '; '.join(
                 '`%s` - %s' % (d.key, _safe_text(d.why, linter)) for d in rnd.dead_parameters))
@@ -698,7 +848,7 @@ def round_body(study, status, rnd, round_no, artifact_url=None, linter=None):
             lines.append('- review order (not a ranking by outcome):')
             for i, c in enumerate(order[:ROUND_MAX_VARIANTS], 1):
                 lines.append('  %d. `%s` [%s] - %s' % (c.rank if c.rank is not None else i, c.variant,
-                                                      st.verdict_label(c.verdict), _safe_text(c.why, linter)))
+                                                      st.verdict_label(c.verdict), verdict_text(c, rnd.floors, linter)))
             if len(order) > ROUND_MAX_VARIANTS:
                 lines.append('  ... %d more in the artifact' % (len(order) - ROUND_MAX_VARIANTS))
         lines += _note_lines(rnd.notes, linter, '- note: ')
@@ -711,7 +861,7 @@ def round_body(study, status, rnd, round_no, artifact_url=None, linter=None):
     if status.running:
         lines.append('- run: active')
     elif status.exit_code is not None:
-        lines.append('- run: stopped, exit %d (%s)' % (status.exit_code, _safe_text(status.stop_reason, linter, 'no reason recorded')))
+        lines.append(run_line(status, linter))
     else:
         lines.append('- run: not active')
     if status.stale_context:
@@ -722,13 +872,24 @@ def round_body(study, status, rnd, round_no, artifact_url=None, linter=None):
     return '\n'.join(lines)
 
 
+LINT_UNAVAILABLE = 'hindcast.lint is not importable: nothing is posted (a study body is never posted unlinted)'
+NO_LINT_PUBLIC = '--no-lint is refused for a study in the public repository (set private_repo in study.json)'
+
+
+def _refuse_all(body):
+    return LINT_UNAVAILABLE
+
+
 def study_linter(study=None, no_lint=False):
     """The body linter for a study: `default_linter()` (kind 'issue'); with study.private_repo only the transcript
-    privacy rules (Microbolusing, predBGs) stay on, DESIGN.md section 8. None when lint is unavailable or no_lint."""
+    privacy rules (Microbolusing, predBGs) stay on, DESIGN.md section 8. None only for no_lint; when hindcast.lint
+    cannot be imported the linter refuses every body (fail closed: the repository is public)."""
     if no_lint:
         return None
     base = default_linter()
-    if base is None or study is None or not getattr(study, 'private_repo', False):
+    if base is None:
+        return _refuse_all
+    if study is None or not getattr(study, 'private_repo', False):
         return base
     try:
         from hindcast import lint
@@ -768,11 +929,27 @@ def _status_of(sd):
     return status
 
 
+def _resolve_linter(study, linter):
+    """(linter_or_None, refusal_or_None) for the posting paths. None = the study's own linter (`study_linter`, kind
+    'issue', fail closed); False = no lint, allowed only for a study with private_repo; a callable is used as given."""
+    if linter is None:
+        return study_linter(study), None
+    if linter is False:
+        if not getattr(study, 'private_repo', False):
+            return None, NO_LINT_PUBLIC
+        return None, None
+    return linter, None
+
+
 def ensure_campaign(gh, sd, study=None, artifact_url=None, update=True, linter=None):
     """Create or refresh the campaign issue of a study. Returns (action, issue_row_or_None, note); action is one of
-    'created', 'would-create', 'exists', 'updated', 'would-update', 'refused' (note = the lint finding)."""
+    'created', 'would-create', 'exists', 'updated', 'would-update', 'refused' (note = the lint finding).
+    linter: None (default) = the study's issue lint on the final body; False = unlinted, private_repo only."""
     if study is None:
         study = contracts.Study.load(sd.study_json, strict=False)
+    linter, refusal = _resolve_linter(study, linter)
+    if refusal:
+        return 'refused', None, refusal
     if artifact_url is None:
         artifact_url = _status_of(sd).artifact_url if os.path.isfile(sd.status_path) else None
     title = campaign_title(study.name)
@@ -798,9 +975,13 @@ def ensure_campaign(gh, sd, study=None, artifact_url=None, update=True, linter=N
 def post_round(gh, sd, study=None, artifact_url=None, round_no=None, linter=None, update_campaign=True):
     """Post this round's comment on the study's campaign issue unless one exists. Returns (action, row, note):
     'posted', 'would-post', 'exists' (the marker is on a comment already), 'no-round' (no round.json and no
-    STATE.json round, nothing to report), 'refused' (lint). The campaign issue is created when missing."""
+    STATE.json round, nothing to report), 'refused' (lint). The campaign issue is created when missing.
+    linter: None (default) = the study's issue lint on the final body; False = unlinted, private_repo only."""
     if study is None:
         study = contracts.Study.load(sd.study_json, strict=False)
+    linter, refusal = _resolve_linter(study, linter)
+    if refusal:
+        return 'refused', None, refusal
     status = _status_of(sd)
     if artifact_url is None:
         artifact_url = status.artifact_url
@@ -811,12 +992,13 @@ def post_round(gh, sd, study=None, artifact_url=None, round_no=None, linter=None
         return 'no-round', None, 'no round.json and no round number in STATE.json'
     if rnd is not None and rnd.round != round_no:
         rnd = None                                       # round.json belongs to another round: report the counts only
-    body = round_body(study, status, rnd, round_no, artifact_url, linter)
+    body = round_body(study, status, rnd, round_no, artifact_url, linter, controls=round_controls(sd, round_no))
     if linter is not None:
         problem = linter(body)
         if problem:
             return 'refused', None, problem
-    action, row, note = ensure_campaign(gh, sd, study, artifact_url, update=update_campaign, linter=linter)
+    action, row, note = ensure_campaign(gh, sd, study, artifact_url, update=update_campaign,
+                                        linter=linter if linter is not None else False)
     if action == 'refused':
         return 'refused', row, 'campaign body: ' + note
     number = row.get('number') if row else None
@@ -900,9 +1082,7 @@ def run_campaign(args):
     except st.StudyError as exc:
         gh.say('refused (exit %d): %s' % (EXIT_REFUSED, exc))
         return EXIT_REFUSED
-    linter = study_linter(study, no_lint=getattr(args, 'no_lint', False))
-    if linter is None and not getattr(args, 'no_lint', False):
-        gh.say('note: hindcast.lint not available, the body is posted unlinted')
+    linter = False if getattr(args, 'no_lint', False) else study_linter(study)
     try:
         action, row, note = ensure_campaign(gh, sd, study, artifact_url=getattr(args, 'artifact', None),
                                             update=not getattr(args, 'no_update', False), linter=linter)
@@ -921,9 +1101,7 @@ def run_round(args):
     except st.StudyError as exc:
         gh.say('refused (exit %d): %s' % (EXIT_REFUSED, exc))
         return EXIT_REFUSED
-    linter = study_linter(study, no_lint=getattr(args, 'no_lint', False))
-    if linter is None and not getattr(args, 'no_lint', False):
-        gh.say('note: hindcast.lint not available, the comment is posted unlinted')
+    linter = False if getattr(args, 'no_lint', False) else study_linter(study)
     try:
         action, row, note = post_round(gh, sd, study, artifact_url=getattr(args, 'artifact', None),
                                        round_no=getattr(args, 'round', None), linter=linter,
@@ -951,7 +1129,8 @@ def _add_study_options(p):
     p.add_argument('study', help='study name under --studies-dir, or a study directory')
     p.add_argument('--studies-dir', default=st.STUDIES_DIR, help='where studies/<name>/ live (default software/studies)')
     p.add_argument('--artifact', default=None, metavar='URL', help='the private artifact link (default: status.json artifact_url)')
-    p.add_argument('--no-lint', action='store_true', help='skip hindcast.lint on the body (not for the public repo)')
+    p.add_argument('--no-lint', action='store_true', help='skip hindcast.lint on the body (private_repo studies only; '
+                   'refused for the public repo)')
 
 
 def add_subcommands(sub):
