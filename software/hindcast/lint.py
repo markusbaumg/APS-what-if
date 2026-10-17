@@ -21,6 +21,10 @@ Kinds (`KINDS`):
                 amount in units however small, no U per day or share of the TDD, no glucose value or unit, no loop
                 count; direction words and floor multiples ('2.9 x the floor') pass
     'line'      a one-line chat / status string: vocabulary rules only
+    'baseline'  the observed baseline (hindcast/baseline.py, docs/hindcast/BASELINE.md; GOAL.md): vocabulary rules,
+                except that 'time in range' / TIR passes on a line that also says 'observed' (an observed CGM
+                statistic is a fact about the past, never a counterfactual); no privacy rules, the honesty paragraph
+                only when asked for (require_honesty=True; baseline.lint_markdown asks for it on the whole page)
 
 Contract:
     * The honesty paragraph (`HONESTY_STATEMENT`) is removed from the text before any rule runs, so its own
@@ -49,9 +53,11 @@ __all__ = ['KINDS', 'HONESTY_STATEMENT', 'Finding', 'LintError', 'load_vocabular
            'lint_findings', 'strip_honesty', 'contains_honesty_statement', 'render_vocabulary_markdown']
 
 VOCABULARY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vocabulary.json')
-KINDS = ('card', 'proposal', 'issue', 'line')
-_HONESTY_REQUIRED = {'card': True, 'proposal': True, 'issue': False, 'line': False}
-_PRIVACY_APPLIES = {'card': False, 'proposal': False, 'issue': True, 'line': False}
+KINDS = ('card', 'proposal', 'issue', 'line', 'baseline')
+_HONESTY_REQUIRED = {'card': True, 'proposal': True, 'issue': False, 'line': False, 'baseline': False}
+_PRIVACY_APPLIES = {'card': False, 'proposal': False, 'issue': True, 'line': False, 'baseline': False}
+# kind -> {may-not phrase: word that must stand on the same line for the phrase to pass}
+_OBSERVED_EXEMPT = {'baseline': {'time in range': re.compile(r'\bobserved\b', re.IGNORECASE)}}
 _SNIPPET = 40
 
 
@@ -149,13 +155,23 @@ def lint_findings(text, kind='card', *, require_honesty=None, ignore=()):
     rules = [('may-not', name, rx, why) for name, rx, why in _MAY_NOT if name not in ignored]
     if _PRIVACY_APPLIES[kind]:
         rules += [('privacy', name, rx, why) for name, rx, why in _PRIVACY if name not in ignored]
+    exempt = _OBSERVED_EXEMPT.get(kind, {})
     for rule, name, rx, why in rules:
         for m in rx.finditer(body):
+            if rule == 'may-not' and name in exempt and exempt[name].search(_line_at(body, m.start())):
+                continue
             lo, hi = max(0, m.start() - _SNIPPET), min(len(body), m.end() + _SNIPPET)
             snippet = _WS.sub(' ', body[lo:hi]).strip()
             findings.append(Finding(rule, name, m.group(0), m.start(), snippet, why))
     findings.sort(key=lambda f: (f.start, f.rule != 'honesty'))
     return findings
+
+
+def _line_at(text, pos):
+    """The line of `text` that holds offset `pos`."""
+    lo = text.rfind('\n', 0, pos) + 1
+    hi = text.find('\n', pos)
+    return text[lo:] if hi < 0 else text[lo:hi]
 
 
 def lint_text(text, kind='card', *, require_honesty=None, ignore=()):

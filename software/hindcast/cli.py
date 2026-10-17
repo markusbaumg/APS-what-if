@@ -20,6 +20,7 @@ cli.py  -  `hc`, the Hindcast command (DESIGN.md section 4.6)
     hc report <name> | hc serve <name> | hc explain <name> <iso> | hc card <name>
     hc gh ... | hc lint ... | hc freeze ... | hc warm ... | hc skill install|vocabulary|lint|checkin
     hc export (not built yet, H-504)
+    hc baseline [DAYS] [--write docs]        the observed baseline toward GOAL.md -> docs/hindcast/BASELINE.md
 
 Dispatcher only: the study commands live in study.py (H-301) and space.py (H-303); every other command is handed
 to its module when that module exists in this package and skipped with "not built yet (H-nnn)" and exit code 1
@@ -75,6 +76,7 @@ LAZY_COMMANDS = {
     'gh':      (('hindcast.gh',), 'H-601', 'GitHub labels, backlog issues, campaign issue and round comments'),
     'lint':    (('hindcast.lint',), 'H-205', 'the may / may-not vocabulary and privacy lint'),
     'skill':   (('hindcast.skill_install',), 'H-501', 'the Claude skill: install, vocabulary, lint, one-line check-in'),
+    'baseline': (('hindcast.baseline',), 'GOAL', 'the observed baseline toward GOAL.md (TIR, boluses, SMB per day)'),
 }
 
 

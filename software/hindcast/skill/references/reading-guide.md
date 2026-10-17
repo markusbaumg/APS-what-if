@@ -49,6 +49,22 @@ zero).
 - **Review order** (question `explore`): sorted by effect size in floors (the "x floor" column: the mean
   over the days of |effect| / that day's floor on the larger component), "review order, not a ranking by
   outcome". round.json, status.json, the cards, the validate top-N and the page all use this one order. Questions `earlier` / `gentler` show a Pareto front instead.
+- **Pareto front** (question `earlier`): the Parameters view opens with a scatter of every variant as the
+  mean over the search days vs base, x = insulin in rising loops (more is what the question asks for),
+  y = max(rest, 0) (less extra insulin elsewhere), the low-side flags in the tooltip; the phone's
+  settings, replayed, sit at the origin. Front members are filled and carry their review order. Next to
+  it: the review order under the declared weights (the front first, by the scalar
+  `rise - 2.0 x max(rest, 0) - 0.3 x lowside_flags` inside it, then the rest by the scalar) with the
+  weights printed, and the **weights-sensitivity** panel: the top 5 under 0.5 x and 1.5 x of each weight
+  (round.json `sensitivity`; an older round says it predates the record). A weight that moves the top 5
+  is a study setting, not a finding: say so.
+- **Would have pre-empted** (leaderboard, when the metrics carry it): how much of the manual boluses the
+  loop would already have asked for as SMBs before the bolus was given, and how many boluses. Decision
+  level only: a pre-empted bolus changes the glucose that followed, so the later loops still run on the
+  history the manual bolus produced.
+- **Observed** (day cards and Scenarios badges, with a `baseline.json` next to the studies): the share
+  of CGM time between 3.9 and 10 mmol/l, below 3.9, and the manual boluses of the day as it happened on
+  the phone. Always labelled observed; never compare variants by them.
 - **Cannot be tested with this method**: basal rates, DIA and peak, carb ratio, autosens ratio, the
   smoother. **Not testable on these days**: a searched parameter whose every point stayed inside the
   floor on every day.

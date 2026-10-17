@@ -63,6 +63,13 @@
     "null"
    ],
    "additionalProperties": {}
+  },
+  "sensitivity": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "additionalProperties": {}
   }
  },
  "additionalProperties": false,

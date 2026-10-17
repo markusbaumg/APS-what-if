@@ -1,7 +1,7 @@
 /* views/scenarios.js (H-404 Scenario comparison): small multiples on one shared time axis for up to three entities
    (an entity is a variant on one day) plus the phone, or one variant across days (one column per day).
 
-   Reads data.scenarios (report.scenario_index): days[{day, role, tags, confounders, orig}], entities[{vhash,
+   Reads data.scenarios (report.scenario_index): days[{day, role, tags, confounders, orig, observed}], entities[{vhash,
    variant, label, base, params, position, verdict, caps{autoISF_max, autoISF_min}, series{day: path}}],
    phone{caps}, defaults[{vhash, day}], slots (3), smb_tol_U, iob_tolerance, units; data.page.units for glucose.
    Per-loop numbers come from the tier-2 documents through HC.loadTier2 (series/<day>/<vhash>.json and
@@ -759,6 +759,11 @@
       (dd.confounders || []).forEach(function (c) { bits.push(h('span', { class: 'pill warning', text: c })); });
       var any = bits.length > 0;
       if (!any) bits.push(h('span', { class: 'pill', text: 'no confounders recorded' }));
+      if (dd.observed && HC.observedText) {                // the day as it happened on the phone, never a variant's
+        any = true;
+        bits.push(h('span', { class: 'pill', title: ((HC.data || {}).observed || {}).note || null,
+                              text: 'observed: ' + HC.observedText(dd.observed, (HC.data || {}).observed, units()) }));
+      }
       if (any || days.length > 1 || state.mode === 'days')
         f.badges.appendChild(h('span', { class: 'sc-badge-day' }, h('b', { text: d }), bits));
     });

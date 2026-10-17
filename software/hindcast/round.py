@@ -96,7 +96,8 @@ TIE_WITH_MAX = 5                         # vhashes listed per variant
 WHY_MAX = 300                            # characters of a Candidate.why
 EFFECT_KEYS = ('rise_vs_base_U', 'rest_vs_base_U', 'delta_vs_base_U', 'changed_vs_base', 'smb_more_vs_base',
                'smb_less_vs_base', 'lowside_flags', 'prehypo_extra_U', 'env_3h_max_U', 'env_day_pct_tdd',
-               'cap_binding_pct', 'max_single_smb_U', 'zero_temp_vs_base', 'floor_multiple', 'review_score')
+               'cap_binding_pct', 'max_single_smb_U', 'zero_temp_vs_base', 'floor_multiple', 'review_score',
+               'manual_boluses', 'manual_U', 'coverage_U_vs_base', 'boluses_preempted')   # last: status.json keeps 4
 FLOOR_KEYS = ('floor_rise_U', 'floor_rest_U', 'floor_total_U', 'floor_smb_U', 'floor_tbr_U', 'floor_P_U',
               'floor_loops', 'agreement_pct', 'loops')
 HOLDOUT = 'holdout'
@@ -225,6 +226,7 @@ class Analysis:
     warnings: List[str] = field(default_factory=list)
     phone: Dict[str, Any] = field(default_factory=dict)
     validation: Optional[M.Validation] = None         # the validate round (None: no validate phase / no hold-out rows)
+    sensitivity: Optional[dict] = None                # metrics.weights_sensitivity (variant names; None for explore)
 
     @property
     def base(self):
@@ -332,9 +334,27 @@ def floor_multiple_of(report, component=None, floors=None):
     return 0.0 if fm is None else fm
 
 
-def candidate_why(report):
+def earlier_why(report):
+    """The candidate `why` of question earlier (GOAL.md): 'more insulin asked on rises +0.80 U/day (4.0 x floor);
+    extra elsewhere 0.10 U/day; low-side flags 0.3/day; on the Pareto front, scalar +0.53, over 3 days'. Decision
+    level: what the loop would have asked, never a glucose outcome."""
+    m = report.mean
+    rise = m.get('rise_vs_base_U', 0.0) or 0.0
+    rest = m.get('rest_vs_base_U', 0.0) or 0.0
+    low = m.get('lowside_flags', 0.0) or 0.0
+    n = len(report.days)
+    pos = 'on the Pareto front' if report.pareto else 'behind the Pareto front'
+    scalar = f', scalar {report.scalar:+.2f}' if _num(report.scalar) else ''
+    return (f'more insulin asked on rises {rise:+.2f} U/day ({floor_multiple_of(report, "rise_vs_base_U"):.1f} x floor); '
+            f'extra elsewhere {max(rest, 0.0):.2f} U/day; low-side flags {low:.1f}/day; {pos}{scalar}, over {n} '
+            f'day{"s" if n != 1 else ""}')
+
+
+def candidate_why(report, question='explore'):
     """The candidate verdict's `why`: direction, size and floor multiple (floor_multiple_of) of the primary
-    component, days."""
+    component, days; question earlier: earlier_why()."""
+    if question == 'earlier':
+        return earlier_why(report)
     comp = report.review_component
     v = report.mean.get(comp, 0.0) or 0.0
     other = 'rest_vs_base_U' if comp == 'rise_vs_base_U' else 'rise_vs_base_U'
@@ -357,7 +377,7 @@ def _infeasible_why(report):
     return 'infeasible: ' + ' | '.join(parts)
 
 
-def verdict_of(report, dead_keys, search_days, objective=None):
+def verdict_of(report, dead_keys, search_days, objective=None, question='explore'):
     """(verdict, why) by the rule of the module docstring; `objective` (the study's) gives the rule-5 numbers of a
     'recommended' why without a validate round (objective.recommend, as metrics.recommend() reads it)."""
     if report.vhash == BASE_VHASH:
@@ -394,7 +414,7 @@ def verdict_of(report, dead_keys, search_days, objective=None):
         return 'recommended', M.recommend_rule_text(objective, validate=False) + ': recommended for review'
     if dead:
         return dead
-    return 'candidate', candidate_why(report) + tail
+    return 'candidate', candidate_why(report, question) + tail
 
 
 def _ties_between(analysis_order, reports, floors, days, scan=TIE_SCAN, limit=TIE_WITH_MAX):
@@ -519,7 +539,7 @@ def analyze(study, rows, settings=None, now=None):
             rep.strata_days[tag] = len([d for d in strata[tag] if d in per_day])
         moved = one_parameter_key(rep.params, phone) if name != M.BASE_VARIANT else None
         rep.dead_keys = [moved] if moved in dead_keys else []
-        rep.verdict, rep.why = verdict_of(rep, rep.dead_keys, search_days, objective)
+        rep.verdict, rep.why = verdict_of(rep, rep.dead_keys, search_days, objective, study.question)
         rep.why = st.cut_words(rep.why, WHY_MAX)
         reports[vh] = rep
     order = [vhash_of[n] for n in ranking.order]
@@ -532,7 +552,8 @@ def analyze(study, rows, settings=None, now=None):
     return Analysis(study=study, question=study.question, days=search_days, holdout_days=holdout_days,
                     ranking=ranking, holdout_ranking=holdout_ranking, folds=folds, reports=reports, order=order,
                     front=front, dead=dead, floors=ranking.floors, strata=strata, trials=len(dicts),
-                    warnings=warnings, phone=phone, validation=validation)
+                    warnings=warnings, phone=phone, validation=validation,
+                    sensitivity=M.weights_sensitivity(ranking))
 
 
 # ----------------------------------------------------------------------------- round.json
@@ -550,6 +571,19 @@ def candidate_of(report):
                      feasible=report.feasible, effect=report.effect, flags=flags,
                      tie_with=list(report.tie_with[:TIE_WITH_MAX]),
                      validation=dict(report.validation) if report.validation else None)
+
+
+def round_sensitivity(analysis):
+    """Round.sensitivity: metrics.weights_sensitivity with the variant names mapped to vhashes (round.json names
+    variants by vhash, as `front`); None for explore. The report owner renders the panel from it."""
+    sens = analysis.sensitivity
+    if not sens:
+        return None
+    vh = {r.variant: r.vhash for r in analysis.reports.values()}
+    out = dict(sens, order=[vh.get(n, n) for n in sens['order']], by_weight={})
+    for key, per in sens['by_weight'].items():
+        out['by_weight'][key] = {f: dict(v, order=[vh.get(n, n) for n in v['order']]) for f, v in per.items()}
+    return out
 
 
 def round_floors(floors):
@@ -589,7 +623,8 @@ def build_round(study_dir, round_no=None, phase=None, settings=None, now=None, s
                 variants=[candidate_of(r) for r in analysis.ordered(include_base=True)],
                 dead_parameters=list(analysis.dead), floors=round_floors(analysis.floors),
                 front=list(analysis.front), notes=notes,
-                validation=analysis.validation.summary() if analysis.validation is not None else None)
+                validation=analysis.validation.summary() if analysis.validation is not None else None,
+                sensitivity=round_sensitivity(analysis))
     for _ in range(4):                                       # fit the per-variant limit: trim notes, then floors
         if not doc.problems():
             break

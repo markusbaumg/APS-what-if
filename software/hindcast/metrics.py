@@ -82,6 +82,15 @@ FLOOR_MIN_LOOPS = 1
 TIE_FACTOR = 2.0                                       # |difference| < TIE_FACTOR x floor = tie (5.1, 5.3 rule 4)
 BASE_VARIANT = 'base'
 QUESTIONS = ('explore', 'earlier', 'gentler')
+MANUAL_WINDOW_S = 60 * 60                              # manual-bolus coverage: the SMBs of the hour before the bolus
+PREEMPT_SHARE = 0.5                                    # a bolus counts as pre-empted when coverage >= 0.5 x its units
+# the per-day manual-bolus keys of trial_metrics (always present, 0 on a day without a manual bolus); docstring of
+# manual_bolus_coverage. Decision level: what the loop would have asked before the user acted, never a glucose claim.
+MANUAL_KEYS = ('manual_boluses', 'manual_U', 'manual_presmb_U', 'manual_presmb_base_U', 'coverage_U_vs_base',
+               'boluses_preempted')
+SENSITIVITY_FACTORS = (0.5, 1.5)                       # DESIGN.md 5.3 rule 3: the order under +/-50 % of each weight
+SENSITIVITY_TOP = 5
+QUESTION_WEIGHTS = {'earlier': ('rest', 'lowside'), 'gentler': ('rest', 'zero_temp')}
 
 DEFAULT_OBJECTIVE = {
     'scalar_weights': {'rest': 2.0, 'lowside': 0.3, 'zero_temp': 0.3},
@@ -383,9 +392,54 @@ def agreement(s: LoopSeries) -> Dict[str, float]:
             'isf_within_pct': pct(isf_ok), 'agreement_pct': pct(all(x) for x in zip(smb_ok, req_ok, rate_ok, isf_ok))}
 
 
+# ----------------------------------------------------------------------------- manual-bolus coverage (GOAL.md)
+def manual_bolus_coverage(t: Sequence[float], smb_variant: Sequence[float], smb_ref: Sequence[float],
+                          boluses: Optional[Sequence[Tuple[float, float]]],
+                          window_s: float = MANUAL_WINDOW_S) -> Tuple[dict, List[dict]]:
+    """Decision-level coverage of the manual boluses of one (variant, day) (docs/hindcast/GOAL.md, "no manual
+    bolusing"). `boluses` = [(unix seconds, units)] of the boluses the user entered (Nightscout type NORMAL, eventType
+    Meal Bolus / Correction Bolus; replay.manual_boluses reads them from the cache), `smb_variant` / `smb_ref` the
+    emulated SMB per loop of the variant and of the base replay of the day.
+
+    Per bolus at t with U units: pre_U = the emulated SMB units of the loops in [t - 60 min, t) - the window starts no
+    earlier than the previous manual bolus, so SMBs between two close boluses are credited to the later one only and
+    never twice -, coverage_U = pre_U(variant) - pre_U(base), covered_pct = min(100, coverage_U / U x 100).
+    Per day: manual_boluses (count), manual_U, manual_presmb_U / manual_presmb_base_U (sums of pre_U), coverage_U_vs_base
+    (sum), boluses_preempted (boluses with coverage_U >= PREEMPT_SHARE x U). All 0 without a manual bolus.
+
+    The honest limit: this is what the loop would have asked before the user acted, on the recorded glucose. A bolus
+    the loop pre-empts changes the glucose that follows, and with it the later decisions and the bolus itself, so the
+    coverage is a direction, not a prediction."""
+    n = len(t)
+    if len(smb_variant) != n or len(smb_ref) != n:
+        raise ValueError('manual_bolus_coverage: per-loop lists differ in length from t')
+    out = {k: 0 for k in MANUAL_KEYS}
+    for k in ('manual_U', 'manual_presmb_U', 'manual_presmb_base_U', 'coverage_U_vs_base'):
+        out[k] = 0.0
+    detail: List[dict] = []
+    prev = None
+    for tb, units in sorted((float(a), float(b)) for a, b in (boluses or []) if b and b > 0):
+        lo = tb - window_s if prev is None else max(tb - window_s, prev)
+        prev = tb
+        pre_v = sum(v for ti, v in zip(t, smb_variant) if lo <= ti < tb)
+        pre_b = sum(v for ti, v in zip(t, smb_ref) if lo <= ti < tb)
+        cov = pre_v - pre_b
+        out['manual_boluses'] += 1
+        out['manual_U'] += units
+        out['manual_presmb_U'] += pre_v
+        out['manual_presmb_base_U'] += pre_b
+        out['coverage_U_vs_base'] += cov
+        if cov >= PREEMPT_SHARE * units - 1e-9:
+            out['boluses_preempted'] += 1
+        detail.append({'t': tb, 'U': round(units, 3), 'presmb_U': round(pre_v, 3), 'presmb_base_U': round(pre_b, 3),
+                       'coverage_U': round(cov, 3), 'covered_pct': round(min(100.0, 100.0 * cov / units), 1)})
+    return out, detail
+
+
 # ----------------------------------------------------------------------------- per-trial metrics
 def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_guard=None, zero_temp=None,
-                  smb_off=None, tdd_phone_U=None, series: Optional[LoopSeries] = None) -> dict:
+                  smb_off=None, tdd_phone_U=None, series: Optional[LoopSeries] = None,
+                  manual_boluses: Optional[Sequence[Tuple[float, float]]] = None) -> dict:
     """One metrics dict per (variant, day) = emulator_optimize.metrics_from_csv(csv_path, caps) + the section 5.2
     additions.  `base` is the base replay of the same day (LoopSeries or CSV path); None means "this trial IS the
     base", then every *_vs_base metric is 0 and the vs-phone values are what floors_from_base() reads.
@@ -394,6 +448,10 @@ def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_g
     `tdd_phone_U`: the phone's TDD of the day for env_day_pct_tdd; None -> the window's total_orig_U with the flag
     `tdd_from_window`.  `series`: pass a ready LoopSeries instead of reading csv_path again (csv_path may then be None
     only if the optimizer metrics are not wanted - they need the file).
+    `manual_boluses`: [(unix s, U)] of the day's manual boluses (replay.manual_boluses) for the MANUAL_KEYS of
+    manual_bolus_coverage() (the per-bolus list stays out of the row: trials.jsonl lines are < 4 KB). An empty list =
+    known, none given: every key 0, so every day of a study carries them. None = not known (no cache): the keys are
+    left out, never a 0 that would read as "no manual bolus" (replay.py flags the row `manual_boluses_unknown`).
 
     Flags (list of strings, always present): `lowside_no_pred` (no emulated minGuardBG on any loop: the recorded-BG rule
     alone), `lowside_pred_partial` (some loops), `zero_temp_rate_proxy`, `tt_smb_off_unknown`, `tdd_from_window`,
@@ -499,6 +557,10 @@ def trial_metrics(csv_path, base=None, autoisf_max=None, autoisf_min=None, min_g
         flags.append('tt_smb_off_unknown')
     else:
         m['tt_smb_off_pct'] = 100.0 * sum(1 for v in s.smb_off if v) / s.n
+    # manual boluses: what the variant's SMBs in the hour before each one add to the base's (decision level)
+    if manual_boluses is not None:
+        cov, _detail = manual_bolus_coverage(s.t, s.smb_emul, ref.smb_emul, manual_boluses)
+        m.update({k: (round(v, 3) if isinstance(v, float) else v) for k, v in cov.items()})   # trials.jsonl < 4 KB
     m['is_base'] = is_base
     m['flags'] = flags
     return m
@@ -973,6 +1035,61 @@ def rank_variants(rows: Iterable[dict], question: str = 'explore', objective: Op
                    rule_text=ranking_rule_text(question, cfg, floors), warnings=warnings)
 
 
+def validate_top(ranking: Ranking, top: Optional[int] = None) -> List[str]:
+    """The top-N a validate round replays on the hold-out days (validate_variants, search.validate_points):
+    explore: the first N of the review order (review_order_key). earlier / gentler: the Pareto front members first
+    (in scalar order), then the best scalar of the rest, up to N in all - which is ranking.order[:N], because
+    rank_variants orders the front first and each group by the scalar. A front larger than N keeps its N best scalars."""
+    top = int(top or DEFAULT_VALIDATE_TOP)
+    if ranking.question == 'explore':
+        return list(ranking.order[:top])
+    front = [n for n in ranking.order if n in set(ranking.front)]
+    rest = [n for n in ranking.order if n not in set(ranking.front)]
+    return (front + rest)[:top]
+
+
+def primary_direction(question: str, mean_value) -> int:
+    """The sign a validate round's direction test asks of the primary component on a hold-out day: earlier always
+    +1 (the loop would have asked for more insulin than base in rising loops: rise_vs_base_U > 0, GOAL.md), else
+    the sign of the search mean (explore: its review component; gentler: rise_vs_base_U)."""
+    if question == 'earlier':
+        return 1
+    return _sign(mean_value)
+
+
+def weights_sensitivity(ranking: Ranking, top: int = SENSITIVITY_TOP,
+                        factors: Sequence[float] = SENSITIVITY_FACTORS) -> Optional[dict]:
+    """DESIGN.md 5.3 rule 3, the weights-sensitivity panel: the scalar order of the feasible variants at the study's
+    weights and under factor x each weight of the question (earlier: rest, lowside; gentler: rest, zero_temp), the
+    others held. None for explore (no scalar). The Pareto front does not depend on the weights; the scalar orders
+    inside and after it do. Returns {'question', 'weights', 'top', 'order': [top names at the stated weights],
+    'by_weight': {weight: {'0.5': {'order': [top names], 'tau': Kendall tau of the whole scalar order vs the
+    stated one, 'same_top': bool}, '1.5': {...}}}} - names as rank_variants knows them (round.py maps to vhashes)."""
+    if ranking.question not in QUESTION_WEIGHTS:
+        return None
+    w = dict(DEFAULT_OBJECTIVE['scalar_weights'])
+    w.update((ranking.objective or {}).get('scalar_weights') or {})
+    feas = [n for n in ranking.order]
+
+    def order_at(weights):
+        sc = {n: scalar_objective(ranking.variants[n].mean, ranking.question, weights) for n in feas}
+        return sorted(feas, key=lambda n: (-sc[n], n))
+    stated = order_at(w)
+    out = {'question': ranking.question, 'weights': {k: w[k] for k in QUESTION_WEIGHTS[ranking.question]},
+           'top': int(top), 'factors': [float(f) for f in factors], 'order': stated[:top], 'by_weight': {}}
+    for key in QUESTION_WEIGHTS[ranking.question]:
+        per = {}
+        for f in factors:
+            ww = dict(w)
+            ww[key] = w[key] * f
+            o = order_at(ww)
+            tau = kendall_tau(stated, o)
+            per[f'{f:g}'] = {'order': o[:top], 'tau': None if tau is None else round(tau, 3),
+                             'same_top': o[:top] == stated[:top]}
+        out['by_weight'][key] = per
+    return out
+
+
 def leave_one_day_out(rows: Sequence[dict], question: str = 'explore', objective: Optional[dict] = None,
                       days: Optional[Sequence[str]] = None, base_variant: str = BASE_VARIANT) -> Dict[str, List[str]]:
     """{left-out day: order} - the ranking recomputed with that day removed; one fold per day (needs >= 2 days)"""
@@ -1012,6 +1129,8 @@ def recommend(ranking: Ranking, folds: Dict[str, List[str]], holdout_order: Opti
             reasons.append('fewer than two days: no leave-one-day-out folds')
         primary = v.review_component if ranking.question == 'explore' else 'rise_vs_base_U'
         sign = v.sign_frac.get(primary, 0.0)
+        if ranking.question == 'earlier':            # the direction of earlier is fixed: more on rises (rise > 0)
+            sign = sign if (v.mean.get(primary) or 0.0) > 0 else 0.0
         if len(v.days) < 2:
             reasons.append('fewer than two days: sign stability not testable')
         elif sign < cfg['sign_share'] - 1e-9:
@@ -1122,9 +1241,12 @@ def validate_variants(rows: Sequence[dict], question: str = 'explore', objective
 
     hold-out rank        rank_variants over the hold-out days, the validated variants (and base) only
     direction            per hold-out day the sign of the variant's review component (rise or rest vs base, the one
-                         its search review order used; 'rise_vs_base_U' for earlier / gentler) against the sign of its
-                         search mean; a day holds when the signs are equal and not 0, a day without a done row is
+                         its search review order used; 'rise_vs_base_U' for earlier / gentler) against the sign asked
+                         (primary_direction: +1 for earlier - rise_vs_base_U > 0 on the hold-out day -, else the sign of
+                         its search mean); a day holds when the signs are equal and not 0, a day without a done row is
                          missing (it does not hold)
+    top-N                validate_top(): explore the first N of the review order; earlier / gentler the Pareto front
+                         first, then the best scalar, up to N
     leave-one-day-out    one fold per scored day (search + hold-out). Leaving out a search day ranks EVERY variant
                          over the other search days (the only days all of them were replayed on); leaving out a
                          hold-out day ranks the validated variants over the search days plus the other hold-out days.
@@ -1148,7 +1270,7 @@ def validate_variants(rows: Sequence[dict], question: str = 'explore', objective
     search_days = sorted(search_days)
     holdout_days = sorted(d for d in holdout_days if d not in set(search_days))
     search = rank_variants(rows, question, objective, search_days, base_variant)
-    validated = list(search.order[:top])
+    validated = validate_top(search, top)
     search_rank = {n: search.variants[n].rank for n in validated}
     keep = set(validated) | {base_variant}
     vrows = [r for r in rows if r['variant'] in keep]
@@ -1170,7 +1292,7 @@ def validate_variants(rows: Sequence[dict], question: str = 'explore', objective
         sv = search.variants[name]
         comp = sv.review_component if question == 'explore' else 'rise_vs_base_U'
         fkey = FLOOR_COMPONENTS[comp]
-        want = _sign(sv.mean.get(comp))
+        want = primary_direction(question, sv.mean.get(comp))
         by_day = table.get(name, {})
         flips, missing, holds, inside = [], [], 0, 0
         for d in holdout_days:
@@ -1274,6 +1396,10 @@ def ranking_rule_text(question: str = 'explore', objective: Optional[dict] = Non
     if question != 'explore':
         lines.append('The weights are a study setting shown here, not a finding; the weights-sensitivity panel shows the'
                      ' order under +/-50 % of each weight.')
+    if question == 'earlier' and validate:
+        lines.append('Validate for "earlier": the Pareto front first, then the scalar, up to N variants; the direction'
+                     ' holds on a hold-out day when the loop would have asked for more insulin than base in rising'
+                     ' loops there.')
     lines.append(f'Feasible = no more insulin than base plus the floor in the two hours before a recorded low on every day,'
                  f' inside the envelope on every day (at most {env["max_3h_U"]} U vs base in any 3 h window and'
                  f' {env["max_day_pct_tdd"]} % of the phone\'s TDD per day), no emulated SMB above the phone\'s maxBolus,'
@@ -1330,7 +1456,7 @@ def leaderboard_rows(ranking: Ranking) -> List[dict]:
                     'mean': {k: v.mean.get(k) for k in ('rise_vs_base_U', 'rest_vs_base_U', 'delta_vs_base_U',
                                                         'changed_vs_base', 'lowside_flags', 'prehypo_extra_U',
                                                         'env_3h_max_U', 'env_day_pct_tdd', 'zero_temp_vs_base',
-                                                        'cap_binding_pct', 'max_single_smb_U')},
+                                                        'cap_binding_pct', 'max_single_smb_U') + MANUAL_KEYS},
                     'flags': v.flags})
     return out
 
@@ -1344,5 +1470,6 @@ __all__ = ['OBJECTIVE_VERSION', 'LoopSeries', 'trial_metrics', 'metrics_from_csv
            'kendall_tau', 'validate_variants', 'validation_line', 'validation_caveat', 'Validation',
            'DEFAULT_VALIDATE_TOP', 'VALIDATE_SIGN_SHARE', 'VALIDATION_KEYS', 'TIE_REASON', 'floor_multiple',
            'floor_band', 'tie_every_day', 'review_component_of', 'review_order_key', 'study_floor', 'share_pct', 'recommend_config', 'recommend_rule_text',
-           'RULE5_TIE',
+           'RULE5_TIE', 'manual_bolus_coverage', 'MANUAL_KEYS', 'MANUAL_WINDOW_S', 'PREEMPT_SHARE', 'validate_top',
+           'primary_direction', 'weights_sensitivity', 'SENSITIVITY_FACTORS', 'SENSITIVITY_TOP', 'QUESTION_WEIGHTS',
            'FLOOR_COMPONENTS', 'REVIEW_COMPONENTS', 'TIE_FACTOR', 'BASE_VARIANT', 'QUESTIONS']

@@ -14,6 +14,16 @@ Honesty statement (print it at the start of the sitting, at its end, and whereve
 
 > Hindcast replays the loop's decisions under other settings over the glucose and insulin history that the phone's own settings produced. It says where and how much the loop would have asked differently; it cannot say what glucose would have done. A variant that boluses earlier is charged for its bolus and for the later ones the phone actually gave, so deltas overstate aggressive settings and understate gentle ones. The base replay disagrees with the phone in about 4 % of loops; differences smaller than that floor are ties. Nothing here changes the phone; settings are for you and your care team to review. This is one person's insulin dosing, not medical advice.
 
+## End goal (docs/hindcast/GOAL.md)
+
+Markus' goal since 2026-10-17: a more aggressive and quicker loop, fully closed without manual boluses,
+with glucose between 3.9 and 10 mmol/l more than 90 % of the time. Every study and card serves it, in
+staged steps: search (`question: earlier`, the Pareto front inside the envelope on every day), one
+proposed step from the front, Markus applies it on the phone, a week observed, then the next search.
+The page prints the goal under the honesty statement. The share of time between 3.9 and 10 mmol/l, the
+time below 3.9 and the manual boluses per day are observed on the phone only (`hc baseline`); quote
+them labelled observed, as facts about the past, never for a variant.
+
 ## Setup
 
 - cwd `software/` of the APS-what-if checkout, branch `hindcast`; `hc` means

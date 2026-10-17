@@ -1191,3 +1191,230 @@ def test_validation_block_carries_the_caveat_of_a_recommended_variant():
     js = open(os.path.join(report.VIEWS_DIR, 'parameters.js'), encoding='utf-8').read()
     assert 'v.validation.caveat' in js
     assert report.NO_GLUCOSE_RESPONSE == contracts.NO_GLUCOSE_RESPONSE
+
+
+# ----------------------------------------------------------------------------- GOAL.md: end goal, question earlier,
+#                                                                               observed baseline, bolus coverage
+
+def _copy_fixture(tmp_path, question=None, round_edit=None):
+    sd = tmp_path / 'studies' / 'study'
+    shutil.copytree(FIXTURE, sd)
+    if question:
+        with open(sd / 'study.json', encoding='utf-8') as fh:
+            s = json.load(fh)
+        s['question'] = question
+        with open(sd / 'study.json', 'w', encoding='utf-8') as fh:
+            json.dump(s, fh)
+    if round_edit:
+        with open(sd / 'round.json', encoding='utf-8') as fh:
+            rnd = json.load(fh)
+        round_edit(rnd)
+        with open(sd / 'round.json', 'w', encoding='utf-8') as fh:
+            json.dump(rnd, fh)
+    return sd
+
+
+def _render_copy(tmp_path, sd, **kw):
+    res = report.render_report(str(sd), out_dir=str(tmp_path / 'out'), settings=_settings(),
+                               frozen_dir=str(tmp_path / 'nf'), generated=GENERATED, log=lambda *_: None, **kw)
+    text = open(res.path, encoding='utf-8').read()
+    return text, _tier1(text)
+
+
+def test_end_goal_sentence_passes_the_lint_and_names_no_outcome_statistic():
+    lint.lint_text(report.END_GOAL, 'line')
+    assert report.END_GOAL.startswith('End goal (Markus, 2026-10-17):')
+    for must in ('aggressive', 'quicker', 'without manual boluses', '90 %', 'observed on the phone only',
+                 'never computed here'):
+        assert must in report.END_GOAL, must
+    assert '<p class="honesty goal"' in report.goal_html(report.END_GOAL) and report.goal_html(None) == ''
+
+
+@needs_fixture
+def test_end_goal_sits_under_the_honesty_paragraph(tmp_path):
+    text = open(_render(tmp_path).path, encoding='utf-8').read()
+    assert text.index('id="honesty"') < text.index('id="end-goal"') < text.index('<nav class="tabs"')
+    assert _tier1(text)['page']['goal'] == report.END_GOAL
+    tpl = _read('page.html')
+    assert tpl.index('$HONESTY') < tpl.index('$GOAL') < tpl.index('<nav')
+
+
+@needs_fixture
+def test_explore_study_has_no_pareto_block(tmp_path):
+    ps = _tier1(open(_render(tmp_path).path, encoding='utf-8').read())['parameters']
+    assert ps['pareto'] is None and ps['coverage'] is None
+
+
+@needs_fixture
+def test_question_earlier_carries_the_front_order_weights_and_a_missing_sensitivity_note(tmp_path):
+    sd = _copy_fixture(tmp_path, 'earlier')
+    _text, data = _render_copy(tmp_path, sd)
+    pa = data['parameters']['pareto']
+    assert pa['question'] == 'earlier' and [a['key'] for a in pa['axes']] == ['rise_vs_base_U', 'rest_pos_U', 'lowside_flags']
+    assert [a['direction'] for a in pa['axes']] == ['up', 'down', 'down']
+    assert pa['weights'] == {'rest': 2.0, 'lowside': 0.3} and pa['base'] == {'x': 0.0, 'y': 0.0, 'z': 0.0}
+    assert pa['scalar_text'] == 'rise_vs_base_U - 2.0 x max(rest_vs_base_U, 0) - 0.3 x lowside_flags'
+    pts = {p['variant']: p for p in pa['points']}
+    assert len(pts) == 4 and pa['front'] and all(pts[p['variant']]['front'] for p in pa['order'] if p['front'])
+    # the marked front is the metrics front of the three objectives, coordinates are the means it used
+    from hindcast import metrics as hm
+    feas = {n: (-p['x'], p['y'], p['z']) for n, p in pts.items() if p['feasible']}
+    assert sorted(hm.pareto_front(feas)) == sorted(n for n, p in pts.items() if p['front'])
+    assert all(p['y'] >= 0 for p in pa['points'])
+    # the review order: front first, then by the scalar; the leaderboard ranks follow it
+    ranks = [o['rank'] for o in pa['order']]
+    assert ranks == sorted(ranks) and ranks[0] == 1
+    fronts = [o['front'] for o in pa['order']]
+    assert fronts == sorted(fronts, reverse=True)
+    lb = {v['variant']: v['position'] for v in data['parameters']['variants']}
+    assert all(lb[o['variant']] == o['rank'] for o in pa['order']), 'the leaderboard rows follow the same order'
+    se = pa['sensitivity']
+    assert se['available'] is False and se['note'] == report.SENSITIVITY_MISSING and se['weights'] == []
+    assert 'predates' in se['note']
+    for s in report.page_sentences(data):
+        lint.lint_text(s, 'line')
+
+
+@needs_fixture
+def test_question_earlier_reads_the_round_sensitivity_block(tmp_path):
+    def edit(rnd):
+        labels = [c['variant'] for c in rnd['variants'] if c['verdict'] != 'base']
+        vh = {c['variant']: c['vhash'] for c in rnd['variants']}
+        rnd['sensitivity'] = {'rest': {'0.5': list(reversed(labels)), '1.5': [vh[x][:12] for x in labels]},
+                              'lowside': {0.5: labels, '1.5': labels}}
+    sd = _copy_fixture(tmp_path, 'earlier', edit)
+    _text, data = _render_copy(tmp_path, sd)
+    se = data['parameters']['pareto']['sensitivity']
+    assert se['available'] is True and [w['weight'] for w in se['weights']] == ['rest', 'lowside']
+    rest = se['weights'][0]
+    assert rest['value'] == 2.0 and all('_' in x for x in rest['1.5']), 'short vhashes mapped to labels'
+    assert len(rest['0.5']) <= report.SENSITIVITY_TOP
+    for s in report.page_sentences(data):
+        lint.lint_text(s, 'line')
+
+
+def test_sensitivity_view_same_top_and_missing_factor():
+    variants = [{'vhash': 'a' * 40, 'variant': 'va'}, {'vhash': 'b' * 40, 'variant': 'vb'}]
+    out = report.sensitivity_view('earlier', {'rest': 2.0, 'lowside': 0.3}, ['va', 'vb'],
+                                  {'rest': {'0.5': ['va', 'vb'], '1.5': ['b' * 12, 'va']}, 'lowside': {'0.5': ['va']}},
+                                  variants)
+    rest, low = out['weights']
+    assert rest['1.5'] == ['vb', 'va'] and rest['same_top'] is False
+    assert low['1.5'] is None and low['same_top'] is False
+    assert out['note'].startswith('0 of 2 weights leave the top 5 of the scalar order unchanged')
+    lint.lint_text(out['note'], 'line')
+    same = report.sensitivity_view('earlier', {}, ['va'], {'rest': {'0.5': ['va'], '1.5': ['va']}}, variants)
+    assert same['weights'][0]['same_top'] is True
+    assert report.sensitivity_view('explore', {}, [], None, variants)['available'] is False
+    assert report.pareto_view('explore', object(), []) is None
+
+
+def test_read_round_extras_tolerates_missing_and_odd_files(tmp_path):
+    sd = types.SimpleNamespace(round_path=str(tmp_path / 'round.json'))
+    assert report.read_round_extras(sd) == {'sensitivity': None}
+    (tmp_path / 'round.json').write_text('[1, 2]')
+    assert report.read_round_extras(sd) == {'sensitivity': None}
+    (tmp_path / 'round.json').write_text(json.dumps({'sensitivity': {'rest': {'0.5': ['x']}}}))
+    assert report.read_round_extras(sd)['sensitivity'] == {'rest': {'0.5': ['x']}}
+
+
+@needs_fixture
+def test_coverage_columns_from_the_round_effect(tmp_path):
+    def edit(rnd):
+        for i, c in enumerate(rnd['variants']):
+            if c['verdict'] != 'base':
+                c['effect']['coverage_U_vs_base'] = 0.25 * i
+                c['effect']['boluses_preempted'] = 0.5
+    sd = _copy_fixture(tmp_path, None, edit)
+    _text, data = _render_copy(tmp_path, sd)
+    ps = data['parameters']
+    assert [c['key'] for c in ps['coverage']['columns']] == ['coverage_U_vs_base', 'boluses_preempted']
+    assert ps['coverage']['columns'][0]['head'] == 'would have pre-empted (U)'
+    assert 'changes the glucose that followed' in ps['coverage']['caveat']
+    assert all(v['coverage'].get('boluses_preempted') == 0.5 for v in ps['variants'])
+    for s in report.page_sentences(data):
+        lint.lint_text(s, 'line')
+
+
+def test_coverage_prefers_the_trial_metrics_mean():
+    c = types.SimpleNamespace(effect={'coverage_U_vs_base': 9.0, 'boluses_preempted': 2})
+    out = report._coverage_of({'mean': {'coverage_U_vs_base': 0.4}}, c)
+    assert out == {'coverage_U_vs_base': 0.4, 'boluses_preempted': 2}
+    assert report._coverage_of({'mean': {}}, None) == {}
+
+
+@needs_fixture
+def test_observed_days_from_a_baseline_json_next_to_the_studies(tmp_path):
+    sd = _copy_fixture(tmp_path)
+    (tmp_path / 'studies' / 'baseline.json').write_text(json.dumps(
+        {'days': [{'day': '2026-09-06', 'tir_pct': 87.456, 'tbr_pct': 1.2, 'manual_boluses': 2, 'manual_U': 3.5,
+                   'note': 'ignored'}]}))
+    _text, data = _render_copy(tmp_path, sd)
+    obs = data['observed']
+    assert obs['days'] == {'2026-09-06': {'tir_pct': 87.46, 'tbr_pct': 1.2, 'manual_boluses': 2, 'manual_U': 3.5}}
+    assert obs['range_mmol'] == [3.9, 10.0] and obs['note'] == report.OBSERVED_NOTE
+    assert data['scenarios']['days'][0]['observed'] == obs['days']['2026-09-06']
+    lint.lint_text(obs['note'], 'line')
+
+
+@needs_fixture
+def test_observed_days_absent_or_unreadable_degrade_silently(tmp_path, monkeypatch):
+    sd = _copy_fixture(tmp_path)
+    _text, data = _render_copy(tmp_path, sd)
+    assert data['observed'] is None and 'observed' not in data['scenarios']['days'][0]
+    monkeypatch.setattr(report, '_baseline_module', lambda: None)       # no reader module: the JSON alone
+    bad = tmp_path / 'bad.json'
+    bad.write_text('{not json')
+    _text, data = _render_copy(tmp_path, sd, baseline_path=str(bad))
+    assert data['observed']['days'] == {}
+    # a day the JSON lacks is asked from hindcast.baseline.day_stats when that module exists; failures are silent
+    fake = types.ModuleType('hindcast.baseline')
+    fake.day_stats = lambda day: {'tir_pct': 91.0, 'manual_boluses': 0, 'tbr_pct': None}
+    monkeypatch.setattr(report, '_baseline_module', lambda: fake)
+    empty = tmp_path / 'empty.json'
+    empty.write_text('{}')
+    _text, data = _render_copy(tmp_path, sd, baseline_path=str(empty))
+    assert data['observed']['days'] == {'2026-09-06': {'tir_pct': 91.0, 'manual_boluses': 0}}
+    fake.day_stats = lambda day: 1 / 0
+    _text, data = _render_copy(tmp_path, sd, baseline_path=str(empty))
+    assert data['observed']['days'] == {}
+
+
+def test_baseline_days_shapes():
+    row = {'tir_pct': 90}
+    assert report._baseline_days({'days': {'2026-09-06': row}}) == {'2026-09-06': row}
+    assert report._baseline_days({'2026-09-06': row, '_about': 'x'}) == {'2026-09-06': row}
+    assert report._baseline_days({'days': [dict(row, day='2026-09-06')]})['2026-09-06']['tir_pct'] == 90
+    assert report._baseline_days(None) == {} and report._baseline_days({'days': 3}) == {}
+
+
+def test_goal_views_contract():
+    pjs = open(os.path.join(report.VIEWS_DIR, 'parameters.js'), encoding='utf-8').read()
+    for needle in ("id: 'pv-pareto'", 'function paretoOption', 'function sensitivityPanel', 'se.available',
+                   "'Review order under the declared weights'", 'covCols', 'cov.caveat', 'pa.scalar_text'):
+        assert needle in pjs, needle
+    assert pjs.index('var pareto = renderPareto(el, ps)') < pjs.index('panels = renderPanels(el, ps)'), 'the front comes first on the page'
+    page = _read('page.js')
+    assert 'HC.observedText = function' in page and "text: 'observed'" in page
+    sjs = open(os.path.join(report.VIEWS_DIR, 'scenarios.js'), encoding='utf-8').read()
+    assert "'observed: ' + HC.observedText" in sjs
+    css = _read('page.css')
+    assert '.honesty.goal' in css and '.observed-tag' in css
+
+
+def test_sensitivity_view_reads_the_round_sensitivity_shape():
+    """round.round_sensitivity: metrics.weights_sensitivity with vhashes, by_weight{w: {f: {order, tau, same_top}}}"""
+    variants = [{'vhash': c * 40, 'variant': 'v' + c} for c in 'abc']
+    sens = {'question': 'earlier', 'weights': {'rest': 2.0, 'lowside': 0.3}, 'top': 2, 'factors': [0.5, 1.5],
+            'order': ['a' * 40, 'b' * 40],
+            'by_weight': {'rest': {'0.5': {'order': ['b' * 40, 'a' * 40], 'tau': 0.333, 'same_top': False},
+                                   '1.5': {'order': ['a' * 40, 'b' * 40], 'tau': 1.0, 'same_top': True}},
+                          'lowside': {'0.5': {'order': ['a' * 40, 'b' * 40], 'tau': 1.0, 'same_top': True},
+                                      '1.5': {'order': ['a' * 40, 'b' * 40], 'tau': 1.0, 'same_top': True}}}}
+    out = report.sensitivity_view('earlier', {'rest': 2.0, 'lowside': 0.3}, ['vc', 'va', 'vb'], sens, variants)
+    assert out['available'] and out['declared_top'] == ['va', 'vb'], 'the recorded scalar order, not the front order'
+    rest, low = out['weights']
+    assert rest['0.5'] == ['vb', 'va'] and rest['tau'] == {'0.5': 0.33, '1.5': 1.0} and rest['same_top'] is False
+    assert low['same_top'] is True and low['value'] == 0.3
+    assert out['note'].startswith('1 of 2 weights')
+    lint.lint_text(out['note'], 'line')

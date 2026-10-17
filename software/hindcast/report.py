@@ -27,7 +27,12 @@ limit is 16 MB). `--artifact` writes the page without <!doctype>/<html>/<head>/<
 Checks before anything is written: every <script src> must be https on an allowed host (the Artifact CSP list) with
 an exact x.y.z version in its path, every external stylesheet must come from fonts.googleapis.com, and no inserted
 CSS/JS may contain '</script' or '</style'. ECharts 6.1.0 from cdnjs (ECHARTS_URL) is the only external script the
-template loads. Every human-readable sentence this module generates passes hindcast.lint (kind 'line'); the page
+template loads. The honesty band also carries the end goal of docs/hindcast/GOAL.md (END_GOAL). Question earlier /
+gentler: the Parameters view adds the Pareto front, the review order with its weights and the weights-sensitivity
+panel (pareto_view; round.json `sensitivity`). With a baseline JSON next to the studies (<studies dir>/baseline.json,
+`--baseline`), the day cards and the Scenarios badges show the observed CGM statistics of each day, labelled observed
+(observed_days); the leaderboard adds the manual-bolus coverage columns when the metrics carry them (COVERAGE_KEYS).
+Every human-readable sentence this module generates passes hindcast.lint (kind 'line'); the page
 carries the honesty paragraph of DESIGN.md section 3 verbatim (contracts.HONESTY_STATEMENT), not collapsible.
 
 Nothing here replays, opens a network connection (serve binds a local socket only) or changes a study file.
@@ -712,7 +717,7 @@ def _param_value(params, key, phone):
     return params[key] if key in (params or {}) else phone
 
 
-def parameter_space(study, rows, rounds):
+def parameter_space(study, rows, rounds, sensitivity=None):
     """The data of the Parameters view (H-403), computed here so the page only draws it:
     {question, days[], floors{day: {floor_*, tie{component: U or loops}}}, components[], extras[], params[],
      base{vhash, variant, values{param: phone}}, variants[{vhash, variant, values, per_day{day: {metric: v}},
@@ -731,7 +736,7 @@ def parameter_space(study, rows, rounds):
     days = [d for d, r in roles.items() if r == 'search'] or [d for d, r in roles.items() if r != 'quarantined']
     days = sorted(days)
     comps = [k for k, *_ in PARAMETER_COMPONENTS]
-    extras = [k for k, *_ in PARAMETER_EXTRAS]
+    extras = [k for k, *_ in PARAMETER_EXTRAS] + [k for k, *_ in COVERAGE_KEYS]
     params = []
     for key, sp in space.items():
         params.append({'key': key, 'type': sp.type, 'phone': sp.phone, 'low': sp.low, 'high': sp.high, 'step': sp.step,
@@ -802,6 +807,7 @@ def parameter_space(study, rows, rounds):
             'flags': list(s.flags) if s is not None else list(c.flags if c is not None else []),
             'validation': _validation_of(c),
         })
+        variants[-1]['coverage'] = _coverage_of(variants[-1], c)
     # order: the ranking's order, then the infeasible ones, then whatever has no ranking (round rank, then label)
     pos = {}
     if ranking is not None:
@@ -815,11 +821,15 @@ def parameter_space(study, rows, rounds):
     if ranking is not None and rnd is not None and getattr(rnd, 'validation', None):
         rule = hm.ranking_rule_text(study.question, ranking.objective, ranking.floors, validate=True)
     base_any = next(iter(base_rows.values()), None)
+    with_cov = any(v['coverage'] for v in variants)
     return {
         'question': study.question, 'days': days, 'floors': floors, 'tie_factor': hm.TIE_FACTOR,
         'components': [{'key': k, 'label': lab, 'unit': u, 'floor_key': fk, 'insulin': s}
                        for k, lab, u, fk, s in PARAMETER_COMPONENTS],
         'extras': [{'key': k, 'label': lab, 'unit': u} for k, lab, u in PARAMETER_EXTRAS],
+        'coverage': ({'columns': [{'key': k, 'head': hd, 'label': lab, 'unit': u} for k, hd, lab, u in COVERAGE_KEYS],
+                      'caveat': COVERAGE_CAVEAT} if with_cov else None),
+        'pareto': pareto_view(study.question, ranking, variants, sensitivity),
         'params': params,
         'base': {'vhash': base_any.vhash if base_any else contracts.BASE_VHASH, 'variant': base_label,
                  'values': {p['key']: p['phone'] for p in params}, 'days': sorted(base_rows)},
@@ -835,6 +845,256 @@ def _floor_multiple_of(s):
     the review score, H-715) - as metrics.leaderboard_rows and the cards print it."""
     fm = (getattr(s, 'floor_multiples', None) or {}).get(s.review_component)
     return 0.0 if fm is None else fm
+
+
+# ----------------------------------------------------------------------------- question earlier / gentler (DESIGN 5.3 rule 3)
+
+# (key, label, direction): the three Pareto objectives per question as the page draws them; 'up' = larger is the
+# direction the question asks for, 'down' = smaller. metrics.pareto_objectives() is the definition (all minimised).
+PARETO_AXES = {
+    'earlier': (('rise_vs_base_U', 'insulin in rising loops vs base (U)', 'up', 'rising loops vs base (U)'),
+                ('rest_pos_U', 'extra insulin in the rest vs base, max(rest, 0) (U)', 'down', 'extra in the rest (U)'),
+                ('lowside_flags', 'low-side flags (loops)', 'down', 'low-side flags')),
+    'gentler': (('rise_vs_base_U', 'insulin in rising loops vs base (U)', 'down', 'rising loops vs base (U)'),
+                ('rest_abs_U', 'insulin in the rest vs base, |rest| (U)', 'down', '|rest| vs base (U)'),
+                ('zero_temp_pos', 'more zero temps vs base, max(zero temps, 0) (loops)', 'down', 'more zero temps')),
+}
+# the weights each question's scalar uses (metrics.scalar_objective)
+SCALAR_WEIGHTS = {'earlier': ('rest', 'lowside'), 'gentler': ('rest', 'zero_temp')}
+SENSITIVITY_FACTORS = ('0.5', '1.5')
+SENSITIVITY_TOP = 5
+SENSITIVITY_MISSING = ('This round predates the weights-sensitivity record: round.json carries no sensitivity block, '
+                       'so the order under 0.5 x and 1.5 x of each weight is not shown. The next round writes it.')
+
+
+def scalar_text(question, weights):
+    """The scalar of the declared question with its weights, as the page prints it."""
+    w = weights or {}
+    if question == 'earlier':
+        return (f'rise_vs_base_U - {w.get("rest", 2.0)} x max(rest_vs_base_U, 0) - {w.get("lowside", 0.3)} x '
+                f'lowside_flags')
+    if question == 'gentler':
+        return (f'-rise_vs_base_U - {w.get("rest", 2.0)} x |rest_vs_base_U| - {w.get("zero_temp", 0.3)} x '
+                f'max(zero_temp_vs_base, 0)')
+    return ''
+
+
+def read_round_extras(sd):
+    """The round.json keys the Round contract may not carry yet (it drops unknown keys when read leniently):
+    {'sensitivity': {...} or None}. Read raw; a missing or odd file gives None."""
+    raw = _read_json(getattr(sd, 'round_path', '') or '') if sd is not None else None
+    sens = raw.get('sensitivity') if isinstance(raw, dict) else None
+    return {'sensitivity': sens if isinstance(sens, dict) and sens else None}
+
+
+def _label_of(item, by_vhash, labels):
+    """A sensitivity entry (a variant label, a full or 12-character vhash, or {variant|vhash: ...}) -> label."""
+    if isinstance(item, dict):
+        item = item.get('variant') or item.get('vhash') or ''
+    s = str(item)
+    if s in labels:
+        return s
+    for vh, lab in by_vhash.items():
+        if len(s) >= 8 and vh.startswith(s):
+            return lab
+    return s
+
+
+def sensitivity_view(question, weights, order_labels, sensitivity, variants):
+    """The weights-sensitivity panel (DESIGN.md 5.3 rule 3): per weight of the declared scalar the top-5 order under
+    0.5 x and 1.5 x of that weight next to the order under the declared weights. `sensitivity` is round.json's block
+    in either shape: round.round_sensitivity / metrics.weights_sensitivity {question, weights, top, order[vhash],
+    by_weight{weight: {'0.5': {order[vhash], tau, same_top}, '1.5': {...}}}}, or the plain {weight: {'0.5': [labels],
+    '1.5': [labels]}}; vhashes (full or 12-character) are shown as variant labels. None -> available False and the
+    note. -> {available, note, declared_top[], weights[{weight, value, '0.5': [labels] | None, '1.5': ..., tau{f},
+    same_top}]}."""
+    keys = SCALAR_WEIGHTS.get(question, ())
+    if not sensitivity:
+        return {'available': False, 'note': SENSITIVITY_MISSING, 'declared_top': list(order_labels[:SENSITIVITY_TOP]),
+                'weights': []}
+    by_vhash = {v['vhash']: v['variant'] for v in variants}
+    labels = set(by_vhash.values())
+    blocks = sensitivity.get('by_weight') if isinstance(sensitivity.get('by_weight'), dict) else sensitivity
+    n_top = sensitivity.get('top') if isinstance(sensitivity.get('top'), int) and sensitivity.get('top') > 0 else SENSITIVITY_TOP
+    if isinstance(sensitivity.get('order'), list):           # the scalar order at the stated weights, as recorded
+        top = [_label_of(x, by_vhash, labels) for x in sensitivity['order']][:n_top]
+    else:
+        top = list(order_labels[:n_top])
+    stated = sensitivity.get('weights') if isinstance(sensitivity.get('weights'), dict) else {}
+    rows = []
+    for w in list(keys) + sorted(k for k in blocks if k not in keys):
+        block = blocks.get(w)
+        if not isinstance(block, dict):
+            continue
+        row = {'weight': w, 'value': (weights or {}).get(w, stated.get(w)), 'declared_top': top, 'tau': {}}
+        same = []
+        for f in SENSITIVITY_FACTORS:
+            got = block.get(f)
+            if got is None:                                  # tolerate 0.5 / 1.5 as numbers turned to keys
+                got = next((v for k, v in block.items() if _same_factor(k, f)), None)
+            if isinstance(got, dict):
+                if isinstance(got.get('tau'), (int, float)):
+                    row['tau'][f] = _r(got['tau'], 2)
+                if isinstance(got.get('same_top'), bool):
+                    same.append(got['same_top'])
+                got = got.get('order')
+            row[f] = [_label_of(x, by_vhash, labels) for x in got][:n_top] if isinstance(got, list) else None
+            if not isinstance(block.get(f), dict) or 'same_top' not in (block.get(f) or {}):
+                same.append(row[f] is not None and row[f] == top[:len(row[f])])
+        row['same_top'] = bool(same) and all(same)
+        rows.append(row)
+    stable = sum(1 for r in rows if r['same_top'])
+    note = (f'{stable} of {_plural(len(rows), "weight")} leave the top {n_top} of the scalar order unchanged at 0.5 x '
+            f'and 1.5 x; a weight that moves the order is a study setting, not a finding.') if rows else SENSITIVITY_MISSING
+    return {'available': bool(rows), 'note': note, 'declared_top': top, 'weights': rows}
+
+
+def _same_factor(k, f):
+    try:
+        return abs(float(k) - float(f)) < 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def pareto_view(question, ranking, variants, sensitivity=None):
+    """The Pareto block of the Parameters view for question earlier / gentler (DESIGN.md 5.3 rule 3), None otherwise:
+    {question, axes[{key, label, direction}], weights{}, scalar_text, points[{vhash, variant, x, y, z, front,
+     feasible, scalar, rank}], base{x, y, z} (the phone's settings replayed: the origin), front[vhash],
+     order[{rank, vhash, variant, scalar, front}] (the review order: the front first, by the scalar inside it, then the
+     rest by the scalar - metrics.rank_variants), order_text, sensitivity (sensitivity_view)}.
+    Coordinates are the means over the search days that rank_variants used, so the marked front is its front."""
+    if question not in PARETO_AXES or ranking is None:
+        return None
+    weights = {k: (ranking.objective.get('scalar_weights') or {}).get(k) for k in SCALAR_WEIGHTS[question]}
+    by_label = {v['variant']: v for v in variants}
+    front = set(ranking.front or [])
+    points = []
+    for name, s in ranking.variants.items():
+        v = by_label.get(name)
+        if v is None:
+            continue
+        m = s.mean or {}
+        rise = float(m.get('rise_vs_base_U') or 0.0)
+        rest = float(m.get('rest_vs_base_U') or 0.0)
+        if question == 'earlier':
+            xyz = (rise, max(rest, 0.0), float(m.get('lowside_flags') or 0.0))
+        else:
+            xyz = (rise, abs(rest), max(float(m.get('zero_temp_vs_base') or 0.0), 0.0))
+        points.append({'vhash': v['vhash'], 'variant': name, 'x': _r(xyz[0], 3), 'y': _r(xyz[1], 3), 'z': _r(xyz[2], 2),
+                       'front': name in front, 'feasible': bool(s.feasible), 'scalar': _r(s.scalar, 3),
+                       'rank': s.rank})
+    points.sort(key=lambda p: (p['rank'] is None, p['rank'] or 0, p['variant']))
+    order = [{'rank': p['rank'], 'vhash': p['vhash'], 'variant': p['variant'], 'scalar': p['scalar'],
+              'front': p['front']} for p in points if p['rank'] is not None]
+    n_front = sum(1 for p in points if p['front'])
+    order_text = (f'Review order of the declared question {question}: the {_plural(n_front, "front member")} first, by '
+                  f'the scalar {scalar_text(question, weights)} inside the front, then the other feasible variants by '
+                  f'the same scalar. The weights are a study setting shown here, not a finding.')
+    return {'question': question,
+            'axes': [{'key': k, 'label': lab, 'direction': d, 'short': sh} for k, lab, d, sh in PARETO_AXES[question]],
+            'weights': weights, 'scalar_text': scalar_text(question, weights),
+            'points': points, 'base': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+            'front': [p['vhash'] for p in points if p['front']], 'order': order, 'order_text': order_text,
+            'sensitivity': sensitivity_view(question, weights, [o['variant'] for o in order], sensitivity, variants)}
+
+
+# ----------------------------------------------------------------------------- manual-bolus coverage (GOAL.md)
+
+# (key, short head, full label, unit): read from the trial metrics when they carry them, else round.json's effect
+COVERAGE_KEYS = (
+    ('coverage_U_vs_base', 'would have pre-empted (U)',
+     'insulin of the manual boluses the loop would already have asked for as SMBs before the bolus, vs base, mean per '
+     'search day', 'U'),
+    ('boluses_preempted', 'boluses pre-empted',
+     'manual boluses the loop would already have covered as SMBs before they were given, mean per search day', 'boluses'),
+)
+COVERAGE_CAVEAT = ('Decision-level coverage only: a pre-empted bolus changes the glucose that followed, so every '
+                   'later loop of the replay after it still runs on the history the manual bolus produced.')
+
+
+def _coverage_of(v, candidate):
+    out = {}
+    for k, *_ in COVERAGE_KEYS:
+        x = (v.get('mean') or {}).get(k)
+        if x is None and candidate is not None:
+            x = (candidate.effect or {}).get(k)
+        if isinstance(x, (int, float)) and not isinstance(x, bool):
+            out[k] = _r(x, 3)
+    return out
+
+
+# ----------------------------------------------------------------------------- observed baseline (GOAL.md)
+
+BASELINE_JSON = 'baseline.json'
+OBSERVED_RANGE_MMOL = (3.9, 10.0)
+OBSERVED_KEYS = ('tir_pct', 'tbr_pct', 'manual_boluses', 'manual_U')
+OBSERVED_NOTE = ('Observed on the phone: CGM statistics of the day as it happened under the phone\'s own settings, '
+                 'facts about the past. They are never computed for a variant.')
+
+
+def _baseline_days(doc):
+    """{day: stats} from the shapes a baseline JSON may have: {'days': {day: {...}}}, {'days': [{'day': ...}]} or
+    {day: {...}}."""
+    if not isinstance(doc, dict):
+        return {}
+    days = doc.get('days', doc)
+    if isinstance(days, list):
+        return {str(x.get('day')): x for x in days if isinstance(x, dict) and x.get('day')}
+    if isinstance(days, dict):
+        return {str(k): v for k, v in days.items() if isinstance(v, dict) and re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(k))}
+    return {}
+
+
+def _baseline_module():
+    try:
+        from hindcast import baseline as bl                  # built by another issue; absent -> no fallback reader
+    except Exception:
+        return None
+    return bl if callable(getattr(bl, 'day_stats', None)) else None
+
+
+def find_baseline(sd):
+    """The baseline JSON next to the studies (<studies dir>/baseline.json), else one inside the study; None."""
+    for cand in (os.path.join(os.path.dirname(os.path.abspath(sd.path)), BASELINE_JSON),
+                 os.path.join(sd.path, BASELINE_JSON)):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def observed_days(sd, study, baseline_path=None):
+    """The observed per-day CGM statistics for the study's days, or None when no baseline JSON exists:
+    {range_mmol, note, days{day: {tir_pct, tbr_pct, manual_boluses, manual_U}}}. Values come from the JSON; a day it
+    does not carry is asked from hindcast.baseline.day_stats(day) when that module exists. Every failure degrades to
+    'no observed numbers for that day' silently (the page is still a decision replay without them)."""
+    path = baseline_path if baseline_path is not None else find_baseline(sd)
+    if not path or not os.path.isfile(path):
+        return None
+    doc = _read_json(path)
+    have = _baseline_days(doc)
+    mod = None
+    out = {}
+    for d in [x.day for x in study.days]:
+        stats = have.get(d)
+        if stats is None:
+            mod = mod if mod is not None else (_baseline_module() or False)
+            if mod:
+                try:
+                    stats = mod.day_stats(d)
+                except Exception:
+                    stats = None
+        if not isinstance(stats, dict):
+            continue
+        row = {}
+        for k in OBSERVED_KEYS:
+            x = stats.get(k)
+            if isinstance(x, (int, float)) and not isinstance(x, bool):
+                row[k] = _r(x, 2)
+        if row:
+            out[d] = row
+    rng = (doc or {}).get('range_mmol') if isinstance(doc, dict) else None
+    rng = list(rng) if isinstance(rng, (list, tuple)) and len(rng) == 2 else list(OBSERVED_RANGE_MMOL)
+    return {'range_mmol': rng, 'note': OBSERVED_NOTE, 'days': out}
 
 
 def _validation_of(candidate):
@@ -972,6 +1232,13 @@ def drilldown_index(study, collected):
     return out
 
 
+# docs/hindcast/GOAL.md, under the honesty paragraph on every page. The lint refuses the words of a time-in-range
+# figure on any generated surface, so the band names the range instead of the statistic.
+END_GOAL = ('End goal (Markus, 2026-10-17): a more aggressive and quicker loop, fully closed without manual boluses, '
+            'with glucose between 3.9 and 10 mmol/l more than 90 % of the time. This page can rank what the loop '
+            'would have asked for; the time between 3.9 and 10 mmol/l is observed on the phone only, never computed '
+            'here.')
+
 NO_GLUCOSE_RESPONSE = contracts.NO_GLUCOSE_RESPONSE      # shared with the cards ('this page' read as 'this card')
 
 
@@ -1018,7 +1285,7 @@ def validation_lines(v):
 
 
 def build_page_data(sd, study, rows, status, rounds, days_meta, settings, collected, generated, single_file=False,
-                    inlined=(), artifact=False):
+                    inlined=(), artifact=False, observed='auto'):
     """The tier-1 document: export.build_tier1 plus `overview`, `assumed`, `parameters`, `scenarios`, `drilldown` and `page`; the trial rows' `files` are
     rewritten to the page-relative paths of `collected`."""
     hours = {}
@@ -1040,11 +1307,16 @@ def build_page_data(sd, study, rows, status, rounds, days_meta, settings, collec
     data['rounds'] = slim_rounds(data.get('rounds'))
     data['overview'] = overview_numbers(study, rows, rounds, hours, days_meta)
     data['assumed'] = assumed_keys(settings)
-    data['parameters'] = parameter_space(study, rows, rounds)
+    data['parameters'] = parameter_space(study, rows, rounds, read_round_extras(sd)['sensitivity'])
     data['parameters']['validation_lines'] = validation_lines(data['parameters'].get('validation'))
     data['scenarios'] = scenario_index(study, rows, collected, days_meta, settings, data['parameters'])
+    data['observed'] = observed_days(sd, study) if observed == 'auto' else observed
+    for d in data['scenarios'].get('days') or []:            # only the days the baseline carries
+        obs = ((data['observed'] or {}).get('days') or {}).get(d['day'])
+        if obs:
+            d['observed'] = obs
     data['drilldown'] = drilldown_index(study, collected)
-    data['page'] = {'generated': data['generated'], 'single_file': bool(single_file), 'inlined': list(inlined),
+    data['page'] = {'goal': END_GOAL, 'generated': data['generated'], 'single_file': bool(single_file), 'inlined': list(inlined),
                     'artifact': bool(artifact), 'source': source_label(study.source), 'host': '',
                     'units': glucose_units(settings), 'study_dir': os.path.basename(sd.path),
                     'caveat': unlock_caveat(study)}
@@ -1071,6 +1343,17 @@ def page_sentences(data):
             out.append(str(v['validation']['line']))
         for reasons in (v.get('reasons') or {}).values():
             out += [str(x) for x in reasons]
+    pa = ps.get('pareto') or {}
+    out += [str(x) for x in (pa.get('order_text'), (pa.get('sensitivity') or {}).get('note')) if x]
+    out += [str(a.get(k)) for a in pa.get('axes') or [] for k in ('label', 'short')]
+    cov = ps.get('coverage') or {}
+    if cov:
+        out.append(str(cov.get('caveat') or ''))
+        out += [str(c.get(k)) for c in cov.get('columns') or [] for k in ('head', 'label')]
+    if (data.get('page') or {}).get('goal'):
+        out.append(str(data['page']['goal']))
+    if (data.get('observed') or {}).get('note'):
+        out.append(str(data['observed']['note']))
     sc = data.get('scenarios') or {}
     out += [str(e['label']) for e in sc.get('entities') or [] if e.get('label')]
     for d in sc.get('days') or []:
@@ -1142,6 +1425,7 @@ def render_html(data, inline_docs=None, size_note='', artifact=False, private=()
         'ECHARTS_URL': ECHARTS_URL,
         'SIZE_NOTE': size_note,
         'CAVEAT': caveat_html(page.get('caveat')),
+        'GOAL': goal_html(page.get('goal')),
         'CSS': _guard_inline(_template('page.css'), 'page.css', 'style'),
         'THEME_JS': _guard_inline(_template('theme.js'), 'theme.js', 'script'),
         'PAGE_JS': _guard_inline(_template('page.js'), 'page.js', 'script'),
@@ -1164,6 +1448,15 @@ def render_html(data, inline_docs=None, size_note='', artifact=False, private=()
     return text
 
 
+def goal_html(text):
+    """The end-goal paragraph of the honesty band (docs/hindcast/GOAL.md), or ''."""
+    if not text:
+        return ''
+    head, sep, rest = text.partition(':')
+    return ('<p class="honesty goal" id="end-goal" role="note"><strong>%s:</strong>%s</p>'
+            % (_escape(head), _escape(rest)) if sep else '<p class="honesty goal" id="end-goal">%s</p>' % _escape(text))
+
+
 def caveat_html(text):
     """The weak-evidence paragraph of the honesty band (unlocked studies), or ''."""
     if not text:
@@ -1181,8 +1474,9 @@ def _escape(s):
 
 def render_report(study_dir, out_dir=None, single_file=False, days=None, variants=None, pred=None, artifact=False,
                   settings_path=contracts.NS_SETTINGS_PATH, settings=None, frozen_dir=None, generated=None,
-                  studies_dir=st.STUDIES_DIR, log=print):
-    """Render studies/<study>/report/index.html (or out_dir/index.html); -> ReportResult. Raises ReportError."""
+                  studies_dir=st.STUDIES_DIR, log=print, baseline_path=None):
+    """Render studies/<study>/report/index.html (or out_dir/index.html); -> ReportResult. Raises ReportError.
+    baseline_path: the observed baseline JSON (default: <studies dir>/baseline.json next to the study, if any)."""
     sd = study_dir if isinstance(study_dir, st.StudyDir) else resolve_study(study_dir, studies_dir)
     out_dir = os.path.abspath(out_dir or sd.report_dir)
     settings = settings if settings is not None else load_settings(settings_path)
@@ -1197,7 +1491,8 @@ def render_report(study_dir, out_dir=None, single_file=False, days=None, variant
         sel_pred = select_variants(pred, rows, rounds, status) if pred and pred != 'none' else set()
         inline_paths = inline_set(collected, sel_days, sel_variants, sel_pred)
     data = build_page_data(sd, study, rows, status, rounds, days_meta, settings, collected,
-                           generated or contracts.now_iso(), single_file, inline_paths, artifact)
+                           generated or contracts.now_iso(), single_file, inline_paths, artifact,
+                           observed_days(sd, study, baseline_path))
     for s in page_sentences(data):
         try:
             lint.lint_text(s, 'line')
@@ -1277,6 +1572,8 @@ def _add_report_options(p):
     p.add_argument('--studies-dir', default=st.STUDIES_DIR)
     p.add_argument('--settings', default=contracts.NS_SETTINGS_PATH)
     p.add_argument('--frozen-dir', default=None, help='frozen/ base for the day records (default software/frozen)')
+    p.add_argument('--baseline', default=None,
+                   help='observed baseline JSON (default <studies dir>/baseline.json next to the study, when present)')
 
 
 def register(subparsers):
@@ -1306,7 +1603,8 @@ def run_report(args, log=print):
     try:
         res = render_report(args.study, out_dir=args.out, single_file=args.single_file, days=args.days,
                             variants=args.variants, pred=args.pred, artifact=args.artifact,
-                            settings_path=args.settings, frozen_dir=args.frozen_dir, studies_dir=args.studies_dir, log=log)
+                            settings_path=args.settings, frozen_dir=args.frozen_dir, studies_dir=args.studies_dir, log=log,
+                            baseline_path=getattr(args, 'baseline', None))
     except (ReportError, st.StudyError, contracts.ContractError) as e:
         log(f'refused: {e}')
         return st.EXIT_REFUSED
@@ -1328,7 +1626,8 @@ def run_serve(args, log=print):
     out = os.path.abspath(args.out or sd.report_dir)
     if not args.no_render or not os.path.isfile(os.path.join(out, 'index.html')):
         try:
-            res = render_report(sd, out_dir=out, settings_path=args.settings, frozen_dir=args.frozen_dir, log=log)
+            res = render_report(sd, out_dir=out, settings_path=args.settings, frozen_dir=args.frozen_dir, log=log,
+                                baseline_path=getattr(args, 'baseline', None))
         except (ReportError, contracts.ContractError) as e:
             log(f'refused: {e}')
             return st.EXIT_REFUSED

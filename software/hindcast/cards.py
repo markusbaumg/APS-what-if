@@ -287,7 +287,39 @@ def _effect_lines(report, analysis):
     zt = _sum(report, 'zero_temp_vs_base', days)
     if zt is not None:
         out.append(f'- Zero temps: {int(zt):+d} loop{"s" if abs(zt) != 1 else ""} with an emulated zero temp vs base.')
+    line = manual_bolus_line(report, days)
+    if line:
+        out.append(line)
     return out
+
+
+MANUAL_LIMIT = ('This is a direction, not a prediction: a bolus the loop pre-empts changes the glucose that follows, '
+                'and with it the later decisions and the bolus itself.')
+
+
+def manual_bolus_line(report, days):
+    """The manual-bolus coverage line (docs/hindcast/GOAL.md, decision level) over the report's search days, or None
+    when the rows carry no coverage keys (rows written before the metric existed)."""
+    n = _sum(report, 'manual_boluses', days)
+    if n is None:
+        return None
+    n = int(n)
+    known = [d for d in days if isinstance((report.per_day.get(d) or {}).get('manual_boluses'), (int, float))]
+    note = ''
+    if len(known) < len(days):
+        note = f' (known on {len(known)} of {len(days)} search days: the treatments of the others were not read)'
+    if not n:
+        return (f'- Manual boluses: none on the {len(known)} replayed search day{"s" if len(known) != 1 else ""}'
+                + note + '.')
+    units = _sum(report, 'manual_U', days) or 0.0
+    pre = _sum(report, 'manual_presmb_U', days) or 0.0
+    pre_b = _sum(report, 'manual_presmb_base_U', days) or 0.0
+    cov = _sum(report, 'coverage_U_vs_base', days) or 0.0
+    pre_n = int(_sum(report, 'boluses_preempted', days) or 0)
+    return (f'- Manual boluses: on these days you gave {n} bolus{"es" if n != 1 else ""}, {_u(units)}; under this variant '
+            f'the loop would already have delivered {_u(pre)} of them as SMBs in the hour before (base: {_u(pre_b)}), '
+            f'{_signed_u(cov)} vs base; {pre_n} of {n} with at least {M.PREEMPT_SHARE * 100:.0f} % of the bolus asked '
+            f'for earlier than base' + note + '. ' + MANUAL_LIMIT)
 
 
 def _constraint_lines(report, analysis):
@@ -349,15 +381,68 @@ def _constraint_lines(report, analysis):
     return out
 
 
+def pareto_line(report, analysis):
+    """earlier / gentler: where the variant sits relative to the Pareto front of the feasible variants, with its three
+    objectives and its scalar position; None for explore or an unranked variant."""
+    if analysis.question == 'explore' or report.rank is None:
+        return None
+    rk = analysis.ranking
+    front = list(rk.front)
+    feas = list(rk.order)
+    by_scalar = sorted(feas, key=lambda n: (-(rk.variants[n].scalar or 0.0), n))
+    spos = by_scalar.index(report.variant) + 1 if report.variant in by_scalar else None
+    m = report.mean
+    rise, rest = m.get('rise_vs_base_U', 0.0) or 0.0, m.get('rest_vs_base_U', 0.0) or 0.0
+    if analysis.question == 'earlier':
+        objectives = (f'more insulin asked on rises {rise:+.2f} U/day, extra elsewhere {max(rest, 0.0):.2f} U/day, '
+                      f'low-side flags {m.get("lowside_flags", 0.0) or 0.0:.1f}/day')
+    else:
+        objectives = (f'rises {rise:+.2f} U/day, elsewhere {rest:+.2f} U/day, zero temps '
+                      f'{max(m.get("zero_temp_vs_base", 0.0) or 0.0, 0.0):+.1f}/day vs base')
+    where = (f'on the Pareto front ({len(front)} of {len(feas)} feasible variants)' if report.pareto
+             else f'behind the Pareto front (dominated; the front has {len(front)} of {len(feas)} feasible variants)')
+    scalar = (f'; scalar {report.scalar:+.2f}, position {spos} of {len(feas)} by the scalar'
+              if isinstance(report.scalar, (int, float)) and spos else '')
+    return f'- Pareto position: {where}; {objectives}{scalar}.'
+
+
+def weights_line(report, analysis):
+    """earlier / gentler: the scalar weights (a study setting, not a finding) and how often the variant stays in the
+    scalar top N under 0.5x / 1.5x of each weight (metrics.weights_sensitivity); None for explore."""
+    sens = getattr(analysis, 'sensitivity', None)
+    if not sens:
+        return None
+    w = ', '.join(f'{k} {v:g}' for k, v in sens['weights'].items())
+    if analysis.question == 'earlier':
+        formula = (f'rise - {sens["weights"]["rest"]:g} x max(rest, 0) - {sens["weights"]["lowside"]:g} x '
+                   'lowside_flags')
+    else:
+        formula = (f'-rise - {sens["weights"]["rest"]:g} x |rest| - {sens["weights"]["zero_temp"]:g} x zero-temp '
+                   'increase')
+    settings = [v for per in sens['by_weight'].values() for v in per.values()]
+    top = sens['top']
+    inside = sum(1 for v in settings if report.variant in v['order'])
+    same = sum(1 for v in settings if v['same_top'])
+    stated = 'in' if report.variant in sens['order'] else 'not in'
+    factors = ' and '.join(f'{f:g}x' for f in sens['factors'])
+    return (f'- Weights (a study setting shown here, not a finding): {w}; scalar = {formula}. At these weights the '
+            f'variant is {stated} the scalar top {top}; under {factors} of each weight it is in the scalar top {top} in '
+            f'{inside} of {len(settings)} settings (the top {top} itself is unchanged in {same} of {len(settings)}).')
+
+
 def _rank_lines(report, analysis):
     word = _position_word(analysis.question)
     total = len(analysis.order)
     out = []
     if report.rank is not None:
         out.append(f'- Over the search days: {word} {report.rank} of {total}'
-                   + (' (review order, not a ranking by outcome)' if analysis.question == 'explore' else '') + '.')
+                   + (' (review order, not a ranking by outcome)' if analysis.question == 'explore' else
+                      ' (the Pareto front first, then the scalar)') + '.')
     else:
         out.append(f'- Over the search days: no {word} (verdict {st.verdict_label(report.verdict)}).')
+    for line in (pareto_line(report, analysis), weights_line(report, analysis)):
+        if line:
+            out.append(line)
     if report.strata_ranks:
         out.append('')
         out.append(f'| stratum | days replayed | {word} |')

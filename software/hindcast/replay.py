@@ -37,7 +37,7 @@ What one trial does, in order (DESIGN.md section 4.4):
      `round(ms / 1000, 1)`, filled unconditionally in TreatLoop, also on noplot). Missing or empty -> the flag
      `no_pred`, the trial still counts: the metrics fall back to the recorded-BG rule (`lowside_no_pred`).
   7. `metrics.trial_metrics(csv, base=<base csv of the day>, caps, min_guard from Pred Levels, tdd_phone_U from the
-     frozen meta)`; without a base CSV (the base trial itself, or the orchestrator did not hand one over) the trial is
+     frozen meta, manual_boluses from the cached treatments of the window - `manual_boluses()`, offline)`; without a base CSV (the base trial itself, or the orchestrator did not hand one over) the trial is
      compared with itself and flagged `no_base_csv`. A base whose loop count differs is not used (flag
      `base_loop_mismatch:<n>/<m>`); the quarantine (days.py, H-204) and the orchestrator's guard read `metrics.loops`.
   8. Tier-2 files through export.py when `report_dir` is set: `series/<day>/<vhash>.json` always, `series/<day>/orig.json`
@@ -429,6 +429,54 @@ def min_guard_list(pred, rows):
     return out
 
 
+MANUAL_EVENT_TYPES = ('Meal Bolus', 'Correction Bolus')
+
+
+def is_manual_bolus(t):
+    """A bolus the user entered: Nightscout type NORMAL (an SMB is type 'SMB', also with eventType 'Correction Bolus';
+    a temp basal is type NORMAL with eventType 'Temp Basal'), eventType Meal Bolus / Correction Bolus, insulin > 0,
+    not marked invalid."""
+    if not isinstance(t, dict) or t.get('isValid') is False:
+        return False
+    ins = t.get('insulin')
+    return (str(t.get('type') or '').upper() == 'NORMAL' and t.get('eventType') in MANUAL_EVENT_TYPES
+            and isinstance(ins, (int, float)) and not isinstance(ins, bool) and ins > 0)
+
+
+def manual_boluses(day, window=None, url='ns:', settings=None, cache_root=None):
+    """[(unix seconds, units)] of the manual boluses inside the replay window (default: the UTC day), read offline
+    from the Nightscout cache's treatments day files (<cache>/treatments/<day>.json; the same files the frozen day was
+    reconstructed from). Duplicates (same time and units) count once. None when the cache cannot be read (no
+    settings / url, a missing day file): the metrics then leave the coverage keys out and the row carries the flag
+    `manual_boluses_unknown`."""
+    start_iso, end_iso = window or days.day_window(day)
+    try:
+        start, end = parse_iso(start_iso), parse_iso(end_iso)
+        root = cache_root or days.cache_dir(url, settings)
+    except (ValueError, OSError, TypeError):
+        return None
+    seen, out = set(), []
+    for d in days.days_of_window(start, end):
+        fn = os.path.join(root, 'treatments', f'{d}.json')
+        try:
+            with open(fn, 'r', encoding='utf-8') as fh:
+                recs = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        for t in recs if isinstance(recs, list) else []:
+            if not is_manual_bolus(t):
+                continue
+            ms = days._treatment_ms(t)
+            if ms is None or not (start <= ms < end):
+                continue
+            k = (int(ms), round(float(t['insulin']), 3))
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append((ms / 1000.0, float(t['insulin'])))
+    return sorted(out)
+
+
 def caps_for(spec, settings):
     a = spec.assignment()
     return (effective_cap(a, spec.base_lines, settings, 'autoISF_max'),
@@ -587,19 +635,22 @@ def run_trial(spec, worker=None):
         if tdd is None and meta and spec.whole_day():
             tdd = ((meta.get('character') or {}).get('tdd_U'))
         mg = min_guard_list(pred, rows) if pred else None
+        mb = manual_boluses(spec.day, spec.resolved_window(), spec.url, settings) if settings else None
+        if mb is None:
+            res.flags.append('manual_boluses_unknown')
         base = spec.base_csv if (spec.base_csv and os.path.isfile(spec.base_csv)) else None
         if base is None and spec.params:
             res.flags.append('no_base_csv')
         try:
             m = hm.trial_metrics(paths['csv'], base=base, autoisf_max=cap_max, autoisf_min=cap_min, min_guard=mg,
-                                 tdd_phone_U=tdd)
+                                 tdd_phone_U=tdd, manual_boluses=mb)
         except ValueError as e:                      # loop counts differ from the base: compare with itself, say so
             if base is None:
                 raise
             nb = len(read_result_csv(base)[1])
             res.flags.append(f'base_loop_mismatch:{len(rows)}/{nb}')
             m = hm.trial_metrics(paths['csv'], base=None, autoisf_max=cap_max, autoisf_min=cap_min, min_guard=mg,
-                                 tdd_phone_U=tdd)
+                                 tdd_phone_U=tdd, manual_boluses=mb)
             m['base_loop_mismatch'] = str(e)[:200]
         for f in m.pop('flags', []) or []:
             if f not in res.flags:

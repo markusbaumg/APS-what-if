@@ -7,7 +7,12 @@
    review_component, tie_with_base, flags, validation{line, caveat, ...}}],
    The rows come in the review order (H-715): the floor multiple on the review component, descending - the 'x floor'
    column, the same number round.json's why and the cards print.
-   rule_lines[], validation_lines[] (the 'Hold-out validation' panel; empty without a validate round).
+   rule_lines[], validation_lines[] (the 'Hold-out validation' panel; empty without a validate round),
+   pareto (question earlier / gentler, else null: report.pareto_view {axes[3], weights, scalar_text, points[{vhash,
+   variant, x, y, z, front, feasible, scalar, rank}], base{x, y, z}, order[], order_text, sensitivity{available, note,
+   declared_top[], weights[{weight, value, '0.5': [], '1.5': [], tau{factor}, same_top}]}}) - the 'Pareto front' block,
+   coverage (null unless the metrics carry the manual-bolus coverage: {columns[{key, head, label, unit}], caveat}; the
+   variant's numbers are v.coverage{key}).
    Tier 2 is not needed. Styles are scoped under #view-parameters and injected once (report.py inlines page.css only);
    every colour is a page.css token.
 
@@ -76,6 +81,21 @@
     '#view-parameters .fb .mk.loops { background: var(--ink-2); }',
     '#view-parameters .filter-chip { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 0.86rem; color: var(--ink-2); }',
     '#view-parameters button.link { font: inherit; color: var(--series-1); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }',
+    '#view-parameters .pf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px; align-items: start; }',
+    '#view-parameters .pf-grid figure.chart .plot { height: 340px; }',
+    '#view-parameters .pf-side { display: grid; gap: 10px; min-width: 0; }',
+    '#view-parameters .pf-order { margin: 0; padding-left: 1.6em; display: grid; gap: 3px; font-size: 0.86rem; }',
+    '#view-parameters .pf-order code { font-size: 0.82rem; overflow-wrap: anywhere; }',
+    '#view-parameters .pf-order .sc { color: var(--ink-2); font-family: var(--mono); font-size: 0.8rem; margin-left: 6px; }',
+    '#view-parameters .pf-note { font-size: 0.86rem; color: var(--ink-2); margin: 0; max-width: 92ch; overflow-wrap: anywhere; }',
+    '#view-parameters .pf-weights { font-family: var(--mono); font-size: 0.82rem; color: var(--ink); overflow-wrap: anywhere; }',
+    '#view-parameters .sw.front { background: var(--series-1); box-shadow: inset 0 0 0 2px var(--ink); }',
+    '#view-parameters .sw.other { background: var(--surface); box-shadow: inset 0 0 0 2px var(--series-1); }',
+    '#view-parameters .sw.off { background: var(--muted); opacity: 0.5; }',
+    '#view-parameters table.sens td.top { white-space: normal; min-width: 0; font-family: var(--mono); font-size: 0.78rem; overflow-wrap: anywhere; vertical-align: top; }',
+    '#view-parameters table.sens td.top ol { margin: 0; padding-left: 1.4em; }',
+    '#view-parameters table.sens td { vertical-align: top; }',
+    '#view-parameters .lb-cov { font-size: 0.82rem; color: var(--ink-2); margin: 0; max-width: 92ch; }',
     '@media (max-width: 480px) { #view-parameters .pv-controls label, #view-parameters select { width: 100%; } #view-parameters .pv-panels figure.chart .plot { height: 200px; } }'
   ].join('\n');
 
@@ -477,6 +497,140 @@
     return api;
   }
 
+  // ------------------------------------------------------------------------------------------------ Pareto (earlier / gentler)
+  /* DESIGN.md 5.3 rule 3: the front of the three objectives, the review order under the declared weights and the
+     weights-sensitivity panel. x / y are the first two objectives, the third is in the tooltip, the label and the table. */
+  function directionText(a) { return a.direction === 'up' ? 'larger is what the question asks for' : 'smaller is what the question asks for'; }
+
+  function paretoOption(pa, t) {
+    var ax = pa.axes || [];
+    var pts = pa.points || [];
+    function data(fn) { return pts.filter(fn).map(function (p) { return { value: [p.x, p.y], p: p }; }); }
+    var xs = pts.map(function (p) { return p.x; }).concat([0]), ys = pts.map(function (p) { return p.y; }).concat([0]);
+    var xr = Math.max.apply(null, xs) - Math.min.apply(null, xs), yr = Math.max.apply(null, ys) - Math.min.apply(null, ys);
+    var xpad = (xr || 0.1) * 0.08, ypad = (yr || 0.1) * 0.08;
+    function tip(it) {
+      var p = it.data && it.data.p;
+      if (!p) return it.seriesName === 'base' ? tooltipBox(['base (the phone\'s settings, replayed)', 'the origin of every axis']) : '';
+      return tooltipBox([p.variant + (p.front ? ' (front)' : ''),
+        (ax[0] ? ax[0].label : 'x') + ' ' + fmt.signed(p.x, 2),
+        (ax[1] ? ax[1].label : 'y') + ' ' + fmt.num(p.y, 2),
+        (ax[2] ? ax[2].label : 'z') + ' ' + fmt.num(p.z, 1),
+        p.feasible ? 'review order ' + (p.rank || '-') + ', scalar ' + fmt.num(p.scalar, 2) : 'infeasible: never ranked']);
+    }
+    return {
+      grid: { left: 56, right: 18, top: 18, bottom: 46 },
+      tooltip: { trigger: 'item', confine: true, formatter: tip },
+      xAxis: { type: 'value', name: ax[0] ? ax[0].short || ax[0].label : '', nameLocation: 'middle', nameGap: 28, min: function (v) { return +(Math.min(v.min, 0) - xpad).toFixed(3); }, max: function (v) { return +(Math.max(v.max, 0) + xpad).toFixed(3); },
+               splitLine: { lineStyle: { color: t.grid } }, axisLabel: { showMinLabel: false, showMaxLabel: false, formatter: function (v) { return fmt.num(v, xr < 1 ? 2 : 1); } } },
+      yAxis: { type: 'value', name: ax[1] ? ax[1].short || ax[1].label : '', nameLocation: 'end', nameGap: 8, nameTextStyle: { align: 'left' },
+               min: function (v) { return +(Math.min(v.min, 0) - ypad).toFixed(3); }, max: function (v) { return +(Math.max(v.max, 0) + ypad).toFixed(3); },
+               splitLine: { lineStyle: { color: t.grid } }, axisLabel: { showMinLabel: false, showMaxLabel: false, formatter: function (v) { return fmt.num(v, yr < 1 ? 2 : 1); } } },
+      series: [
+        { name: 'infeasible', type: 'scatter', data: data(function (p) { return !p.feasible; }), symbolSize: 7, z: 2,
+          itemStyle: { color: t.muted, opacity: 0.5 } },
+        { name: 'feasible, behind the front', type: 'scatter', data: data(function (p) { return p.feasible && !p.front; }), symbolSize: 9, z: 3,
+          itemStyle: { color: t.surface, borderColor: t['series-1'], borderWidth: 2 } },
+        { name: 'front', type: 'scatter', data: data(function (p) { return p.front; }), symbolSize: 12, z: 4,
+          itemStyle: { color: t['series-1'], borderColor: t.ink, borderWidth: 1.5 },
+          label: { show: true, position: 'right', color: t['ink-2'], fontSize: 10, formatter: function (it) { return it.data.p.rank ? '#' + it.data.p.rank : ''; } } },
+        { name: 'base', type: 'scatter', data: [{ value: [0, 0] }], symbolSize: 13, z: 5,
+          itemStyle: { color: t.surface, borderColor: t.ink, borderWidth: 2 },
+          label: { show: true, position: 'bottom', color: t['ink-2'], fontSize: 10, formatter: 'phone' },
+          markLine: { silent: true, symbol: 'none', animation: false, lineStyle: { color: t.axis, width: 1, type: 'solid' }, label: { show: false },
+                      data: [{ xAxis: 0 }, { yAxis: 0 }] } }
+      ]
+    };
+  }
+
+  function paretoTwin(pa) {
+    var ax = pa.axes || [];
+    return {
+      summary: 'Table of the points in this chart',
+      columns: [
+        { key: 'rank', label: 'review order', numeric: true, format: function (v) { return v ? String(v) : '-'; } },
+        { key: 'variant', label: 'variant' },
+        { key: 'x', label: ax[0] ? ax[0].label : 'x', numeric: true, format: function (v) { return fmt.signed(v, 2); } },
+        { key: 'y', label: ax[1] ? ax[1].label : 'y', numeric: true, format: function (v) { return fmt.num(v, 2); } },
+        { key: 'z', label: ax[2] ? ax[2].label : 'z', numeric: true, format: function (v) { return fmt.num(v, 1); } },
+        { key: 'scalar', label: 'scalar', numeric: true, format: function (v) { return fmt.num(v, 2); } },
+        { key: 'reading', label: 'reading' }
+      ],
+      rows: [{ rank: null, variant: 'base', x: 0, y: 0, z: 0, scalar: null, reading: 'the phone\'s settings, replayed: the origin' }].concat(
+        (pa.points || []).map(function (p) {
+          return { rank: p.rank, variant: p.variant, x: p.x, y: p.y, z: p.z, scalar: p.scalar,
+                   reading: !p.feasible ? 'infeasible, never ranked' : p.front ? 'on the front' : 'feasible, behind the front' };
+        }))
+    };
+  }
+
+  function weightsText(pa) {
+    var w = pa.weights || {};
+    return Object.keys(w).map(function (k) { return k + ' ' + fmt.num(w[k], 1); }).join(', ');
+  }
+
+  function sensitivityPanel(pa) {
+    var se = pa.sensitivity || {};
+    var box = h('div', { class: 'lb-validation', role: 'note', 'aria-label': 'weights sensitivity' },
+      h('p', { class: 'lead', text: 'Weights sensitivity' }),
+      h('p', { text: se.note || '' }));
+    if (!se.available) return box;
+    var tr = h('tr', null, h('th', { text: 'weight' }), h('th', { class: 'n', text: 'declared' }), h('th', { text: 'top unchanged' }),
+      h('th', { text: 'top ' + (se.declared_top || []).length + ' at 0.5 x' }), h('th', { text: 'top ' + (se.declared_top || []).length + ' at 1.5 x' }));
+    var tb = h('tbody');
+    (se.weights || []).forEach(function (r) {
+      function cell(list) {
+        if (!list) return h('td', { class: 'top', text: 'not recorded' });
+        if (!list.length) return h('td', { class: 'top', text: 'none feasible' });
+        return h('td', { class: 'top' }, h('ol', null, list.map(function (x) { return h('li', { text: x }); })));
+      }
+      tb.appendChild(h('tr', null, h('td', null, h('code', { text: r.weight })), h('td', { class: 'n num', text: fmt.num(r.value, 1) }),
+        h('td', null, h('span', { class: 'pill', text: r.same_top ? 'yes' : 'no, it moves' }),
+          r.tau && Object.keys(r.tau).length ? h('span', { class: 'vline', text: 'Kendall tau ' + Object.keys(r.tau).map(function (f) { return f + ' x ' + fmt.num(r.tau[f], 2); }).join(', ') }) : null),
+        cell(r['0.5']), cell(r['1.5'])));
+    });
+    box.appendChild(h('p', { text: 'Scalar order at the declared weights, top ' + (se.declared_top || []).length + ': ' + (se.declared_top || []).join(', ') }));
+    box.appendChild(h('div', { class: 'table-scroll' }, h('table', { class: 'twin sens' }, h('thead', null, tr), tb)));
+    return box;
+  }
+
+  function renderPareto(el, ps) {
+    var pa = ps.pareto;
+    if (!pa) return null;
+    var ax = pa.axes || [];
+    var nFront = (pa.points || []).filter(function (p) { return p.front; }).length;
+    var block = h('div', { class: 'block', id: 'pv-pareto' },
+      h('header', null, h('h2', { text: 'Pareto front' }),
+        h('p', { text: 'The question ' + pa.question + ' is a declared study setting, not a finding. Every feasible variant as the mean over the search days vs base; the phone\'s settings, replayed, sit at the origin. ' +
+          ax.map(function (a) { return a.label + ': ' + directionText(a); }).join('; ') + '. ' + nFront + ' variant(s) on the front, no other feasible variant asks for at least as much on all three at once.' })),
+      h('div', { class: 'pv-legend' },
+        h('span', null, h('i', { class: 'sw front' }), 'front member, labelled with its review order'),
+        h('span', null, h('i', { class: 'sw other' }), 'feasible, behind the front'),
+        h('span', null, h('i', { class: 'sw off' }), 'infeasible, never ranked'),
+        h('span', null, h('i', { class: 'sw base' }), 'phone: base at the origin')));
+    var grid = h('div', { class: 'pf-grid' });
+    block.appendChild(grid);
+    var fig = HC.figure('Front of the declared question', ax[0] && ax[1] && ax[2] ? 'x: ' + ax[0].label + '; y: ' + ax[1].label + '; ' + ax[2].label + ' in the tooltip and the table' : '');
+    grid.appendChild(fig);
+    var side = h('div', { class: 'pf-side' });
+    var order = pa.order || [];
+    side.appendChild(h('div', { class: 'lb-validation', role: 'note', 'aria-label': 'review order' },
+      h('p', { class: 'lead', text: 'Review order under the declared weights' }),
+      h('p', { class: 'pf-weights', text: pa.scalar_text + '   (weights: ' + weightsText(pa) + ')' }),
+      h('p', { text: pa.order_text || '' }),
+      order.length ? h('ol', { class: 'pf-order' }, order.slice(0, 10).map(function (o) {
+        return h('li', null, h('code', { text: o.variant }), o.front ? ' ' : null, o.front ? h('span', { class: 'pill', text: 'front' }) : null,
+          h('span', { class: 'sc', text: 'scalar ' + fmt.num(o.scalar, 2) }));
+      })) : h('p', { text: 'No feasible variant yet.' }),
+      order.length > 10 ? h('p', { text: (order.length - 10) + ' more in the leaderboard below.' }) : null));
+    side.appendChild(sensitivityPanel(pa));
+    grid.appendChild(side);
+    el.appendChild(block);
+    var rec = HC.chart(fig, function (t) { return paretoOption(pa, t); });
+    HC.tableTwin(fig, paretoTwin(pa));
+    return rec;
+  }
+
   // ------------------------------------------------------------------------------------------------ leaderboard
   /* short column heads; the full label is the header's title */
   var SHORT = {
@@ -541,6 +695,9 @@
         h('p', { class: 'lead', text: vlines[0] }),
         vlines.slice(1).map(function (l) { return h('p', { text: l }); })));
     }
+    var cov = ps.coverage || null;
+    var covCols = cov ? (cov.columns || []) : [];
+    if (cov) head.appendChild(h('p', { class: 'lb-cov', text: 'The columns "' + covCols.map(function (x) { return x.head; }).join('" and "') + '" read the manual boluses of the search days: ' + cov.caveat }));
     var chip = h('div', { class: 'filter-chip', hidden: true });
     var box = h('div', { class: 'lb-box' });
     var block = h('div', { class: 'block' },
@@ -576,6 +733,7 @@
       });
       tr.appendChild(h('th', { class: 'n', title: '|effect| / floor on the review component: the mean over the days of each day\'s multiple (the review order key)', text: 'x floor' }));
       extras.forEach(function (x) { tr.appendChild(h('th', { class: 'n', title: x.label, text: colHead(x) })); });
+      covCols.forEach(function (x) { tr.appendChild(h('th', { class: 'n', title: x.label + '. ' + cov.caveat, text: x.head })); });
       tr.appendChild(h('th', { text: 'feasibility' }));
       tr.appendChild(h('th', { text: 'why' }));
       var tbody = h('tbody');
@@ -589,6 +747,7 @@
       comps.forEach(function (c) { btr.appendChild(bandCell(c, (base.days || []).length ? 0 : null, ties[c.key], scale[c.key])); });
       btr.appendChild(h('td', { class: 'n', text: '-' }));
       extras.forEach(function () { btr.appendChild(h('td', { class: 'n muted', text: '-' })); });
+      covCols.forEach(function () { btr.appendChild(h('td', { class: 'n muted', text: '-' })); });
       btr.appendChild(h('td', { class: 'muted', text: 'the floor is measured here' }));
       btr.appendChild(h('td', { class: 'wrap muted', text: 'its distance to the phone\'s decisions is the floor of each day' }));
       tbody.appendChild(btr);
@@ -612,6 +771,10 @@
         extras.forEach(function (x) {
           var val = (v.mean || {})[x.key];
           row.appendChild(h('td', { class: 'n num', text: !num(val) ? '-' : x.key.slice(-4) === 'base' ? fmt.signed(val, x.unit === 'loops' ? 0 : 2) : fmt.num(val, x.unit === 'loops' ? 0 : x.unit === '%' ? 1 : 2) }));
+        });
+        covCols.forEach(function (x) {
+          var val = (v.coverage || {})[x.key];
+          row.appendChild(h('td', { class: 'n num', title: cov.caveat, text: !num(val) ? '-' : x.unit === 'U' ? fmt.signed(val, 2) : fmt.num(val, 1) }));
         });
         row.appendChild(h('td', { class: 'wrap' }, feasibilityText(v)));
         var vline = v.validation && v.validation.line;
@@ -665,8 +828,10 @@
         HC.tableTwin(p.fig, p.twin());
       });
       if (heat) heat.redraw();
+      if (pareto && pareto.chart) pareto.chart.setOption(pareto.build(t, window.echarts), { notMerge: true });
     }
     el.appendChild(controls(ps, redrawCharts));
+    var pareto = renderPareto(el, ps);
     panels = renderPanels(el, ps);
     hooks.board = renderLeaderboard(el, ps);
     heat = renderHeat(el, ps);

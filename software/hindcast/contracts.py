@@ -992,6 +992,8 @@ class Round(Document):
     front: list[str] = field(default_factory=list)                        # vhashes in review order / Pareto front
     notes: list[str] = field(default_factory=list)
     validation: Optional[dict[str, Any]] = None          # validate round (H-308): top, hold-out days, Kendall tau, counts
+    sensitivity: Optional[dict[str, Any]] = None         # earlier / gentler: the scalar top-5 under 0.5x / 1.5x of each
+                                                          # weight (metrics.weights_sensitivity, vhashes; DESIGN.md 5.3)
 
     def _check(self, problems):
         if self.round < 0:

@@ -343,6 +343,23 @@
     el.appendChild(h('div', { class: 'block' }, h('header', null, h('h2', { text: 'Progress and freshness' })), tiles));
   }
 
+  /* The observed CGM statistics of one day (report.observed_days, from the baseline JSON): facts about the past under
+     the phone's own settings, always labelled observed, never shown for a variant. */
+  HC.observedText = function (obs, observed, units) {
+    if (!obs) return '';
+    var rng = (observed && observed.range_mmol) || [3.9, 10];
+    var lo = units === 'mmol' ? fmt.num(rng[0], 1) : fmt.num(rng[0] * 18.0, 0);
+    var hi = units === 'mmol' ? fmt.num(rng[1], 0) : fmt.num(rng[1] * 18.0, 0);
+    var u = units === 'mmol' ? ' mmol/l' : ' mg/dl';
+    var parts = [];
+    if (obs.tir_pct !== undefined) parts.push(fmt.pct(obs.tir_pct, 0) + ' of the time ' + lo + '–' + hi + u);
+    if (obs.tbr_pct !== undefined) parts.push(fmt.pct(obs.tbr_pct, 1) + ' below ' + lo + u);
+    var b = [];
+    if (obs.manual_boluses !== undefined) b.push(fmt.int(obs.manual_boluses) + ' manual bolus' + (obs.manual_boluses === 1 ? '' : 'es'));
+    if (obs.manual_U !== undefined) b.push(fmt.num(obs.manual_U, 1) + ' U');
+    return parts.join(', ') + (b.length ? (parts.length ? '; ' : '') + b.join(', ') : '');
+  };
+
   function renderDays(el, data) {
     var study = data.study || {};
     var byDay = baseRowsByDay(data);
@@ -367,6 +384,11 @@
       function row(k, v) { dl.appendChild(h('dt', { text: k })); dl.appendChild(h('dd', null, v)); }
       row('loops', base ? fmt.int(m.loops) + (o.hours ? ' in ' + fmt.num(o.hours, 1) + ' h' : '') : 'no base replay yet');
       row('trials', fmt.int(trialsPerDay[d.day] || 0));
+      var obs = ((data.observed || {}).days || {})[d.day];
+      if (obs) {
+        dl.appendChild(h('dt', null, h('span', { class: 'observed-tag', text: 'observed' }), 'on the phone'));
+        dl.appendChild(h('dd', { text: HC.observedText(obs, data.observed, units) }));
+      }
       if (base) {
         row('base vs phone', fmt.pct(m.agreement_pct) + ' agree, SMB ' + fmt.signed(m.smb_emul_U - m.smb_orig_U, 2) + ' U');
         row('floor', 'rise ' + fmt.num(o.floor_rise_U, 2) + ' U, rest ' + fmt.num(o.floor_rest_U, 2) + ' U, ' + fmt.int(o.floor_loops) + ' loops');
@@ -387,7 +409,7 @@
       strip.appendChild(card);
     });
     el.appendChild(h('div', { class: 'block' },
-      h('header', null, h('h2', { text: 'Days' }), h('p', { text: 'Days are the unit of everything. Chips are what you typed into study.json; the record describes the day and is never a score.' })),
+      h('header', null, h('h2', { text: 'Days' }), h('p', { text: 'Days are the unit of everything. Chips are what you typed into study.json; the record describes the day and is never a score.' + (data.observed ? ' ' + data.observed.note : '') })),
       strip));
   }
 
