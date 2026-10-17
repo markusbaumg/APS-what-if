@@ -68,9 +68,9 @@
   "autoisf": {
     "enable_autoISF": true,
     "autoISF_version": "3.2.0",
-    "autoISF_max": 1.5,
+    "autoISF_max": 1.6,
     "autoISF_min": 0.3,
-    "bgAccel_ISF_weight": 0.09,
+    "bgAccel_ISF_weight": 0.11,
     "bgBrake_ISF_weight": 0.03,
     "dura_ISF_weight": 0.7,
     "enable_dura_ISF_with_COB": true,
@@ -166,6 +166,20 @@
         "from": true,
         "to": false,
         "note": "between the exports of 09:23 and 20:42 local; the activity state per loop still comes from the consoleError echo"
+      },
+      {
+        "when": "2026-10-17T14:32:00+02:00",
+        "parameter": "autoISF_max",
+        "from": 1.5,
+        "to": 1.6,
+        "note": "Hindcast iteration 2b step (oct_push); first loop echo 'limited by autoISF_max 1.6' at 12:32:32Z"
+      },
+      {
+        "when": "2026-10-17T14:32:00+02:00",
+        "parameter": "bgAccel_ISF_weight",
+        "from": 0.09,
+        "to": 0.11,
+        "note": "Hindcast iteration 2b step 1 (oct_push); time taken from the autoISF_max echo of the same preference edit, the weight itself is not echoed"
       }
     ]
   },
@@ -260,7 +274,7 @@
     "safety.bolus_increment": "Omnipod Dash",
     "flags.half_basal_exercise_target": "8.9 mmol (160.2 mg/dl); determine_basal.py multiplies by 18 for mmol users of autoISF >= 3.1",
     "insulin.peak_minutes": "Lyumjev plugin = 45 min; DIA taken from the Nightscout profile (6 h)",
-    "autoisf.autoISF_max": "1.5 since 2026-09-07 20:23 local; the replay uses the value valid at each loop time when profile_history says so (see ns_profile.py)",
+    "autoisf.autoISF_max": "1.6 since 2026-10-17 14:32 local (1.5 since 2026-09-07 20:23, 1.3 before); the replay uses the value valid at each loop time when profile_history says so (see ns_profile.py)",
     "flags.low_temptarget_lowers_sensitivity": "true per export. Until 2026-10-17 it was pinned false because the phone never printed 'Sensitivity ratio set to ... based on temp target' at TT 5.5 = 99 mg/dl; the reason is Constants.NORMAL_TARGET_MGDL = 99 (AAPS >= 3.4.2.1), so 99 < 99 is false - the port now uses normal_target 99 on the 3.3 path and the flag is back to the export value.",
     "flags.normal_target": "99 = Constants.NORMAL_TARGET_MGDL of AAPS >= 3.4.2.1 (not in the export); the phone compares temp targets against it for exercise / resistance mode",
     "safety.basal_step": "Omnipod Dash basal resolution 0.05 U/h (used to round current_basal like the pump does)",

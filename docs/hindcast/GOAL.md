@@ -71,7 +71,7 @@ more on rises on every clean October day with nothing extra before a loop-only l
 larger, and every combination of upward moves, adds insulin before the loop-only lows of Oct 4 (09:15), Oct 6,
 Oct 7 or Oct 8.
 
-**Step 1 (proposed, not applied):** bgAccel_ISF_weight 0.09 -> 0.11. Markus decides; after a week of observed
+**Step 1 (applied by Markus 2026-10-17 14:32 local):** bgAccel_ISF_weight 0.09 -> 0.11 together with autoISF_max 1.5 -> 1.6 (both steps of oct_push at once, his decision). After a week of observed
 days the grow loop re-runs the search from the new base.
 
 ## Non-goals
