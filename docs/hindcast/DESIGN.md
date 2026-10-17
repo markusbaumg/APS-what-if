@@ -356,6 +356,8 @@ Phases, each resumable, each a row in `trials.jsonl`:
    more than 2 h of CGM gap while the phone looped, or a `profile_history` change inside the day for a searched
    key): listed, not hidden, excluded from scoring. Gap time with no CGM and no loop at all (AAPS runs no loop
    without CGM; the replay loses no loop there) is only a 'no CGM and no loop' badge, never a quarantine reason.
+   A partial day, on which the phone looped less than 16 h of the 24 (each loop run counted for at most 5 min),
+   is quarantined as well, since its TDD and 3 h windows are a fraction of the envelope's.
 1. **Screen** — one-at-a-time, 5-7 levels per parameter, on 2-3 days of different strata (Morris-style
    mean |effect| / floor across days). Parameters below 1.5 × floor everywhere are frozen ("not testable").
 2. **Latin hypercube** over the live parameters (24-48 points) on the screening days; the first picture

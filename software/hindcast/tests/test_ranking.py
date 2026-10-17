@@ -316,8 +316,9 @@ def test_fixture_study_ranking(example_csvs, ns_settings_path):
     assert all(r.variants[n].tie_with_base for n in r.order)
     assert all(b['verdict'] == 'tie' for b in M.leaderboard_rows(r))
     for q in ('earlier', 'gentler'):
-        rq = M.rank_variants(rows, q)
-        assert rq.infeasible == [] and rq.front and set(rq.order) == set(r.order)
+        rq = M.rank_variants(rows, q)                      # inside the 1.38 U floor on rise: no variant is a step
+        assert rq.infeasible == [] and set(rq.order) == set(r.order)
+        assert rq.front == [] and set(rq.no_step) == set(r.order) and M.validate_top(rq) == []
 
 
 # ----------------------------------------------------------------------------- H-715: one review order everywhere

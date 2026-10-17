@@ -20,7 +20,7 @@ cli.py  -  `hc`, the Hindcast command (DESIGN.md section 4.6)
     hc report <name> | hc serve <name> | hc explain <name> <iso> | hc card <name>
     hc gh ... | hc lint ... | hc freeze ... | hc warm ... | hc skill install|vocabulary|lint|checkin
     hc export (not built yet, H-504)
-    hc baseline [DAYS] [--write docs]        the observed baseline toward GOAL.md -> docs/hindcast/BASELINE.md
+    hc baseline [DAYS] [--write] [--public]  the observed baseline toward GOAL.md -> studies/BASELINE.md (git-ignored)
 
 Dispatcher only: the study commands live in study.py (H-301) and space.py (H-303); every other command is handed
 to its module when that module exists in this package and skipped with "not built yet (H-nnn)" and exit code 1

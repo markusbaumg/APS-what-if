@@ -88,6 +88,14 @@ HONESTY_STATEMENT = (
     "here changes the phone; settings are for you and your care team to review. This is one person's insulin "
     "dosing, not medical advice.")
 
+# docs/hindcast/GOAL.md, under the honesty paragraph of every page (report.py) and in the honesty block of every card
+# (cards.py), in the same words. The lint refuses the words of a time-in-range figure on any generated surface, so
+# the sentence names the range instead of the statistic.
+END_GOAL = ('End goal (Markus, 2026-10-17): a more aggressive and quicker loop, fully closed without manual boluses, '
+            'with glucose between 3.9 and 10 mmol/l more than 90 % of the time. Hindcast can rank what the loop '
+            'would have asked for; the time between 3.9 and 10 mmol/l is observed on the phone only, never computed '
+            'here.')
+
 NOT_TESTABLE = (
     'basal rates', 'DIA and insulin peak', 'carb ratio', 'autosens ratio', 'the UKF glucose smoother',
 )                                                        # they enter through the recorded inputs the replay takes as given
@@ -109,7 +117,7 @@ QUESTIONS = ('explore', 'earlier', 'gentler')
 PHASE_KINDS = ('floor', 'oaat', 'grid', 'lhs', 'halving', 'coordinate', 'optuna', 'validate', 'cv', 'grow')
 PHASE_STATES = ('pending', 'running', 'done', 'skipped', 'stopped')
 TRIAL_STATUSES = ('done', 'failed', 'blocked', 'stale', 'running')
-VERDICTS = ('pending', 'base', 'dead', 'candidate', 'tie', 'infeasible', 'recommended')
+VERDICTS = ('pending', 'base', 'dead', 'candidate', 'tie', 'infeasible', 'recommended', 'envelope-limited')
 DAY_ROLES = ('search', 'holdout', 'quarantined')
 PARAM_TYPES = ('float', 'int', 'bool', 'choice', 'scale')
 SCALE_KEYS = ('sens', 'carb_ratio', 'current_basal', 'profile_percentage')   # profile items searched only as a multiplier
@@ -630,7 +638,7 @@ class Objective(Document):
     scalar_weights: dict[str, float] = field(default_factory=lambda: {'rest': 2.0, 'lowside': 0.3})
     envelope: dict[str, float] = field(default_factory=lambda: {'max_3h_U': 1.0, 'max_day_pct_tdd': 15.0})
     feasible: dict[str, float] = field(default_factory=lambda: {'cap_binding_max_pct': 50.0})
-    quarantine: dict[str, float] = field(default_factory=lambda: {'agreement_pct_min': 94.0, 'cgm_gap_max_min': 120.0})
+    quarantine: dict[str, float] = field(default_factory=lambda: {'agreement_pct_min': 94.0, 'cgm_gap_max_min': 120.0, 'loop_hours_min': 16.0})
 
 
 @dataclass
@@ -891,7 +899,7 @@ class Candidate(Document):
     """One variant as the skill and the page see it: verdict + why + the components of DESIGN.md section 5.2."""
     vhash: str
     variant: str
-    verdict: Literal['pending', 'base', 'dead', 'candidate', 'tie', 'infeasible', 'recommended']
+    verdict: Literal['pending', 'base', 'dead', 'candidate', 'tie', 'envelope-limited', 'infeasible', 'recommended']
     why: str
     params: dict[str, Any] = field(default_factory=dict)
     rank: Optional[int] = None
@@ -901,6 +909,9 @@ class Candidate(Document):
     flags: list[str] = field(default_factory=list)
     tie_with: list[str] = field(default_factory=list)               # vhashes it cannot be told from
     validation: Optional[dict[str, Any]] = None                      # validate round (H-308): metrics.VALIDATION_KEYS
+    envelope: Optional[dict[str, Any]] = None                        # verdict envelope-limited (round.py, search.py
+                                                                     # set it): {days: {day: {env_3h_U, env_day_pct_tdd}},
+                                                                     # n_days, max_3h_U, inside_days}
 
     def _check(self, problems):
         if not _SHA_RE.match(self.vhash):
@@ -915,7 +926,7 @@ class TopItem(Document):
     `vhash` may be the 12-character short form, round.json and trials.jsonl hold the full hash)."""
     vhash: str
     variant: str
-    verdict: Literal['pending', 'base', 'dead', 'candidate', 'tie', 'infeasible', 'recommended']
+    verdict: Literal['pending', 'base', 'dead', 'candidate', 'tie', 'envelope-limited', 'infeasible', 'recommended']
     why: str
     rank: Optional[int] = None
     effect: dict[str, float] = field(default_factory=dict)          # e.g. rise_vs_base_U, rest_vs_base_U, changed_vs_base

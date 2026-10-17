@@ -135,6 +135,7 @@
       "dead",
       "candidate",
       "tie",
+      "envelope-limited",
       "infeasible",
       "recommended"
      ]

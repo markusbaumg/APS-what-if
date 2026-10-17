@@ -96,6 +96,7 @@
       "dead",
       "candidate",
       "tie",
+      "envelope-limited",
       "infeasible",
       "recommended"
      ]
@@ -142,6 +143,13 @@
      }
     },
     "validation": {
+     "type": [
+      "object",
+      "null"
+     ],
+     "additionalProperties": {}
+    },
+    "envelope": {
      "type": [
       "object",
       "null"

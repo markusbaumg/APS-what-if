@@ -3,7 +3,7 @@
    Reads data.parameters (report.parameter_space): question, days[], floors{day: {floor_*, tie{component}}}, tie_factor,
    components[{key, label, unit, floor_key, insulin}], extras[{key, label, unit}], params[{key, type, phone, ...}],
    base{vhash, variant, values, days}, variants[{vhash, variant, values, per_day{day: {metric}}, mean, verdict, why,
-   rank, position, feasible, reasons{day: []}, floor_multiple, floor_multiples{component}, review_score (not shown),
+   rank, position, feasible, reasons{day: []}, envelope_days{day: {env_3h_U, env_day_pct_tdd}}, step, floor_multiple, floor_multiples{component}, review_score (not shown),
    review_component, tie_with_base, flags, validation{line, caveat, ...}}],
    The rows come in the review order (H-715): the floor multiple on the review component, descending - the 'x floor'
    column, the same number round.json's why and the cards print.
@@ -11,6 +11,8 @@
    pareto (question earlier / gentler, else null: report.pareto_view {axes[3], weights, scalar_text, points[{vhash,
    variant, x, y, z, front, feasible, scalar, rank}], base{x, y, z}, order[], order_text, sensitivity{available, note,
    declared_top[], weights[{weight, value, '0.5': [], '1.5': [], tau{factor}, same_top}]}}) - the 'Pareto front' block,
+   envelope (null unless some variant is envelope-limited: report.envelope_view {lead, items[{variant, days_text,
+   inside_days, days[]}]}) - the yellow box above the leaderboard,
    coverage (null unless the metrics carry the manual-bolus coverage: {columns[{key, head, label, unit}], caveat}; the
    variant's numbers are v.coverage{key}).
    Tier 2 is not needed. Styles are scoped under #view-parameters and injected once (report.py inlines page.css only);
@@ -92,9 +94,20 @@
     '#view-parameters .sw.front { background: var(--series-1); box-shadow: inset 0 0 0 2px var(--ink); }',
     '#view-parameters .sw.other { background: var(--surface); box-shadow: inset 0 0 0 2px var(--series-1); }',
     '#view-parameters .sw.off { background: var(--muted); opacity: 0.5; }',
-    '#view-parameters table.sens td.top { white-space: normal; min-width: 0; font-family: var(--mono); font-size: 0.78rem; overflow-wrap: anywhere; vertical-align: top; }',
-    '#view-parameters table.sens td.top ol { margin: 0; padding-left: 1.4em; }',
-    '#view-parameters table.sens td { vertical-align: top; }',
+    /* weights sensitivity: one row per weight; inside a row the cells wrap onto further lines at narrow widths and
+       never squeeze below ~16 characters (no clipping at 1200 px, no horizontal scroll at 400 px) */
+    '#view-parameters .sens-rows { display: grid; gap: 8px; min-width: 0; }',
+    '#view-parameters .sens-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16ch), 1fr)); gap: 6px 12px; padding: 6px 0 0; border-top: 1px solid var(--grid); min-width: 0; }',
+    '#view-parameters .sens-row .cell { min-width: 0; display: grid; gap: 2px; align-content: start; }',
+    '#view-parameters .sens-row .cell .k { font-size: 0.74rem; color: var(--muted); }',
+    '#view-parameters .sens-row .cell .v { font-size: 0.82rem; color: var(--ink); overflow-wrap: anywhere; }',
+    '#view-parameters .sens-row ol { margin: 0; padding-left: 1.4em; font-family: var(--mono); font-size: 0.78rem; overflow-wrap: anywhere; }',
+    '#view-parameters table.lb tr.envelope td { color: var(--ink-2); }',
+    '#view-parameters table.lb tr.envelope td.sticky { box-shadow: inset 3px 0 0 var(--status-warning); }',
+    '#view-parameters .lb-envelope { border-left: 3px solid var(--status-warning); }',
+    '#view-parameters .lb-envelope ul { margin: 0; padding-left: 1.2em; display: grid; gap: 3px; font-size: 0.84rem; color: var(--ink-2); }',
+    '#view-parameters .lb-envelope code { font-size: 0.8rem; overflow-wrap: anywhere; }',
+    '#view-parameters .sw.env { background: var(--status-warning); }',
     '#view-parameters .lb-cov { font-size: 0.82rem; color: var(--ink-2); margin: 0; max-width: 92ch; }',
     '@media (max-width: 480px) { #view-parameters .pv-controls label, #view-parameters select { width: 100%; } #view-parameters .pv-panels figure.chart .plot { height: 200px; } }'
   ].join('\n');
@@ -516,7 +529,8 @@
         (ax[0] ? ax[0].label : 'x') + ' ' + fmt.signed(p.x, 2),
         (ax[1] ? ax[1].label : 'y') + ' ' + fmt.num(p.y, 2),
         (ax[2] ? ax[2].label : 'z') + ' ' + fmt.num(p.z, 1),
-        p.feasible ? 'review order ' + (p.rank || '-') + ', scalar ' + fmt.num(p.scalar, 2) : 'infeasible: never ranked']);
+        p.feasible ? 'review order ' + (p.rank || '-') + ', scalar ' + fmt.num(p.scalar, 2) + (p.step === false ? ' (no step: a tie for this question)' : '')
+          : p.envelope_limited ? 'envelope-limited: beyond what the replay can judge on some days, never ranked' : 'infeasible: never ranked']);
     }
     return {
       grid: { left: 56, right: 18, top: 18, bottom: 46 },
@@ -527,8 +541,10 @@
                min: function (v) { return +(Math.min(v.min, 0) - ypad).toFixed(3); }, max: function (v) { return +(Math.max(v.max, 0) + ypad).toFixed(3); },
                splitLine: { lineStyle: { color: t.grid } }, axisLabel: { showMinLabel: false, showMaxLabel: false, formatter: function (v) { return fmt.num(v, yr < 1 ? 2 : 1); } } },
       series: [
-        { name: 'infeasible', type: 'scatter', data: data(function (p) { return !p.feasible; }), symbolSize: 7, z: 2,
+        { name: 'infeasible', type: 'scatter', data: data(function (p) { return !p.feasible && !p.envelope_limited; }), symbolSize: 7, z: 2,
           itemStyle: { color: t.muted, opacity: 0.5 } },
+        { name: 'envelope-limited', type: 'scatter', data: data(function (p) { return p.envelope_limited; }), symbolSize: 8, z: 2,
+          itemStyle: { color: t['status-warning'], opacity: 0.85 } },
         { name: 'feasible, behind the front', type: 'scatter', data: data(function (p) { return p.feasible && !p.front; }), symbolSize: 9, z: 3,
           itemStyle: { color: t.surface, borderColor: t['series-1'], borderWidth: 2 } },
         { name: 'front', type: 'scatter', data: data(function (p) { return p.front; }), symbolSize: 12, z: 4,
@@ -559,7 +575,7 @@
       rows: [{ rank: null, variant: 'base', x: 0, y: 0, z: 0, scalar: null, reading: 'the phone\'s settings, replayed: the origin' }].concat(
         (pa.points || []).map(function (p) {
           return { rank: p.rank, variant: p.variant, x: p.x, y: p.y, z: p.z, scalar: p.scalar,
-                   reading: !p.feasible ? 'infeasible, never ranked' : p.front ? 'on the front' : 'feasible, behind the front' };
+                   reading: p.envelope_limited ? 'envelope-limited, never ranked' : !p.feasible ? 'infeasible, never ranked' : p.front ? 'on the front' : p.step === false ? 'no step: a tie for this question' : 'feasible step, behind the front' };
         }))
     };
   }
@@ -575,22 +591,25 @@
       h('p', { class: 'lead', text: 'Weights sensitivity' }),
       h('p', { text: se.note || '' }));
     if (!se.available) return box;
-    var tr = h('tr', null, h('th', { text: 'weight' }), h('th', { class: 'n', text: 'declared' }), h('th', { text: 'top unchanged' }),
-      h('th', { text: 'top ' + (se.declared_top || []).length + ' at 0.5 x' }), h('th', { text: 'top ' + (se.declared_top || []).length + ' at 1.5 x' }));
-    var tb = h('tbody');
+    var n = (se.declared_top || []).length;
+    function cell(key, body) { return h('div', { class: 'cell' }, h('span', { class: 'k', text: key }), body); }
+    function list(l) {
+      if (!l) return h('span', { class: 'v', text: 'not recorded' });
+      if (!l.length) return h('span', { class: 'v', text: 'none feasible' });
+      return h('ol', null, l.map(function (x) { return h('li', { text: x }); }));
+    }
+    // one row per weight (a list, not a table): the cells wrap at narrow widths instead of squeezing the columns
+    var rows = h('div', { class: 'sens-rows', role: 'list' });
     (se.weights || []).forEach(function (r) {
-      function cell(list) {
-        if (!list) return h('td', { class: 'top', text: 'not recorded' });
-        if (!list.length) return h('td', { class: 'top', text: 'none feasible' });
-        return h('td', { class: 'top' }, h('ol', null, list.map(function (x) { return h('li', { text: x }); })));
-      }
-      tb.appendChild(h('tr', null, h('td', null, h('code', { text: r.weight })), h('td', { class: 'n num', text: fmt.num(r.value, 1) }),
-        h('td', null, h('span', { class: 'pill', text: r.same_top ? 'yes' : 'no, it moves' }),
-          r.tau && Object.keys(r.tau).length ? h('span', { class: 'vline', text: 'Kendall tau ' + Object.keys(r.tau).map(function (f) { return f + ' x ' + fmt.num(r.tau[f], 2); }).join(', ') }) : null),
-        cell(r['0.5']), cell(r['1.5'])));
+      rows.appendChild(h('div', { class: 'sens-row', role: 'listitem', 'aria-label': 'weight ' + r.weight },
+        cell('weight', h('span', { class: 'v' }, h('code', { text: r.weight }), ' ' + fmt.num(r.value, 1) + ' declared')),
+        cell('top ' + n + ' unchanged', h('span', { class: 'v' }, h('span', { class: 'pill', text: r.same_top ? 'yes' : 'no, it moves' }),
+          r.tau && Object.keys(r.tau).length ? h('span', { class: 'vline', text: 'Kendall tau ' + Object.keys(r.tau).map(function (f) { return f + ' x ' + fmt.num(r.tau[f], 2); }).join(', ') }) : null)),
+        cell('top ' + n + ' at 0.5 x', list(r['0.5'])),
+        cell('top ' + n + ' at 1.5 x', list(r['1.5']))));
     });
-    box.appendChild(h('p', { text: 'Scalar order at the declared weights, top ' + (se.declared_top || []).length + ': ' + (se.declared_top || []).join(', ') }));
-    box.appendChild(h('div', { class: 'table-scroll' }, h('table', { class: 'twin sens' }, h('thead', null, tr), tb)));
+    box.appendChild(h('p', { text: 'Scalar order at the declared weights, top ' + n + ': ' + (se.declared_top || []).join(', ') }));
+    box.appendChild(rows);
     return box;
   }
 
@@ -602,10 +621,11 @@
     var block = h('div', { class: 'block', id: 'pv-pareto' },
       h('header', null, h('h2', { text: 'Pareto front' }),
         h('p', { text: 'The question ' + pa.question + ' is a declared study setting, not a finding. Every feasible variant as the mean over the search days vs base; the phone\'s settings, replayed, sit at the origin. ' +
-          ax.map(function (a) { return a.label + ': ' + directionText(a); }).join('; ') + '. ' + nFront + ' variant(s) on the front, no other feasible variant asks for at least as much on all three at once.' })),
+          ax.map(function (a) { return a.label + ': ' + directionText(a); }).join('; ') + '. ' + nFront + ' variant(s) on the front, taken among the steps (rise beyond the floor in the question\'s direction): no other step asks for at least as much on all three at once.' })),
       h('div', { class: 'pv-legend' },
         h('span', null, h('i', { class: 'sw front' }), 'front member, labelled with its review order'),
         h('span', null, h('i', { class: 'sw other' }), 'feasible, behind the front'),
+        h('span', null, h('i', { class: 'sw env' }), 'envelope-limited, never ranked'),
         h('span', null, h('i', { class: 'sw off' }), 'infeasible, never ranked'),
         h('span', null, h('i', { class: 'sw base' }), 'phone: base at the origin')));
     var grid = h('div', { class: 'pf-grid' });
@@ -662,12 +682,27 @@
   function verdictPill(v) {
     var word = v.verdict === 'recommended' ? 'for review' : v.verdict;
     // status colours are for feasibility only (DESIGN 6): a verdict is a review order, so it stays a neutral pill
+    // envelope-limited carries its status colour in the feasibility column and the row marker, not here
     var cls = v.verdict === 'infeasible' ? 'pill serious' : 'pill';
     return h('span', { class: cls, text: word });
   }
 
+  function envelopeDaysText(ed) {
+    return Object.keys(ed || {}).sort(function (a, b) {
+      return Math.abs((ed[b] || {}).env_3h_U || 0) - Math.abs((ed[a] || {}).env_3h_U || 0) || (a < b ? -1 : 1);
+    }).map(function (d) {
+      var r = ed[d] || {};
+      return d + (num(r.env_3h_U) ? ' (' + fmt.signed(r.env_3h_U, 1) + ' U in 3 h)' : num(r.env_day_pct_tdd) ? ' (' + fmt.num(r.env_day_pct_tdd, 0) + ' % of TDD)' : '');
+    }).join(', ');
+  }
+
   function feasibilityText(v) {
     if (v.feasible === true) return h('span', { class: 'pill good', text: 'feasible' });
+    if (v.verdict === 'envelope-limited') {
+      var n = Object.keys(v.envelope_days || {}).length;
+      return h('span', null, h('span', { class: 'pill warning', text: 'beyond the envelope on ' + n + (n === 1 ? ' day' : ' days') }), ' ',
+        'beyond what the replay can judge on: ' + envelopeDaysText(v.envelope_days) + '; every hard check passes on every day');
+    }
     var reasons = v.reasons || {};
     var days = Object.keys(reasons).sort();
     if (v.feasible === false && days.length) {
@@ -695,6 +730,16 @@
         h('p', { class: 'lead', text: vlines[0] }),
         vlines.slice(1).map(function (l) { return h('p', { text: l }); })));
     }
+    var env = ps.envelope || null;
+    if (env && (env.items || []).length) {                // after the candidates, before the infeasible ones: the days
+      head.appendChild(h('div', { class: 'lb-validation lb-envelope', role: 'note', 'aria-label': 'envelope-limited variants' },
+        h('p', { class: 'lead', text: (env.items || []).length + ' envelope-limited variant(s)' }),
+        h('p', { text: env.lead || '' }),
+        h('ul', null, (env.items || []).slice(0, 12).map(function (it) {
+          return h('li', null, h('code', { text: it.variant }), ': ' + it.days_text + (it.inside_days ? '; inside on ' + it.inside_days + ' other day(s)' : ''));
+        })),
+        (env.items || []).length > 12 ? h('p', { text: ((env.items || []).length - 12) + ' more in the leaderboard below.' }) : null));
+    }
     var cov = ps.coverage || null;
     var covCols = cov ? (cov.columns || []) : [];
     if (cov) head.appendChild(h('p', { class: 'lb-cov', text: 'The columns "' + covCols.map(function (x) { return x.head; }).join('" and "') + '" read the manual boluses of the search days: ' + cov.caveat }));
@@ -702,7 +747,7 @@
     var box = h('div', { class: 'lb-box' });
     var block = h('div', { class: 'block' },
       h('header', null, h('h2', { text: 'Leaderboard' }),
-        h('p', { text: 'Every component as the mean over ' + (days.length === 1 ? 'the search day' : 'the ' + days.length + ' search days') + ' vs base. The small track in a delta cell shows the value against the shaded floor band; grey numbers are ties. Infeasible variants are greyed with the reason and never ranked.' })),
+        h('p', { text: 'Every component as the mean over ' + (days.length === 1 ? 'the search day' : 'the ' + days.length + ' search days') + ' vs base. The small track in a delta cell shows the value against the shaded floor band; grey numbers are ties. Envelope-limited variants (after the ranked ones, marked in yellow) pass every hard check but leave the validity envelope on some days, listed with them; infeasible variants are greyed with the reason. Neither is ranked.' })),
       head, chip, box);
     el.appendChild(block);
 
@@ -753,7 +798,8 @@
       tbody.appendChild(btr);
       rows.forEach(function (v) {
         var selectable = selectListeners.length > 0;
-        var row = h('tr', { class: (v.feasible === false ? 'infeasible' : '') + (selectable ? ' selectable' : ''), tabindex: selectable ? '0' : null,
+        var rowCls = v.verdict === 'envelope-limited' ? 'envelope' : v.feasible === false ? 'infeasible' : '';
+        var row = h('tr', { class: rowCls + (selectable ? ' selectable' : ''), tabindex: selectable ? '0' : null,
           'data-vhash': v.vhash,
           onclick: selectable ? function () { emitSelect(v); } : null,
           onkeydown: selectable ? function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); emitSelect(v); } } : null });

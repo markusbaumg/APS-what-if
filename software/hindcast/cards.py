@@ -20,7 +20,8 @@ the low-side flags; the status of the pre-hypo constraint P and of the envelope 
 the phone's; the largest single emulated SMB next to the phone's smallest maxBolus; the rank per stratum (the day
 tags of study.json), on the hold-out days and across the leave-one-day-out folds (after the validate phase, H-308:
 'hold-out: rank r of N, direction holds on k/n days, LODO range a-b' and Kendall tau); the ties ("Not distinguishable
-from candidate 3 within the noise floor"); the verdict; the honesty paragraph verbatim (for a study with unlocked keys, tier C / S, followed by
+from candidate 3 within the noise floor"); the verdict; the honesty paragraph verbatim and the end goal of
+docs/hindcast/GOAL.md in the words of the page (contracts.END_GOAL) (for a study with unlocked keys, tier C / S, followed by
 Study.unlock_caveat() and contracts.NO_GLUCOSE_RESPONSE read for the card); the VDF text.
 
 Every card passes lint.lint_text(text, kind='card') (the vocabulary of DESIGN.md section 3 plus the honesty
@@ -33,7 +34,9 @@ same order round.json, status.json and the page use); the card's own text still 
 `hc study run` writes the cards at the end of every finished round through the same write_cards() as `hc card`.
 
 Files: studies/<study>/cards/<n>.md and <n>.vdf (n = card number) for ranked variants; cards/<short vhash>.md for a
-variant without a number (infeasible, pending) asked for by --vhash. A full rewrite (no --rank / --vhash / --out)
+variant without a number (infeasible, pending) asked for by --vhash. A default write also writes cards/<short
+vhash>.md for up to ENVELOPE_CARDS envelope-limited variants (never ranked; their E line lists the days beyond the
+validity envelope, 'beyond what the replay can judge on: 2026-09-04 (+1.6 U in 3 h), ...'). A full rewrite (no --rank / --vhash / --out)
 removes numbered cards left from an earlier numbering. The honesty rule on names: the card prints "review
 order" for question explore and "rank" only for earlier / gentler; the verdict word for the contract value
 'recommended' is "recommended for review".
@@ -56,7 +59,7 @@ from hindcast import metrics as M                                               
 from hindcast import round as rnd                                                           # noqa: E402
 from hindcast import space as spc                                                           # noqa: E402
 from hindcast import study as st                                                            # noqa: E402
-from hindcast.contracts import BASE_VHASH, HONESTY_STATEMENT                                # noqa: E402
+from hindcast.contracts import BASE_VHASH, END_GOAL, HONESTY_STATEMENT                      # noqa: E402
 
 PREFS_MAP_PATH = os.path.join(HINDCAST_DIR, 'prefs_map.json')
 CARDS_DIR = 'cards'
@@ -177,6 +180,20 @@ def card_order(analysis):
     ranked = [analysis.reports[vh] for vh in analysis.order if vh in analysis.reports and vh != BASE_VHASH]
     pos = {r.vhash: i for i, r in enumerate(ranked)}
     return sorted(ranked, key=lambda r: (CARD_GROUPS.get(r.verdict, len(CARD_GROUPS)), pos[r.vhash]))
+
+
+ENVELOPE_CARDS = 5                       # envelope-limited variants that get a card (by short vhash) in a default write
+
+
+def envelope_reports(analysis):
+    """The envelope-limited variants (no card number, never ranked), the most of the question's direction on rises
+    first (explore: the largest |rise|): their cards say on which days a larger step would have acted."""
+    reps = [r for r in analysis.reports.values() if r.verdict == 'envelope-limited']
+    sign = M.QUESTION_DIRECTION.get(analysis.question)
+    def key(r):
+        rise = r.mean.get('rise_vs_base_U') or 0.0
+        return (-(sign * rise if sign else abs(rise)), r.variant)
+    return sorted(reps, key=key)
 
 
 def card_numbers(analysis):
@@ -307,7 +324,8 @@ def manual_bolus_line(report, days):
     known = [d for d in days if isinstance((report.per_day.get(d) or {}).get('manual_boluses'), (int, float))]
     note = ''
     if len(known) < len(days):
-        note = f' (known on {len(known)} of {len(days)} search days: the treatments of the others were not read)'
+        note = (f' (known on {len(known)} of {len(days)} search days: the others are rows written before the '
+                f'manual-bolus metric existed)')
     if not n:
         return (f'- Manual boluses: none on the {len(known)} replayed search day{"s" if len(known) != 1 else ""}'
                 + note + '.')
@@ -317,7 +335,7 @@ def manual_bolus_line(report, days):
     cov = _sum(report, 'coverage_U_vs_base', days) or 0.0
     pre_n = int(_sum(report, 'boluses_preempted', days) or 0)
     return (f'- Manual boluses: on these days you gave {n} bolus{"es" if n != 1 else ""}, {_u(units)}; under this variant '
-            f'the loop would already have delivered {_u(pre)} of them as SMBs in the hour before (base: {_u(pre_b)}), '
+            f'the loop would have delivered {_u(pre)} of SMB in the hour before them (base: {_u(pre_b)}), '
             f'{_signed_u(cov)} vs base; {pre_n} of {n} with at least {M.PREEMPT_SHARE * 100:.0f} % of the bolus asked '
             f'for earlier than base' + note + '. ' + MANUAL_LIMIT)
 
@@ -343,7 +361,9 @@ def _constraint_lines(report, analysis):
         out.append('- P (insulin before a recorded low): no recorded low on these days; not testable here.')
     e_reasons = [r for rs in report.infeasible_reasons.values() for r in rs if 'envelope' in r]
     env3, envd = _max(report, 'env_3h_max_U', days), _max(report, 'env_day_pct_tdd', days)
-    if e_reasons:
+    if getattr(report, 'envelope_limited', False):
+        out.append(envelope_line(report, cfg))
+    elif e_reasons:
         out.append('- E (validity envelope): out of envelope: ' + '; '.join(e_reasons) + '.')
     elif env3 is not None or envd is not None:
         out.append(f'- E (validity envelope): inside on every day; largest 3 h difference vs base {_u(env3 or 0.0)} '
@@ -379,6 +399,21 @@ def _constraint_lines(report, analysis):
             text += '; the phone echoed no maxBolus on these days'
         out.append(text + '.')
     return out
+
+
+ENVELOPE_CARD_NOTE = ('E is a validity limit, not a safety rule: on those days the history the replay runs on would '
+                      'have been different, so the replay cannot judge them; they show where a step this large would '
+                      'have acted.')
+
+
+def envelope_line(report, cfg):
+    """The E line of an envelope-limited variant: 'beyond what the replay can judge on: 2026-09-04 (+1.6 U in 3 h),
+    ...' with the limits and how many search days stayed inside."""
+    ed = report.envelope_days or {}
+    inside = len(report.days) - len(ed)
+    return (f'- E (validity envelope): beyond what the replay can judge on: {M.envelope_days_text(ed)} (limits '
+            f'{cfg["envelope"]["max_3h_U"]:g} U vs base in 3 h, {cfg["envelope"]["max_day_pct_tdd"]:g} % of the '
+            f'phone\'s TDD); inside on the other {inside} search day{"s" if inside != 1 else ""}. ' + ENVELOPE_CARD_NOTE)
 
 
 def pareto_line(report, analysis):
@@ -540,7 +575,7 @@ def card_text(report, analysis, settings=None, prefs_map=None, number=None):
              '## Constraints and safety readings', ''] + _constraint_lines(report, analysis) + ['',
              '## Rank by stratum and hold-out', ''] + _rank_lines(report, analysis) + ['',
              '## Ties', ''] + _tie_lines(report, analysis) + ['',
-             '## Honesty', '', HONESTY_STATEMENT, ''] + unlock_lines(study) + [
+             '## Honesty', '', HONESTY_STATEMENT, '', END_GOAL, ''] + unlock_lines(study) + [
              '## VDF', '', '```', vdf_text_of(report, analysis).rstrip('\n'), '```', '']
     return '\n'.join(lines)
 
@@ -582,7 +617,7 @@ def select_reports(analysis, ranks=None, vhashes=None, top=DEFAULT_TOP):
             raise CardError(f'vhash {vh!r} matches {len(hits)} variants')
         out.append(hits[0])
     if not ranks and not vhashes:
-        out = ordered[:top]
+        out = ordered[:top] + envelope_reports(analysis)[:ENVELOPE_CARDS]
     seen, uniq = set(), []
     for rep in out:
         if rep.vhash not in seen and rep.vhash != BASE_VHASH:

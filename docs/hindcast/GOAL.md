@@ -40,8 +40,13 @@ and reported; no step is proposed that fails the pre-hypo constraint on any day.
 
 ## Baseline (observed, from Nightscout; filled by `hc baseline`)
 
-See `docs/hindcast/BASELINE.md` once it is generated: TIR, time below range, manual boluses and units per
-day, carb entries per day, SMB units per day, for the frozen days.
+`hc baseline --write` writes `software/studies/BASELINE.md` and `baseline.json` (git-ignored, because per-day
+glucose and insulin figures stay out of the public repo; `--public` is needed to write under `docs/`): TIR,
+time below range, manual boluses and units per day, carb entries per day, SMB units per day, loop hours, for
+the frozen days. Markus gets the same table as a private artifact page.
+
+Days on which the phone looped less than 16 h are "partial days": they are listed with their observed values
+but not scored by any study, because their TDD and 3 h windows are only a fraction of the envelope's.
 
 ## Non-goals
 

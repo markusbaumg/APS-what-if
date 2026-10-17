@@ -77,7 +77,7 @@ def test_thresholds_from_study_json_and_overrides():
     obj = contracts.Objective(quarantine={'agreement_pct_min': 90.0, 'cgm_gap_max_min': 180})
     study = make_study(objective=obj)
     thr = days.quarantine_thresholds(study)
-    assert thr == {'agreement_pct_min': 90.0, 'cgm_gap_max_min': 180.0}
+    assert thr == {'agreement_pct_min': 90.0, 'cgm_gap_max_min': 180.0, 'loop_hours_min': days.PARTIAL_DAY_HOURS}
     assert days.quarantine_thresholds({'objective': {'quarantine': {'agreement_pct_min': 80, 'junk': 1}}})[
         'agreement_pct_min'] == 80.0
     assert days.quarantine_thresholds(None, {'cgm_gap_max_min': 'x'}) == days.QUARANTINE_THRESHOLDS
@@ -204,8 +204,21 @@ def test_cgm_gap_from_raw_entries_is_clipped_at_midnight():
 
 
 def test_loop_gap_and_missing_cgm_are_no_reasons():
-    assert days.quarantine_reasons('2026-10-05', meta={'character': {'cgm_gap_min': 75, 'loop_gap_min': 610},
+    """A loop gap is no reason by itself: with loop_hours it is the coverage that counts (a 610 min gap on a day
+    looped 17.5 h is kept); an old meta without loop_hours falls back to one gap of more than 8 h."""
+    assert days.quarantine_reasons('2026-10-05', meta={'character': {'cgm_gap_min': 75, 'loop_gap_min': 610, 'loop_hours': 17.5},
                                                        'confounders': ['phone not looping for 610 min from 07:34 local']}) == []
+    assert days.quarantine_reasons('2026-10-05', meta={'character': {'cgm_gap_min': 75, 'loop_gap_min': 480}}) == []
+    old = days.quarantine_reasons('2026-10-05', meta={'character': {'cgm_gap_min': 75, 'loop_gap_min': 610}})
+    assert old == ['partial day: the phone did not loop for 10.2 h in one stretch (old meta without loop hours; '
+                   'threshold 8 h)']
+    part = days.quarantine_reasons('2026-10-03', meta={'character': {'loop_gap_min': 1162, 'loop_hours': 3.5}})
+    assert part == ['partial day: the phone looped 3.5 h of 24 (threshold 16 h)']
+    _lint_clean(old + part)
+    listing = days.quarantine_listing({'2026-10-03': part})
+    assert 'looping >= 16 h of the day' in listing[-1]
+    for line in listing:
+        lint.lint_text(line, kind='line')
     assert days.quarantine_reasons('2026-10-05', meta={'character': {'cgm_gap_min': None, 'cgm_note': 'no CGM file'}}) == []
 
 

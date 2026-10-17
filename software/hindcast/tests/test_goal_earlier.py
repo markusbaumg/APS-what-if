@@ -161,7 +161,7 @@ def test_explore_and_earlier_order_differently():
 def test_validate_top_is_the_front_then_the_scalar():
     ea = M.rank_variants(syn_rows(), 'earlier', None, S)
     assert M.validate_top(ea, 2) == ['up', 'up_rest']                   # a front larger than N keeps its N best scalars
-    assert M.validate_top(ea, 4) == ['up', 'up_rest', 'up_low', 'calm']
+    assert M.validate_top(ea, 4) == ['up', 'up_rest', 'up_low']          # 'calm' (rise 0) and 'down' are no step
     ex = M.rank_variants(syn_rows(), 'explore', None, S)
     assert M.validate_top(ex, 2) == ['calm', 'up_rest']
     assert M.validate_variants(syn_rows(), 'earlier', None, S, H, top=4).validated == M.validate_top(ea, 4)
@@ -170,12 +170,12 @@ def test_validate_top_is_the_front_then_the_scalar():
 def test_the_direction_of_earlier_is_more_on_rises():
     ex = M.validate_variants(syn_rows(), 'explore', None, S, H, top=5)
     ea = M.validate_variants(syn_rows(), 'earlier', None, S, H, top=5)
-    # 'down' asks for less on rises on every day: explore follows its own sign and holds, earlier asks rise > 0
+    # 'down' asks for less on rises on every day: explore follows its own sign and holds; for earlier it is not a
+    # step at all, so it is never validated; every validated earlier variant is tested for rise > 0
     assert ex.per_variant['down']['component'] == 'rise_vs_base_U' and ex.per_variant['down']['holds'] == 2
-    assert ea.per_variant['down']['direction'] == 1 and ea.per_variant['down']['holds'] == 0
-    assert ea.per_variant['calm']['holds'] == 0                         # rise 0: no direction at all
+    assert 'down' not in ea.validated and 'calm' not in ea.validated
+    assert all(ea.per_variant[n]['direction'] == 1 and ea.per_variant[n]['holds'] == 2 for n in ea.validated)
     assert ea.per_variant['up']['holds'] == 2 and ea.per_variant['up']['direction'] == 1
-    assert any('direction holds on 0 of 2' in r for r in ea.per_variant['down']['reasons'])
 
 
 def test_recommend_for_earlier_needs_more_on_rises():
@@ -257,10 +257,10 @@ def test_earlier_why_wording(earlier_study):
     rep = a.reports[vhash_of('up_low')]
     assert rnd.earlier_why(rep).startswith('more insulin asked on rises +0.95 U/day (4.7 x floor); extra elsewhere 0.00 U/day; '
                               'low-side flags 2.0/day; on the Pareto front, scalar +0.35')
-    calm = a.reports[vhash_of('calm')]
-    assert calm.verdict == 'candidate' and calm.why.startswith('more insulin asked on rises +0.00 U/day')
-    assert 'behind the Pareto front' in calm.why
-    assert any('same sign of rise_vs_base_U on 0 %' in r for r in calm.recommend_reasons)
+    calm = a.reports[vhash_of('calm')]                    # rise 0: asks for no more on rises, a tie for earlier
+    assert calm.verdict == 'tie' and calm.why.startswith('not an earlier step: asks for no more insulin on rises')
+    assert 'more insulin asked on rises' not in calm.why and not calm.pareto
+    assert any(M.no_step_reason('earlier') in r for r in calm.recommend_reasons)
     lint_clean(rnd.earlier_why(rep))
     lint_clean(calm.why)
 
@@ -285,10 +285,12 @@ def test_earlier_card_has_the_pareto_weights_and_manual_bolus_lines(earlier_stud
     assert 'rest 2, lowside 0.3' in weights and 'in the scalar top 5 in 4 of 4 settings' in weights
     manual = next(l for l in lines if l.startswith('- Manual boluses:'))
     assert manual.startswith('- Manual boluses: on these days you gave 6 boluses, 9.00 U; under this variant the loop '
-                             'would already have delivered 4.80 U of them as SMBs in the hour before (base: 3.00 U), '
+                             'would have delivered 4.80 U of SMB in the hour before them (base: 3.00 U), '
                              '+1.80 U vs base; 3 of 6 with at least 50 % of the bolus asked for earlier than base.')
     assert manual.endswith(cards.MANUAL_LIMIT)
     assert '(the Pareto front first, then the scalar)' in text
+    assert c.END_GOAL in text and text.index(c.HONESTY_STATEMENT) < text.index(c.END_GOAL) < text.index('## VDF')
+    assert c.END_GOAL is __import__('hindcast.report', fromlist=['END_GOAL']).END_GOAL   # one constant, page and card
     cards.lint_card(text)
 
 
@@ -304,6 +306,156 @@ def test_manual_line_with_no_bolus_and_partial_days():
         days = ['d1', 'd2']
         per_day = {'d1': {k: 0 for k in M.MANUAL_KEYS}, 'd2': {}}
     line = cards.manual_bolus_line(R(), R.days)
-    assert line == ('- Manual boluses: none on the 1 replayed search day (known on 1 of 2 search days: the treatments '
-                    'of the others were not read).')
+    assert line == ('- Manual boluses: none on the 1 replayed search day (known on 1 of 2 search days: the others are '
+                    'rows written before the manual-bolus metric existed).')
     lint_clean(line)
+
+
+# ----------------------------------------------------------------------------- iteration 3: steps, envelope-limited
+
+STEP_SYN = dict(SYN, tiny=dict(rise=0.01, rest=-0.3), neg=dict(rise=-0.01, rest=-0.3), less=dict(rise=-0.6, rest=0.0))
+
+
+def step_rows(extra=None, env=None):
+    """syn_rows plus variants inside the 0.2 U rise floor ('tiny' +0.01, 'neg' -0.01) and a gentler step ('less');
+    `env` = {variant: {day: env_3h_max_U}} puts a variant beyond the 3 h envelope on those days."""
+    syn = dict(STEP_SYN, **(extra or {}))
+    rows = [{'variant': 'base', 'day': d, 'vhash': c.BASE_VHASH, 'params': {},
+             'metrics': tr.mk(base=True, **MANUAL, manual_presmb_U=1.0, coverage_U_vs_base=0.0, boluses_preempted=0)}
+            for d in S + H]
+    for name, kw in syn.items():
+        params = {'profile autoISF_max': 1.3, 'profile dura_ISF_weight': round(0.1 + 0.01 * len(name) + 0.001 * sum(map(ord, name)) % 0.5, 3)}
+        for d in S + H:
+            e3 = ((env or {}).get(name) or {}).get(d, 0.0)
+            rows.append({'variant': name, 'day': d, 'vhash': c.vhash({'profile x': name}), 'params': params,
+                         'metrics': tr.mk(**kw, env3=abs(e3), env_3h_signed_U=e3, **MANUAL, manual_presmb_U=1.0,
+                                          coverage_U_vs_base=0.0, boluses_preempted=0)})
+    return rows
+
+
+def test_a_variant_inside_the_rise_floor_is_no_earlier_step():
+    ea = M.rank_variants(step_rows(), 'earlier', None, S)
+    # floor on rise 0.2 U: 'tiny' (+0.01) asks for no more on rises; 'neg', 'calm', 'down', 'less' go the other way
+    assert ea.variants['tiny'].step is False and ea.variants['neg'].step is False
+    assert ea.variants['up'].step is True and ea.variants['up'].step_floor_U == pytest.approx(0.2)
+    assert set(ea.front) == {'up', 'up_rest', 'up_low'} and not set(ea.front) & set(ea.no_step)
+    assert set(ea.no_step) == {'tiny', 'neg', 'calm', 'down', 'less'}
+    assert ea.order[:3] == ['up', 'up_rest', 'up_low'] and set(ea.order[3:]) == set(ea.no_step)  # steps first
+    assert M.validate_top(ea, 8) == ['up', 'up_rest', 'up_low']                # never a non-step, whatever N
+    lb = {r['variant']: r for r in M.leaderboard_rows(ea)}
+    assert lb['tiny']['verdict'] == 'tie' and lb['neg']['verdict'] == 'tie' and lb['up']['verdict'] == 'candidate'
+    M.recommend(ea, M.leave_one_day_out(step_rows(), 'earlier', None, S), ['tiny', 'neg'], None)
+    assert not ea.variants['tiny'].recommended_for_review
+    assert M.no_step_reason('earlier') in ea.variants['tiny'].recommend_reasons
+
+
+def test_gentler_mirrors_the_step_rule():
+    ge = M.rank_variants(step_rows(), 'gentler', None, S)
+    # gentler asks for rise below -floor: 'down' (-1.0) and 'less' (-0.6) are steps, 'neg' (-0.01) and 'calm' not
+    assert {n for n, v in ge.variants.items() if v.step} == {'down', 'less'}
+    assert set(ge.front) <= {'down', 'less'} and ge.front
+    assert set(ge.no_step) == {'tiny', 'neg', 'calm', 'up', 'up_rest', 'up_low'}
+    assert set(M.validate_top(ge, 8)) == {'down', 'less'}
+
+
+def test_round_never_prints_a_negative_earlier_step(earlier_study):
+    _sd, study, _a = earlier_study
+    a = rnd.analyze(study, step_rows(), tr.SETTINGS)
+    by = {r.variant: r for r in a.reports.values()}
+    for name in ('tiny', 'neg', 'calm', 'down', 'less'):
+        r = by[name]
+        assert r.verdict == 'tie' and not r.pareto, name
+        assert r.why.startswith('not an earlier step'), r.why
+        assert 'more insulin asked on rises -' not in r.why and 'more insulin asked on rises' not in r.why
+        lint_clean(r.why)
+    assert 'inside the floor of 0.20 U/day' in by['tiny'].why and 'on rises it asks for 0.01 U/day more' in by['tiny'].why
+    assert by['neg'].why.startswith('not an earlier step: asks for no more insulin on rises than base (0.01 U/day less')
+    assert 'the other direction' in by['down'].why
+    assert by['up'].verdict in ('candidate', 'recommended')
+    assert rnd.earlier_why(by['up']).startswith('more insulin asked on rises +0.80 U/day')
+    front = {a.reports[vh].variant for vh in a.front}
+    assert front == {'up', 'up_rest', 'up_low'}
+    doc = rnd.build_round(_sd, round_no=1, phase='lhs', settings=tr.SETTINGS, analysis=a)
+    assert any(n.startswith('earlier: 3 of 8 feasible variant(s) ask for more insulin on rises than the floor')
+               for n in doc.notes), doc.notes
+    for n in doc.notes:
+        lint_clean(n)
+    # base carries the manual-bolus keys (coverage 0 by construction); a candidate records manual_days
+    base = next(cand for cand in doc.variants if cand.verdict == 'base')
+    assert base.effect['manual_boluses'] == 2 and base.effect['coverage_U_vs_base'] == 0.0
+    assert base.effect['manual_days'] == len(S)
+    up = next(cand for cand in doc.variants if cand.variant == 'up')
+    assert up.effect['manual_days'] == len(S)
+
+
+def test_envelope_limited_is_its_own_verdict_with_the_days(earlier_study, tmp_path):
+    sd, study, _a = earlier_study
+    big = dict(rise=1.6, rest=0.0)
+    rows = step_rows(extra={'big': big, 'huge': dict(rise=2.0, rest=0.0)},
+                     env={'big': {S[1]: 1.6, S[2]: -1.2}, 'huge': {d: 2.5 for d in S}})
+    ea = M.rank_variants(rows, 'earlier', None, S)
+    assert ea.variants['big'].envelope_limited and not ea.variants['big'].feasible and 'big' in ea.envelope_limited
+    assert set(ea.variants['big'].envelope_days) == {S[1], S[2]}
+    assert ea.variants['big'].envelope_days[S[1]]['env_3h_U'] == pytest.approx(1.6)
+    # beyond E on EVERY search day: infeasible, not envelope-limited
+    assert not ea.variants['huge'].envelope_limited and 'huge' in ea.infeasible and 'huge' not in ea.envelope_limited
+    assert 'big' not in ea.order and 'big' not in ea.front and ea.variants['big'].rank is None
+    # a hard reason on one day wins over the envelope: infeasible
+    rows2 = step_rows(extra={'big': big}, env={'big': {S[1]: 1.6}})
+    for r in rows2:
+        if r['variant'] == 'big' and r['day'] == S[2]:
+            r['metrics']['smb_over_maxbolus_loops'] = 1
+    assert not M.rank_variants(rows2, 'earlier', None, S).variants['big'].envelope_limited
+
+    a = rnd.analyze(study, rows, tr.SETTINGS)
+    by = {r.variant: r for r in a.reports.values()}
+    assert by['big'].verdict == 'envelope-limited' and by['huge'].verdict == 'infeasible'
+    assert by['big'].why.startswith(f'beyond what the replay can judge on 2 days: {S[1]} (+1.6 U in 3 h), '
+                                    f'{S[2]} (-1.2 U in 3 h)')
+    lint_clean(by['big'].why)
+    verdicts = [r.verdict for r in a.ordered()]
+    assert verdicts.index('envelope-limited') > max(i for i, v in enumerate(verdicts) if v in ('candidate', 'tie'))
+    assert verdicts.index('envelope-limited') < verdicts.index('infeasible')
+    doc = rnd.build_round(sd, round_no=1, phase='lhs', settings=tr.SETTINGS, analysis=a)
+    cand = next(x for x in doc.variants if x.variant == 'big')
+    assert cand.verdict == 'envelope-limited' and cand.rank is None and cand.feasible is False
+    assert cand.envelope['n_days'] == 2 and list(cand.envelope['days']) == [S[1], S[2]]
+    assert cand.envelope['max_3h_U'] == pytest.approx(1.6) and cand.envelope['inside_days'] == 1
+    assert next(x for x in doc.variants if x.variant == 'huge').envelope is None
+    rnd.write_round(sd, doc)
+    with open(sd.round_path, encoding='utf-8') as fh:
+        back = c.Round.from_dict(json.load(fh))
+    assert next(x for x in back.variants if x.variant == 'big').envelope == cand.envelope
+    assert any('envelope-limited variant' in n for n in doc.notes)
+    # the card line
+    text = cards.card_text(by['big'], a, tr.SETTINGS)
+    line = next(l for l in text.splitlines() if l.startswith('- E (validity envelope):'))
+    assert line.startswith(f'- E (validity envelope): beyond what the replay can judge on: {S[1]} (+1.6 U in 3 h), '
+                           f'{S[2]} (-1.2 U in 3 h)')
+    assert 'inside on the other 1 search day' in line and 'not a safety rule' in line
+    cards.lint_card(text)
+    assert by['big'] in cards.envelope_reports(a)
+    assert by['big'].vhash not in cards.card_numbers(a)                      # never numbered (never ranked)
+
+
+def test_validate_points_use_the_one_top_n_definition(tmp_path):
+    from hindcast import search
+    sd, study = tr.make_study_with_rows(tmp_path, variants=EARLIER_VARIANTS, holdout=['2026-09-05'], question='earlier')
+    trials = sd.trials()
+    ph = c.Phase(kind='validate', top=2, days='holdout')
+    points, notes = search.validate_points(study, trials, ph, settings=tr.SETTINGS)
+    dicts = rnd.trial_dicts([r for r in trials if r.day in study.search_days()])
+    ranking = M.rank_variants(dicts, 'earlier', study.objective.to_dict(), study.search_days())
+    want = M.validate_top(ranking, 2)
+    params = {d['variant']: d['params'] for d in dicts}
+    assert points == [params[n] for n in want]
+    assert len(ranking.front) == 3 and len(points) == 2                     # front larger than top: cut, and said so
+    assert any('the Pareto front has 3 members, more than the top 2' in n for n in notes), notes
+    assert M.validate_top_note(ranking, 2) in notes and M.validate_top_note(ranking, 3) is None
+    for n in notes:
+        lint_clean(n)
+    # 'calm' (rise 0) is no step: never a validate point, even with room left
+    points, notes = search.validate_points(study, trials, c.Phase(kind='validate', top=8, days='holdout'),
+                                           settings=tr.SETTINGS)
+    assert EARLIER_VARIANTS['calm'][0] not in points and len(points) == 3
+    assert any('and a step of the question' in n for n in notes)

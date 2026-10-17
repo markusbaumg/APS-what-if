@@ -221,18 +221,49 @@ def test_cli_prints_and_writes(cache, tmp_path, capsys):
     assert cli.main(['baseline', DAY + '..' + DAY2, '--cache-dir', cache]) == 0
     out = capsys.readouterr().out
     assert out.startswith('# Hindcast observed baseline') and DAY2 in out
-    docs = tmp_path / 'docs' / 'BASELINE.md'
     studies = tmp_path / 'studies'
-    assert cli.main(['baseline', DAY, '--cache-dir', cache, '--write', 'docs', '--docs-path', str(docs),
-                     '--studies-dir', str(studies)]) == 0
-    assert docs.read_text(encoding='utf-8').startswith('# Hindcast observed baseline')
+    assert cli.main(['baseline', DAY, '--cache-dir', cache, '--write', '--studies-dir', str(studies)]) == 0
+    page = studies / 'BASELINE.md'                       # the default: page AND json in the git-ignored studies dir
+    assert page.read_text(encoding='utf-8').startswith('# Hindcast observed baseline')
+    assert '`hc baseline --write`' in page.read_text(encoding='utf-8')
     data = json.loads((studies / 'baseline.json').read_text(encoding='utf-8'))
     assert [r['day'] for r in data['days']] == [DAY] and data['label'] == 'observed'
-    assert b'\r' not in docs.read_bytes()
+    assert b'\r' not in page.read_bytes()
     assert cli.main(['baseline', 'not-a-day', '--cache-dir', cache]) == 3
-    assert cli.main(['baseline', DAY, '--cache-dir', cache, '--json', str(tmp_path / 'b.json'), '--write', 'docs',
-                     '--docs-path', str(docs)]) == 0
-    assert (tmp_path / 'b.json').exists()
+    other = tmp_path / 'elsewhere' / 'BASELINE.md'
+    assert cli.main(['baseline', DAY, '--cache-dir', cache, '--json', str(tmp_path / 'b.json'), '--write',
+                     '--docs-path', str(other)]) == 0
+    assert (tmp_path / 'b.json').exists() and other.exists()
+
+
+def test_write_refuses_the_public_docs_without_public(cache, tmp_path, capsys, monkeypatch):
+    docs = tmp_path / 'repo' / 'docs'
+    monkeypatch.setattr(bl, 'DOCS_DIR', str(docs))
+    monkeypatch.setattr(bl, 'DOCS_PATH', str(docs / 'hindcast' / 'BASELINE.md'))
+    studies = tmp_path / 'studies'
+    capsys.readouterr()
+    assert cli.main(['baseline', DAY, '--cache-dir', cache, '--write', 'docs', '--studies-dir', str(studies)]) == 3
+    err = capsys.readouterr().err
+    assert 'refused' in err and 'public repository' in err and '--public' in err
+    assert not (docs / 'hindcast' / 'BASELINE.md').exists() and not (studies / 'baseline.json').exists()
+    # a --docs-path or --json under docs/ is refused the same way
+    assert cli.main(['baseline', DAY, '--cache-dir', cache, '--write', '--docs-path', str(docs / 'x.md'),
+                     '--studies-dir', str(studies)]) == 3
+    assert cli.main(['baseline', DAY, '--cache-dir', cache, '--write', '--json', str(docs / 'b.json'),
+                     '--studies-dir', str(studies)]) == 3
+    assert not (docs / 'x.md').exists() and not (docs / 'b.json').exists()
+    capsys.readouterr()
+    assert cli.main(['baseline', DAY, '--cache-dir', cache, '--write', 'docs', '--public',
+                     '--studies-dir', str(studies)]) == 0
+    err = capsys.readouterr().err
+    assert 'WARNING' in err and 'per-day glucose and insulin figures' in err and 'public repository' in err
+    assert (docs / 'hindcast' / 'BASELINE.md').exists() and (studies / 'baseline.json').exists()
+    assert bl.is_public_path(str(docs / 'hindcast' / 'BASELINE.md')) and not bl.is_public_path(str(studies))
+
+
+def test_the_default_targets_are_git_ignored():
+    assert not bl.is_public_path(os.path.join(bl._studies_dir(), bl.PAGE_NAME))
+    assert bl.is_public_path(bl.DOCS_PATH)
 
 
 def test_module_main(cache, capsys):

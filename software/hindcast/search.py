@@ -507,9 +507,12 @@ def phase_points(space, phase, frozen=None, phone=None) -> Tuple[List[dict], Lis
 
 
 def validate_points(study, trials, phase, space=None, settings=None) -> Tuple[List[dict], List[str]]:
-    """The points of a validate phase: the top `phase.top` variants of the search review order over the done rows
-    (round.trial_dicts: the latest done row per key, controls left out, base relabelled), feasible only, in that
-    order; and the notes. The same ranking round.analyze / metrics.validate_variants starts from."""
+    """The points of a validate phase: metrics.validate_top() of the search ranking over the done rows
+    (round.trial_dicts: the latest done row per key, controls left out, base relabelled) - the ONE top-N definition
+    metrics.validate_variants and round.analyze use too: explore the first `phase.top` of the review order; earlier /
+    gentler the Pareto front first, then the other steps by the scalar, `phase.top` applied after the front (a
+    front larger than top is cut to its best scalars and the note says so; a variant that is no step is never
+    validated). Returns (points, notes)."""
     from hindcast import round as rd                        # round imports study and metrics only: no cycle
     space = space or spc.ParamSpace.from_study(study, settings=settings, check_locked=False)
     top = int(phase.top or mt.DEFAULT_VALIDATE_TOP)
@@ -522,14 +525,20 @@ def validate_points(study, trials, phase, space=None, settings=None) -> Tuple[Li
     ranking = mt.rank_variants(dicts, study.question, objective, sdays)
     params_of = {d['variant']: d['params'] for d in dicts}
     points = []
-    for name in ranking.order[:top]:
+    for name in mt.validate_top(ranking, top):
         p = params_of.get(name) or {}
         if p:
             points.append(space.normalize(p) if all(k in space for k in p) else dict(p))
-    notes = [f'validate: top {len(points)} of {len(ranking.order)} feasible variant(s) of the search review order '
-             f'({len(sdays)} search day(s)) on the validation days']
+    pool = (f'{len(ranking.order)} feasible variant(s) of the search review order' if study.question == 'explore' else
+            f'{len(ranking.order) - len(ranking.no_step)} feasible step(s) of the search order (Pareto front '
+            f'{len(ranking.front)})')
+    notes = [f'validate: top {len(points)} of {pool} ({len(sdays)} search day(s)) on the validation days']
+    front_note = mt.validate_top_note(ranking, top)
+    if front_note:
+        notes.append(front_note)
     if len(points) < top:
-        notes.append(f'validate: {top} asked, {len(points)} feasible on the search days')
+        notes.append(f'validate: {top} asked, {len(points)} feasible on the search days'
+                     + ('' if study.question == 'explore' else ' and a step of the question'))
     return points, notes
 
 
@@ -825,13 +834,15 @@ def round_for_phase(study, trials, phase_index, round_no, started=None, settings
         for lb in mt.leaderboard_rows(ranking):
             params = lb['params'] or {}
             verdict, why = lb['verdict'], lb['why']
-            if params and set(params) <= dead_keys and verdict != 'infeasible':
+            if params and set(params) <= dead_keys and verdict not in ('infeasible', 'envelope-limited'):
                 verdict = 'dead'
                 why = f'{NOT_TESTABLE}: a level of a frozen parameter; ' + why
             variants.append(Candidate(vhash=vhash_of.get(lb['variant'], contracts.vhash(space.normalize(params) if params else {})),
                                       variant=lb['variant'], verdict=verdict, why=why[:600], params=params, rank=lb['rank'],
                                       days=len(lb['days']), feasible=lb['feasible'], effect=_effect_numbers(lb['mean']),
-                                      flags=list(lb['flags'] or [])[:8]))
+                                      flags=list(lb['flags'] or [])[:8],
+                                      envelope=(mt.envelope_summary(lb['envelope_days'], len(lb['days']))
+                                                if lb.get('envelope_limited') else None)))
         base_days = [d for d in days if lookup.base(d) is not None]
         if base_days:
             variants.insert(0, Candidate(vhash=BASE_VHASH, variant=mt.BASE_VARIANT, verdict='base',

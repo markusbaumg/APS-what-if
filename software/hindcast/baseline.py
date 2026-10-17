@@ -10,7 +10,7 @@ compared against once a setting has run on the phone. Every value here is a fact
     from hindcast import baseline
     baseline.day_stats('2026-09-06')            -> the observed record of one UTC day (see DAY_KEYS)
     baseline.build(['2026-09-06', ...])         -> {'label': 'observed', 'days': [...], 'summary': {...}, ...}
-    baseline.render_markdown(b)                 -> docs/hindcast/BASELINE.md as a string (linted, kind 'baseline')
+    baseline.render_markdown(b)                 -> BASELINE.md as a string (linted, kind 'baseline')
     baseline.strip_label(stats)                 -> 'observed TIR 87.3 %' for the day strip of the report
 
 Inputs (read only, never fetched; stdlib only): <cache>/entries/<day>.json (sgv, mg/dl), <cache>/treatments/<day>.json
@@ -42,11 +42,16 @@ not one that looped: the summary counts both (days_with_loop, days_looped_full =
 Period summary: median and mean over the days that have the value (None excluded), plus the day counts.
 
 Wording: every Markdown line passes hindcast.lint kind 'baseline' (the vocabulary rules; 'time in range' / TIR
-only on a line that also says 'observed'), and the whole page carries the honesty statement. The JSON goes to
-<studies dir>/baseline.json by default: it is Nightscout-derived (glucose, insulin units per day), so it lives
-with the other private, git-ignored study data, where the report reads its studies from too.
+only on a line that also says 'observed'), and the whole page carries the honesty statement.
 
-CLI:  hc baseline [DAYS] [--write docs] [--json PATH] [--cache-dir DIR] [--frozen-dir DIR] [--studies-dir DIR]
+Privacy: the page and the JSON are Nightscout-derived (glucose statistics, insulin units and bolus counts per day,
+one person's data), so `--write` puts BOTH into the git-ignored studies directory: <studies dir>/BASELINE.md and
+<studies dir>/baseline.json (default software/studies/, where report.find_baseline reads the JSON). The public
+repository (docs/) is refused: `--write docs` (or a --docs-path under docs/) exits 3 unless `--public` is given,
+and then a warning on stderr says that per-day glucose and insulin figures enter the public repository.
+
+CLI:  hc baseline [DAYS] [--write [studies|docs]] [--public] [--json PATH] [--cache-dir DIR] [--frozen-dir DIR]
+                  [--studies-dir DIR]
       DAYS defaults to the frozen days of the host inside DEFAULT_SPAN; without --write the page is printed.
 """
 import argparse
@@ -65,14 +70,22 @@ if SOFTWARE_DIR not in sys.path:
 from hindcast import days as dy                                                             # noqa: E402
 from hindcast import lint                                                                   # noqa: E402
 
-__all__ = ['LABEL', 'DEFAULT_SPAN', 'DAY_KEYS', 'SUMMARY_KEYS', 'day_stats', 'cgm_stats', 'treatment_stats',
+__all__ = ['is_public_path', 'PAGE_NAME', 'LABEL', 'DEFAULT_SPAN', 'DAY_KEYS', 'SUMMARY_KEYS', 'day_stats', 'cgm_stats', 'treatment_stats',
            'build', 'summarize', 'render_markdown', 'lint_markdown', 'strip_label', 'default_days', 'register',
            'main']
 
 LABEL = 'observed'
 DEFAULT_SPAN = '2026-08-30..2026-10-16'                 # the frozen loop days of the first campaign
-DOCS_PATH = os.path.join(REPO_DIR, 'docs', 'hindcast', 'BASELINE.md')
+DOCS_DIR = os.path.join(REPO_DIR, 'docs')
+DOCS_PATH = os.path.join(DOCS_DIR, 'hindcast', 'BASELINE.md')   # public: only with --public
+PAGE_NAME = 'BASELINE.md'                               # <studies dir>/BASELINE.md, the default of --write
 JSON_NAME = 'baseline.json'                             # what report.find_baseline looks for
+PUBLIC_WARNING = ('hc baseline: WARNING: --public writes per-day glucose and insulin figures (observed TIR, mean '
+                  'glucose, manual bolus and SMB units per day) into %s, inside the public repository; review the page '
+                  'before you commit it')
+PUBLIC_REFUSED = ('hc baseline: refused: %s is inside docs/, the public repository; the page carries per-day glucose '
+                  'and insulin figures. Without --public it goes to the git-ignored studies directory (--write); '
+                  'pass --public to write it there anyway')
 GOAL_TIR_PCT = 90.0
 
 SLOT_MIN = 5
@@ -237,12 +250,9 @@ def day_stats(day, cache_root=None):
 
 
 def loop_hours(stamps, end_ms):
-    """Hours of the day the phone looped: each run stands for the time to the next one, at most 5 min (the
-    loop interval; hindcast.days.LOOP_DT_CAP_MS), the last one up to the day end."""
-    total = 0
-    for a, b in zip(stamps, list(stamps[1:]) + [end_ms]):
-        total += min(max(0, b - a), dy.LOOP_DT_CAP_MS)
-    return round(total / 3600000.0, 1)
+    """Hours of the day the phone looped; the one definition lives in hindcast.days.loop_hours (each run stands
+    for the time to the next one, at most 5 min, the last one up to the day end)."""
+    return dy.loop_hours(stamps, end_ms)
 
 
 def strip_label(stats):
@@ -355,11 +365,11 @@ _SUMMARY_ROWS = (           # key, label, decimals, goal
 
 
 def render_markdown(b):
-    """docs/hindcast/BASELINE.md for the baseline `b` (build()). Not linted here: lint_markdown() does that."""
+    """BASELINE.md for the baseline `b` (build()). Not linted here: lint_markdown() does that."""
     rows, s = b['days'], b['summary']
     first, last = (rows[0]['day'], rows[-1]['day']) if rows else ('-', '-')
     out = ['# Hindcast observed baseline', '',
-           'Generated by `hc baseline --write docs` on %s from the %s; do not edit by hand.' % (b['generated'], b['source']),
+           'Generated by `hc baseline --write` on %s from the %s; do not edit by hand.' % (b['generated'], b['source']),
            'Every number on this page is observed: what the phone\'s own settings produced on these days, the',
            'reference the end goal (`GOAL.md`) is tracked against once a setting has run on the phone. None of it',
            'is a replay result, and no replay ever produces a number of this kind.', '',
@@ -432,15 +442,28 @@ def run(args):
     except lint.LintError as e:
         print('hc baseline: refused by the lint: %s' % e, file=sys.stderr)
         return 3
-    if args.write != 'docs':
+    if not args.write:
         sys.stdout.write(text)
         return 0
-    docs_path = args.docs_path or DOCS_PATH
-    json_path = args.json or os.path.join(args.studies_dir or _studies_dir(), JSON_NAME)
-    _write(docs_path, text)
+    studies = args.studies_dir or _studies_dir()
+    page_path = args.docs_path or (DOCS_PATH if args.write == 'docs' else os.path.join(studies, PAGE_NAME))
+    json_path = args.json or os.path.join(studies, JSON_NAME)
+    for path in (page_path, json_path):
+        if is_public_path(path):
+            if not getattr(args, 'public', False):
+                print(PUBLIC_REFUSED % path, file=sys.stderr)
+                return 3
+            print(PUBLIC_WARNING % path, file=sys.stderr)
+    _write(page_path, text)
     _write(json_path, json.dumps(b, indent=1, sort_keys=False) + '\n')
-    print('hc baseline: %d observed days -> %s and %s' % (len(day_list), docs_path, json_path))
+    print('hc baseline: %d observed days -> %s and %s' % (len(day_list), page_path, json_path))
     return 0
+
+
+def is_public_path(path):
+    """Is `path` inside the repository's docs/ (public, committed)?"""
+    real, docs = os.path.realpath(os.path.abspath(path)), os.path.realpath(DOCS_DIR)
+    return real == docs or real.startswith(docs + os.sep)
 
 
 def _studies_dir():
@@ -453,10 +476,14 @@ def register(subparsers):
                                                'from the Nightscout cache')
     p.add_argument('days', nargs='?', default=None,
                    help='UTC days (2026-09-01..2026-09-07, as hc freeze); default the frozen days in %s' % DEFAULT_SPAN)
-    p.add_argument('--write', choices=('docs',), default=None,
-                   help='write docs/hindcast/BASELINE.md and <studies dir>/baseline.json instead of printing the page')
+    p.add_argument('--write', nargs='?', const='studies', choices=('studies', 'docs'), default=None,
+                   help='write <studies dir>/BASELINE.md and <studies dir>/baseline.json (git-ignored) instead of '
+                        'printing the page; "--write docs" targets docs/hindcast/BASELINE.md and needs --public')
+    p.add_argument('--public', action='store_true',
+                   help='allow writing into docs/ (the public repository): per-day glucose and insulin figures would '
+                        'be committed; a warning is printed')
     p.add_argument('--json', default=None, help='the JSON path (default <studies dir>/baseline.json)')
-    p.add_argument('--studies-dir', default=None, help='where the JSON goes (default software/studies)')
+    p.add_argument('--studies-dir', default=None, help='where the page and the JSON go (default software/studies)')
     p.add_argument('--cache-dir', default=None, help='the Nightscout host cache (default ns_cache/<host>/)')
     p.add_argument('--frozen-dir', default=None, help='frozen/<host>/ for the default day list')
     p.add_argument('--docs-path', default=None, help=argparse.SUPPRESS)

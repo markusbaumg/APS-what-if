@@ -780,9 +780,18 @@ def parameter_space(study, rows, rounds, sensitivity=None):
                 mean[k] = _r(sum(vals) / len(vals), 4)
         reasons = dict(s.infeasible_reasons) if s is not None else {}
         feasible = s.feasible if s is not None else (c.feasible if c is not None else None)
-        if s is not None and not s.feasible:                 # feasibility is recomputed here; a stale round never hides it
+        envelope_days = dict(s.envelope_days) if s is not None and s.envelope_limited else {}
+        if s is not None and s.envelope_limited:             # E is a validity envelope: the days are the information
+            verdict, rank = 'envelope-limited', None
+            why = hm.envelope_limited_text(s.envelope_days)
+        elif s is not None and not s.feasible:               # feasibility is recomputed here; a stale round never hides it
             verdict, rank = 'infeasible', None
             why = '; '.join(f'{d}: {", ".join(x)}' for d, x in sorted(reasons.items()))
+        elif (s is not None and s.step is False and not s.tie_with_base
+              and (c is None or c.verdict in ('candidate', 'recommended'))):   # a stale round never shows a non-step
+            verdict, rank = 'tie', s.rank
+            why = (c.why if c is not None and c.verdict == 'tie' else
+                   hm.no_step_reason(study.question) + f' ({(s.mean.get("rise_vs_base_U") or 0.0):+.2f} U/day on rises)')
         elif c is not None:
             verdict, why, rank = c.verdict, c.why, c.rank
         elif s is not None:
@@ -799,6 +808,7 @@ def parameter_space(study, rows, rounds, sensitivity=None):
             'values': {p['key']: _param_value(v['params'], p['key'], p['phone']) for p in params},
             'per_day': v['per_day'], 'mean': mean, 'days': sorted(v['per_day']),
             'verdict': verdict, 'why': why, 'rank': rank, 'feasible': feasible, 'reasons': reasons,
+            'envelope_days': envelope_days, 'step': s.step if s is not None else None,
             'floor_multiple': _r(_floor_multiple_of(s), 3) if s is not None else None,      # the review order key
             'floor_multiples': ({k: _r(x, 3) for k, x in (s.floor_multiples or {}).items()} if s is not None else {}),
             'review_score': _r(s.review_score, 3) if s is not None else None,                # the record only
@@ -808,13 +818,19 @@ def parameter_space(study, rows, rounds, sensitivity=None):
             'validation': _validation_of(c),
         })
         variants[-1]['coverage'] = _coverage_of(variants[-1], c)
-    # order: the ranking's order, then the infeasible ones, then whatever has no ranking (round rank, then label)
+    # order: the ranking's order (candidates, then the ties), then the envelope-limited ones, then the infeasible
+    # ones, then whatever has no ranking (round rank, then label)
     pos = {}
     if ranking is not None:
-        for i, name in enumerate(list(ranking.order) + list(ranking.infeasible)):
+        lim = set(ranking.envelope_limited)
+        for i, name in enumerate(list(ranking.order) + list(ranking.envelope_limited)
+                                 + [n for n in ranking.infeasible if n not in lim]):
             pos[name] = i
-    variants.sort(key=lambda x: (pos.get(x['variant'], 10 ** 6), x['rank'] if x['rank'] is not None else 10 ** 6,
-                                 x['variant']))
+    verdict_group = {'envelope-limited': 1, 'infeasible': 2}
+    if ranking is not None and ranking.question != 'explore':    # candidates first, the ties (non-steps) after them
+        verdict_group['tie'] = 0.5
+    variants.sort(key=lambda x: (verdict_group.get(x['verdict'], 0), pos.get(x['variant'], 10 ** 6),
+                                 x['rank'] if x['rank'] is not None else 10 ** 6, x['variant']))
     for i, v in enumerate(variants, 1):
         v['position'] = i
     rule = (ranking.rule_text if ranking is not None else '\n'.join(rnd.notes if rnd is not None else [])) or ''
@@ -836,7 +852,36 @@ def parameter_space(study, rows, rounds, sensitivity=None):
         'variants': variants, 'order': [v['vhash'] for v in variants],
         'rule_lines': [x for x in rule.split('\n') if x.strip()], 'warnings': warnings,
         'validation': dict(rnd.validation) if rnd is not None and getattr(rnd, 'validation', None) else None,
+        'envelope': envelope_view(ranking, variants),
     }
+
+
+ENVELOPE_LEAD = ('Envelope-limited: these variants pass the pre-hypo, maxBolus, cap and loop-count checks on every '
+                 'search day but leave the validity envelope on some of them. There the history the replay runs on '
+                 'would have been different, so it cannot judge them; they are never ranked. The days show where a '
+                 'step this large would have acted.')
+
+
+def envelope_view(ranking, variants):
+    """The envelope-limited block of the Parameters view: {lead, limit_3h_U, limit_day_pct, items[{vhash, variant,
+    n_days, inside_days, max_3h_U, days_text, days[{day, env_3h_U, env_day_pct_tdd}]}]} in leaderboard order, or None
+    when there is none."""
+    if ranking is None or not ranking.envelope_limited:
+        return None
+    env = (ranking.objective or {}).get('envelope') or {}
+    items = []
+    for v in variants:
+        if v['verdict'] != 'envelope-limited':
+            continue
+        ed = v.get('envelope_days') or {}
+        days = sorted(ed.items(), key=lambda kv: (-abs(kv[1].get('env_3h_U') or 0.0), kv[0]))
+        items.append({'vhash': v['vhash'], 'variant': v['variant'], 'n_days': len(ed),
+                      'inside_days': len(v.get('days') or []) - len(ed), 'max_3h_U': hm.envelope_max_3h(ed),
+                      'days_text': hm.envelope_days_text(ed),
+                      'days': [{'day': d, 'env_3h_U': r.get('env_3h_U'), 'env_day_pct_tdd': r.get('env_day_pct_tdd')}
+                               for d, r in days]})
+    return {'lead': ENVELOPE_LEAD, 'limit_3h_U': env.get('max_3h_U'), 'limit_day_pct': env.get('max_day_pct_tdd'),
+            'items': items}
 
 
 def _floor_multiple_of(s):
@@ -982,14 +1027,18 @@ def pareto_view(question, ranking, variants, sensitivity=None):
             xyz = (rise, abs(rest), max(float(m.get('zero_temp_vs_base') or 0.0), 0.0))
         points.append({'vhash': v['vhash'], 'variant': name, 'x': _r(xyz[0], 3), 'y': _r(xyz[1], 3), 'z': _r(xyz[2], 2),
                        'front': name in front, 'feasible': bool(s.feasible), 'scalar': _r(s.scalar, 3),
-                       'rank': s.rank})
+                       'rank': s.rank, 'step': s.step, 'envelope_limited': bool(s.envelope_limited)})
     points.sort(key=lambda p: (p['rank'] is None, p['rank'] or 0, p['variant']))
     order = [{'rank': p['rank'], 'vhash': p['vhash'], 'variant': p['variant'], 'scalar': p['scalar'],
               'front': p['front']} for p in points if p['rank'] is not None]
     n_front = sum(1 for p in points if p['front'])
-    order_text = (f'Review order of the declared question {question}: the {_plural(n_front, "front member")} first, by '
-                  f'the scalar {scalar_text(question, weights)} inside the front, then the other feasible variants by '
-                  f'the same scalar. The weights are a study setting shown here, not a finding.')
+    n_steps = sum(1 for p in points if p['feasible'] and p['step'])
+    word = 'more' if question == 'earlier' else 'less'
+    order_text = (f'Review order of the declared question {question}: the front is taken among the '
+                  f'{_plural(n_steps, "feasible step")} (variants that ask for {word} insulin on rises than the floor); '
+                  f'the {_plural(n_front, "front member")} first, by the scalar {scalar_text(question, weights)} inside '
+                  f'the front, then the other steps by the same scalar, then the variants that are no step (ties for '
+                  f'this question). The weights are a study setting shown here, not a finding.')
     return {'question': question,
             'axes': [{'key': k, 'label': lab, 'direction': d, 'short': sh} for k, lab, d, sh in PARETO_AXES[question]],
             'weights': weights, 'scalar_text': scalar_text(question, weights),
@@ -1232,12 +1281,7 @@ def drilldown_index(study, collected):
     return out
 
 
-# docs/hindcast/GOAL.md, under the honesty paragraph on every page. The lint refuses the words of a time-in-range
-# figure on any generated surface, so the band names the range instead of the statistic.
-END_GOAL = ('End goal (Markus, 2026-10-17): a more aggressive and quicker loop, fully closed without manual boluses, '
-            'with glucose between 3.9 and 10 mmol/l more than 90 % of the time. This page can rank what the loop '
-            'would have asked for; the time between 3.9 and 10 mmol/l is observed on the phone only, never computed '
-            'here.')
+END_GOAL = contracts.END_GOAL                            # docs/hindcast/GOAL.md; the cards quote the same constant
 
 NO_GLUCOSE_RESPONSE = contracts.NO_GLUCOSE_RESPONSE      # shared with the cards ('this page' read as 'this card')
 
@@ -1346,6 +1390,10 @@ def page_sentences(data):
     pa = ps.get('pareto') or {}
     out += [str(x) for x in (pa.get('order_text'), (pa.get('sensitivity') or {}).get('note')) if x]
     out += [str(a.get(k)) for a in pa.get('axes') or [] for k in ('label', 'short')]
+    env = ps.get('envelope') or {}
+    if env:
+        out.append(str(env.get('lead') or ''))
+        out += [str(i.get('days_text') or '') for i in env.get('items') or [] if i.get('days_text')]
     cov = ps.get('coverage') or {}
     if cov:
         out.append(str(cov.get('caveat') or ''))

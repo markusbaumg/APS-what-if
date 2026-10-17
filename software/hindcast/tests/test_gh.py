@@ -540,7 +540,9 @@ def test_round_body_words_and_sanitised_free_text(tmp_path):
     assert '(12 in this round)' in body and 'variants in this round: 12 (' in body
     assert '[recommended for review]' in body and '[recommended]' not in body
     assert 'dropped parameters (not testable on these days): `profile dura_ISF_weight` - all points inside 1.5 x floor' in body
-    assert '2.65 U' not in body and 'Microbolusing' not in body and body.count(ghmod.SEE_ARTIFACT) >= 3
+    assert '2.65 U' not in body and 'Microbolusing' not in body and body.count(ghmod.SEE_ARTIFACT) >= 2
+    # an envelope-limited variant gets its own public label instead of its why (which lists U amounts)
+    assert '[envelope-limited] - beyond the validity envelope on some days, not judged' in body
     # a tie whose why fails the lint falls back to what a tie means, not to 'see the artifact'
     assert '[tie] - indistinguishable from base within the noise floor' in body
     assert 'the factor would have sat on the cap' in body and '- note: fidelity floor held' in body

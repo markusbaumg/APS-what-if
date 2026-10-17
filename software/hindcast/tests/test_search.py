@@ -415,11 +415,18 @@ def test_round_for_phase_marks_infeasible(tmp_path):
     rows = Rows(study)
     rows.base()
     screen_all(rows, study)
-    m = dict(effect_metrics(0.4, 10), env_3h_max_U=5.0)                   # far outside the envelope
+    m = dict(effect_metrics(0.4, 10), env_3h_max_U=5.0)                   # far outside the envelope on one day
     rows.add({AMAX: 1.3}, DAYS[0], m)
     rnd = search.round_for_phase(study, rows.rows, 0, round_no=2, settings=SETTINGS)
     v = next(v for v in rnd.variants if v.params == {AMAX: 1.3})
-    assert v.verdict == 'infeasible' and 'out of envelope' in v.why and v.feasible is False
+    # E is a validity envelope: beyond it on some days only = envelope-limited, never ranked, the day listed
+    assert v.verdict == 'envelope-limited' and v.feasible is False and v.rank is None
+    assert DAYS[0] in v.envelope['days'] and v.envelope['n_days'] == 1 and DAYS[0] in v.why
+    m2 = dict(effect_metrics(0.4, 10), smb_over_maxbolus_loops=2)         # a hard check fails: infeasible
+    rows.add({AMAX: 1.3}, DAYS[0], m2)
+    rnd = search.round_for_phase(study, rows.rows, 0, round_no=2, settings=SETTINGS)
+    v = next(v for v in rnd.variants if v.params == {AMAX: 1.3})
+    assert v.verdict == 'infeasible' and 'maxBolus' in v.why and v.envelope is None
 
 
 # ----------------------------------------------------------------------------- phases, days

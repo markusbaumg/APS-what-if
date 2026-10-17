@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-17T01:40:04Z",
+ "generated": "2026-10-17T08:35:06Z",
  "results_dir": "results/example_2026-09-06",
  "sources": {
   "base": "results/example_2026-09-06/2026-09-06T06-00-00Z.base.csv",
@@ -26,8 +26,8 @@
  },
  "files": {
   "study.json": {
-   "bytes": 1950,
-   "sha1": "f0d22669006358b4b45ed6bb81f0bc172df32475"
+   "bytes": 1977,
+   "sha1": "f725f1b6263f7e36974c71a677415cbae950a024"
   },
   "STATE.json": {
    "bytes": 222,

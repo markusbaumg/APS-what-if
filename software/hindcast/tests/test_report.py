@@ -1255,11 +1255,13 @@ def test_question_earlier_carries_the_front_order_weights_and_a_missing_sensitiv
     assert pa['weights'] == {'rest': 2.0, 'lowside': 0.3} and pa['base'] == {'x': 0.0, 'y': 0.0, 'z': 0.0}
     assert pa['scalar_text'] == 'rise_vs_base_U - 2.0 x max(rest_vs_base_U, 0) - 0.3 x lowside_flags'
     pts = {p['variant']: p for p in pa['points']}
-    assert len(pts) == 4 and pa['front'] and all(pts[p['variant']]['front'] for p in pa['order'] if p['front'])
-    # the marked front is the metrics front of the three objectives, coordinates are the means it used
+    assert len(pts) == 4 and all(pts[p['variant']]['front'] for p in pa['order'] if p['front'])
+    # the marked front is the metrics front of the three objectives among the steps (rise above the floor: one 6 h
+    # morning with a 1.38 U floor on rise has none, so the front is empty), coordinates are the means it used
     from hindcast import metrics as hm
-    feas = {n: (-p['x'], p['y'], p['z']) for n, p in pts.items() if p['feasible']}
+    feas = {n: (-p['x'], p['y'], p['z']) for n, p in pts.items() if p['feasible'] and p['step']}
     assert sorted(hm.pareto_front(feas)) == sorted(n for n, p in pts.items() if p['front'])
+    assert all(p['step'] for p in pa['points'] if p['front']) and 'among the' in pa['order_text']
     assert all(p['y'] >= 0 for p in pa['points'])
     # the review order: front first, then by the scalar; the leaderboard ranks follow it
     ranks = [o['rank'] for o in pa['order']]

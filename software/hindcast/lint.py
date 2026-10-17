@@ -21,7 +21,8 @@ Kinds (`KINDS`):
                 amount in units however small, no U per day or share of the TDD, no glucose value or unit, no loop
                 count; direction words and floor multiples ('2.9 x the floor') pass
     'line'      a one-line chat / status string: vocabulary rules only
-    'baseline'  the observed baseline (hindcast/baseline.py, docs/hindcast/BASELINE.md; GOAL.md): vocabulary rules,
+    'baseline'  the observed baseline (hindcast/baseline.py, software/studies/BASELINE.md - git-ignored; docs/ only
+                with `hc baseline --write docs --public`; GOAL.md): vocabulary rules,
                 except that 'time in range' / TIR passes on a line that also says 'observed' (an observed CGM
                 statistic is a fact about the past, never a counterfactual); no privacy rules, the honesty paragraph
                 only when asked for (require_honesty=True; baseline.lint_markdown asks for it on the whole page)

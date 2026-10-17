@@ -26,7 +26,7 @@ unless `--allow-partial`.
 Character record (numbers of the day, written into <day>.meta.json, shown as the day strip on the page; mg/dl):
     loops, tdd_U (= bolus_U + basal_U), bolus_U, smb_U, basal_U, carbs_g, cgm_values, bg_mean, pct_gt180, pct_lt70,
     tt_minutes, tt_parity_smb_off_pct, cgm_gap_min, cgm_gaps (count >= GAP_MIN), cgm_gap_looped_min, phone_silent_min,
-    cgm_note, loop_gap_min, activity_min, duplicate_pct, autoISF_versions
+    cgm_note, loop_gap_min, loop_hours, activity_min, duplicate_pct, autoISF_versions
 The CGM numbers (cgm_values, bg_mean, the percentages, cgm_gap_min, cgm_gaps) come from the sgv entries of the
 UTC day, read from the cache file entries/<day>.json when the caller passes `cache_root` (freeze, recompute), else
 from the source's `entries` (only the entries inside the day count, the 8 h look-back is ignored). Gaps are
@@ -41,7 +41,12 @@ replay loses no loop there), the rest is time the phone looped without CGM (thos
 real loss). cgm_gap_looped_min is the largest looped part of one CGM gap, phone_silent_min the silent minutes of all
 CGM gaps; without a devicestatus file cgm_gap_looped_min = cgm_gap_min and phone_silent_min None. loop_gap_min is the
 longest pause between the day's replayed loop runs: the phone not looping (off, pump offline, closed loop paused)
-is a different thing from a CGM gap and is never a quarantine reason.
+is a different thing from a CGM gap and is never a quarantine reason by itself. loop_hours is the phone's loop
+coverage of the UTC day: each loop run stands for the time to the next one, at most LOOP_DT_CAP_MS (5 min), the last
+one up to 24:00Z (the definition of hindcast.baseline loop_hours); the runs are those of the cached devicestatus
+files (every run, also the ones the replay drops) when the caller passes `cache_root` and the file exists, else the
+replayed loops loop_gap_min is computed from. A day the phone looped only part of (2026-10-03: 3.5 h) is not a day:
+its TDD and its 3 h windows are a fraction of the envelope's, so every aggressive variant leaves the envelope there.
 `tdd_U` is insulin the pump delivered as recorded in Nightscout (boluses + temp basals + scheduled basal where no
 temp ran), not the phone's own TDD statistic. The character describes the day; it is never a score and never
 inferred into chips - day chips (`workday`, `sport`) are typed by the user in study.json (DESIGN.md section 4.5).
@@ -52,7 +57,8 @@ Confounders (strings for the badges; local time of the phone from the records' u
     was silent; clipped
     at the UTC day edges; 'no CGM file' without entries), the silent parts of CGM gaps ('no CGM and no loop N min
     00h20-02h20 local (no CGM, no loop)'; never a quarantine reason by itself), the phone not looping >= LOOP_GAP_MIN
-    minutes ('phone not looping for N min 07h34-17h44 local'),
+    minutes ('phone not looping for N min 07h34-17h44 local'), a loop coverage below LOOP_HOURS_BADGE (20 h:
+    'looped N.N h'),
     autoISF version
     changes inside the day (H-712: the smoother changed with
     3.2.1), Profile Switches with a percentage or time shift, Temporary Targets longer than LONG_TT_MIN.
@@ -73,7 +79,10 @@ status.json, excluded from scoring, never hidden - when any of these holds:
     3. ns_settings.json `profile_history` records a change INSIDE the day of a key the study searches (the phone's
        own value of that key is not one value on that day),
     4. the loop counts of the day's trials differ across variants (state leaked between in-process replays, or a
-       failed run; DESIGN.md section 5.1 makes this a hard stop as well).
+       failed run; DESIGN.md section 5.1 makes this a hard stop as well),
+    5. partial day: the phone's loop coverage `loop_hours` is below `loop_hours_min` (PARTIAL_DAY_HOURS, 16 h; an
+       old meta without the key falls back to `loop_gap_min` > PARTIAL_DAY_GAP_H, 8 h, of one stretch without a
+       loop run).
 Thresholds come from study.json (`objective.quarantine`, contracts.Objective) with QUARANTINE_THRESHOLDS as the
 defaults. `quarantine_reasons()` judges one day from the pieces, `quarantine_from_trials()` collects the pieces for a
 study from its trial rows and frozen metas, `apply_quarantine()` sets the StudyDay roles, `quarantine_listing()`
@@ -107,6 +116,9 @@ LONG_TT_MIN = 120                                      # a Temporary Target long
 LOW_MGDL = 70
 HIGH_MGDL = 180
 LOOP_DT_CAP_MS = 5 * MIN_MS                            # a loop counts for at most 5 min of the day
+PARTIAL_DAY_HOURS = 16.0                               # loop coverage below this: a partial day, quarantined
+PARTIAL_DAY_GAP_H = 8.0                                # old metas without loop_hours: one loop gap longer than this
+LOOP_HOURS_BADGE = 20.0                                # loop coverage below this: a 'looped N.N h' badge
 
 _DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _re_smb_parity_off = re.compile(r'^SMB disabled; current target ')
@@ -508,6 +520,26 @@ def split_cgm_gaps(cgm_gaps_, stamps, min_gap_min=GAP_MIN):
             'phone_silent_min': sum(m for _, _, m in silent)}
 
 
+def loop_hours(stamps, end_ms):
+    """Hours of the day the phone looped: each run (sorted ms) stands for the time to the next one, at most
+    LOOP_DT_CAP_MS, the last one up to `end_ms` (the same number as hindcast.baseline loop_hours)."""
+    stamps = sorted(stamps)
+    total = 0
+    for a, b in zip(stamps, stamps[1:] + [end_ms]):
+        total += min(max(0, b - a), LOOP_DT_CAP_MS)
+    return round(total / 3600000.0, 1)
+
+
+def day_loop_hours(day, loops, cache_root=None):
+    """loop_hours of the day from the cached devicestatus runs (with `cache_root` and a devicestatus file), else
+    from the replayed `loops` (their now_ms)."""
+    start, end = day_bounds(day)
+    stamps = day_loop_stamps(day, cache_root=cache_root) if cache_root is not None else None
+    if stamps is None:
+        stamps = sorted({loop['now_ms'] for loop in loops if loop.get('now_ms') is not None and start <= loop['now_ms'] < end})
+    return loop_hours(stamps, end)
+
+
 def loop_gaps(day, loops, min_gap_min=LOOP_GAP_MIN):
     """Pauses between the day's loop runs (the phone not looping), day edges included."""
     start, end = day_bounds(day)
@@ -664,6 +696,7 @@ def character(day, src, loops, cache_root=None):
     rec['tt_parity_smb_off_pct'] = round(100.0 * parity_off / n, 1) if n else None
 
     rec['loop_gap_min'] = max([m for _, _, m in loop_gaps(day, loops)], default=0)
+    rec['loop_hours'] = day_loop_hours(day, loops, cache_root)
 
     act = 0.0
     for loop, dt in zip(loops, loop_intervals_min(loops)):
@@ -730,6 +763,9 @@ def confounders(day, settings, src, loops, min_gap_min=GAP_MIN, cache_root=None)
         out.append(f'no CGM and no loop {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
     for a, b, minutes in loop_gaps(day, loops):
         out.append(f'phone not looping for {minutes} min {badge_hhmm(a, off)}-{badge_hhmm(b, off)} local')
+    hours = day_loop_hours(day, loops, cache_root)
+    if hours < LOOP_HOURS_BADGE:
+        out.append(f'looped {hours:.1f} h')
     last_v = None
     for loop in loops:
         v = loop.get('autoISF_version')
@@ -778,7 +814,7 @@ def summarize(meta):
 
 # ----------------------------------------------------------------------------- quarantine (H-204)
 
-QUARANTINE_THRESHOLDS = {'agreement_pct_min': 94.0, 'cgm_gap_max_min': 120.0}
+QUARANTINE_THRESHOLDS = {'agreement_pct_min': 94.0, 'cgm_gap_max_min': 120.0, 'loop_hours_min': PARTIAL_DAY_HOURS}
 QUARANTINE_ROLE = 'quarantined'
 
 
@@ -839,7 +875,8 @@ def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, 
     `base_metrics` the base trial's metrics dict (agreement_pct), `meta` the frozen meta (character.cgm_gap_looped_min,
     character.cgm_gap_min for an old meta or a day without devicestatus) or `entries` raw CGM entries (the gap is
     measured here, clipped at the day edges like cgm_day(); with `devicestatus` records only its looped part counts),
-    `settings` + `searched_keys` for the profile_history rule,
+    `settings` + `searched_keys` for the profile_history rule, `meta` also for the partial-day rule
+    (character.loop_hours; an old meta without it: character.loop_gap_min),
     `loop_counts` {variant: loops} or a list of loop counts of the day's trials. Strings are lint-clean for the kinds
     'line' and 'issue'."""
     thr = quarantine_thresholds(None, thresholds)
@@ -866,6 +903,15 @@ def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, 
     if isinstance(gap, (int, float)) and not isinstance(gap, bool) and gap > thr['cgm_gap_max_min']:
         out.append(f'CGM gap {_fmt_minutes(gap)} min{" with the phone looping" if looped else ""} '
                    f'(threshold {thr["cgm_gap_max_min"]:g} min)')
+    if isinstance(meta, dict):
+        ch = meta.get('character') or {}
+        hours, gap_min = ch.get('loop_hours'), ch.get('loop_gap_min')
+        if _num(hours):
+            if hours < thr['loop_hours_min']:
+                out.append(f'partial day: the phone looped {hours:.1f} h of 24 (threshold {thr["loop_hours_min"]:g} h)')
+        elif _num(gap_min) and gap_min > PARTIAL_DAY_GAP_H * 60:
+            out.append(f'partial day: the phone did not loop for {gap_min / 60.0:.1f} h in one stretch '
+                       f'(old meta without loop hours; threshold {PARTIAL_DAY_GAP_H:g} h)')
     for when, key, old, new in history_hits(settings, day, searched_keys):
         out.append(f'profile_history: {key} changed {_fmt(old)}->{_fmt(new)} inside the day and {key} is a searched key')
     counts = loop_counts.values() if isinstance(loop_counts, dict) else (loop_counts or [])
@@ -873,6 +919,10 @@ def quarantine_reasons(day, settings=None, searched_keys=(), base_metrics=None, 
     if len(counts) > 1:
         out.append('loop counts differ across the variants of this day (state leaked between replays, or a failed run)')
     return out
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def _is_base_row(row):
@@ -965,7 +1015,8 @@ def quarantine_listing(reasons_by_day, thresholds=None):
             for i, r in enumerate(reasons):
                 lines.append(f'  {d if i == 0 else " " * len(d)}  {r}')
     lines.append(f'  thresholds: base agreement >= {thr["agreement_pct_min"]:g} %, CGM gap with the phone looping <= {thr["cgm_gap_max_min"]:g} min, '
-                 f'no profile_history change of a searched key inside the day, equal loop counts across variants')
+                 f'no profile_history change of a searched key inside the day, equal loop counts across variants, '
+                 f'the phone looping >= {thr["loop_hours_min"]:g} h of the day')
     return lines
 
 

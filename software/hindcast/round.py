@@ -45,10 +45,20 @@ days out; they differ on purpose, and the page labels which day set each number 
 Verdict per variant (contracts.VERDICTS; the first rule that applies wins)
     base          the base replay itself (the floor)
     pending       some search day has no row yet and none failed: the variant is still being evaluated
-    infeasible    metrics.feasibility_day() names a reason on some day (P, envelope E, maxBolus, cap >= 50 %, loop
-                  count), or the replay failed on a day (the error text is the reason)
+    envelope-limited  every hard check (P, maxBolus, cap >= 50 %, loop count) passes on every search day, but the
+                  validity envelope E (DEFAULT_OBJECTIVE envelope: 1 U vs base in 3 h, 15 % of the phone's TDD) is
+                  left on some - not all - of them. E is a validity envelope, not a safety rule: on those days the
+                  replay cannot judge, and for the end goal they are the information (where a larger step would have
+                  acted). Never ranked or recommended; round.json lists the days (Candidate.envelope: the signed sum
+                  of the largest 3 h window per day, the largest of them, how many days stayed inside), the page and
+                  the card ('beyond what the replay can judge on: 2026-09-04 (+1.6 U in 3 h), ...') show them
+    infeasible    metrics.feasibility_day() names a hard reason on some day (P, maxBolus, cap >= 50 %, loop count), the
+                  envelope E is left on EVERY search day, or the replay failed on a day (the error text is the reason)
     tie           indistinguishable from base within TIE_FACTOR x floor on every component and every day (checked
-                  before the recommended verdict: a tie is never recommended for review, DESIGN.md 5.3 rule 4)
+                  before the recommended verdict: a tie is never recommended for review, DESIGN.md 5.3 rule 4);
+                  question earlier / gentler also: a variant that is no step (rise_vs_base_U not beyond the mean
+                  per-day floor_rise_U in the question's direction: no more insulin on rises for earlier, no less for
+                  gentler) - never a candidate, never on the front, never validated (no_step_why)
     recommended   validate round: metrics.validate_variants() (see above); else metrics.recommend(): feasible on all
                   days, top-3 on >= 80 % of the leave-one-day-out folds, same sign of the primary effect on >= 80 %
                   of days, within the top 5 on the hold-out days
@@ -61,9 +71,10 @@ Verdict per variant (contracts.VERDICTS; the first rule that applies wins)
 word is 'recommended for review', never 'recommended' alone). round.json keeps the contract words.
 
 round.json (contracts.Round, <= 2 KB per variant): `variants` = one Candidate per variant (base first, then the
-review order / ranked order, then infeasible and pending), `front` = the review order (explore) or the Pareto
-front (earlier / gentler) as vhashes, `dead_parameters`, `floors` per day (floors_from_base, rounded), `notes`.
-Candidate.effect carries the EFFECT_KEYS numbers (rounded to 3 dp); Candidate.flags carries the metric flags of
+review order / ranked order, then envelope-limited, infeasible and pending), `front` = the review order (explore) or
+the Pareto front among the steps (earlier / gentler) as vhashes, `dead_parameters`, `floors` per day (floors_from_base, rounded), `notes`.
+Candidate.effect carries the EFFECT_KEYS numbers (rounded to 3 dp; base carries the manual-bolus keys only - its
+coverage is 0 by construction -, every variant `manual_days`: how many search days carry the manual-bolus keys); Candidate.flags carries the metric flags of
 the trial plus the ranks that the contract has no field for, as 'rank:holdout=<n>' and 'rank:<tag>=<n>';
 Candidate.tie_with lists up to TIE_WITH_MAX vhashes the variant cannot be told from (computed for the first
 TIE_SCAN variants of the order against every other). status.json is then rebuilt by study.build_status(), which
@@ -97,7 +108,10 @@ WHY_MAX = 300                            # characters of a Candidate.why
 EFFECT_KEYS = ('rise_vs_base_U', 'rest_vs_base_U', 'delta_vs_base_U', 'changed_vs_base', 'smb_more_vs_base',
                'smb_less_vs_base', 'lowside_flags', 'prehypo_extra_U', 'env_3h_max_U', 'env_day_pct_tdd',
                'cap_binding_pct', 'max_single_smb_U', 'zero_temp_vs_base', 'floor_multiple', 'review_score',
-               'manual_boluses', 'manual_U', 'coverage_U_vs_base', 'boluses_preempted')   # last: status.json keeps 4
+               'manual_boluses', 'manual_U', 'coverage_U_vs_base', 'boluses_preempted',
+               'manual_days')                    # status.json keeps the first 4
+MANUAL_EFFECT_KEYS = ('manual_boluses', 'manual_U', 'coverage_U_vs_base', 'boluses_preempted')
+ENVELOPE_DAYS_MAX = M.ENVELOPE_DAYS_MAX  # days listed per envelope-limited variant in round.json (size limit)
 FLOOR_KEYS = ('floor_rise_U', 'floor_rest_U', 'floor_total_U', 'floor_smb_U', 'floor_tbr_U', 'floor_P_U',
               'floor_loops', 'agreement_pct', 'loops')
 HOLDOUT = 'holdout'
@@ -191,16 +205,36 @@ class VariantReport:
     dead_keys: List[str] = field(default_factory=list)            # the dead parameter(s) a 'dead' variant moves
     phone: Dict[str, Any] = field(default_factory=dict)           # searched key -> the phone's value
     flags: List[str] = field(default_factory=list)
+    envelope_limited: bool = False                                # metrics.VariantSummary.envelope_limited
+    envelope_days: Dict[str, dict] = field(default_factory=dict)  # search day beyond E -> metrics.envelope_day_record
+    step: Optional[bool] = None                                   # earlier / gentler: a step of the question
+    step_floor_U: Optional[float] = None                          # the floor on rises the step had to clear
+
+    @property
+    def manual_days(self):
+        """How many of the search days carry the manual-bolus keys (rows written before the metric existed do not)."""
+        return len([d for d in self.days if _num((self.per_day.get(d) or {}).get('manual_boluses'))])
 
     @property
     def effect(self):
         out = {}
         for k in EFFECT_KEYS:
             v = (self.review_score if k == 'review_score' else
-                 (floor_multiple_of(self) if self.floor_multiples else None) if k == 'floor_multiple' else self.mean.get(k))
+                 (floor_multiple_of(self) if self.floor_multiples else None) if k == 'floor_multiple' else
+                 self.manual_days if k == 'manual_days' else self.mean.get(k))
+            if k == 'review_score' and self.vhash == BASE_VHASH:
+                continue                                          # base: the manual keys only (it is the floor)
             if _num(v):
                 out[k] = _r3(v)
         return out
+
+    @property
+    def envelope(self):
+        """round.json's Candidate.envelope of an envelope-limited variant (None otherwise): the days beyond E (largest
+        3 h window first, at most ENVELOPE_DAYS_MAX), their count and the largest 3 h window vs base."""
+        if not self.envelope_limited:
+            return None
+        return M.envelope_summary(self.envelope_days, len(self.days), ENVELOPE_DAYS_MAX)
 
     def changed(self):
         """The parameters the variant moves away from the phone's value (name -> value)."""
@@ -233,9 +267,10 @@ class Analysis:
         return self.reports.get(BASE_VHASH)
 
     def ordered(self, include_base=False):
-        """Reports in the order round.json lists them: base, order, infeasible, pending."""
+        """Reports in the order round.json lists them: base, order, envelope-limited, infeasible, pending."""
         rest = [vh for vh in self.reports if vh != BASE_VHASH and vh not in self.order]
-        rest.sort(key=lambda vh: (self.reports[vh].verdict != 'infeasible', self.reports[vh].variant))
+        group = {'envelope-limited': 0, 'infeasible': 1}
+        rest.sort(key=lambda vh: (group.get(self.reports[vh].verdict, 2), self.reports[vh].variant))
         out = ([BASE_VHASH] if include_base and BASE_VHASH in self.reports else []) + list(self.order) + rest
         return [self.reports[vh] for vh in out]
 
@@ -336,7 +371,8 @@ def floor_multiple_of(report, component=None, floors=None):
 
 def earlier_why(report):
     """The candidate `why` of question earlier (GOAL.md): 'more insulin asked on rises +0.80 U/day (4.0 x floor);
-    extra elsewhere 0.10 U/day; low-side flags 0.3/day; on the Pareto front, scalar +0.53, over 3 days'. Decision
+    extra elsewhere 0.10 U/day; low-side flags 0.3/day; on the Pareto front, scalar +0.53, over 3 days'. Only a
+    step reaches it (rise above the floor; no_step_why() otherwise), so the amount is never negative. Decision
     level: what the loop would have asked, never a glucose outcome."""
     m = report.mean
     rise = m.get('rise_vs_base_U', 0.0) or 0.0
@@ -345,16 +381,67 @@ def earlier_why(report):
     n = len(report.days)
     pos = 'on the Pareto front' if report.pareto else 'behind the Pareto front'
     scalar = f', scalar {report.scalar:+.2f}' if _num(report.scalar) else ''
-    return (f'more insulin asked on rises {rise:+.2f} U/day ({floor_multiple_of(report, "rise_vs_base_U"):.1f} x floor); '
+    return (f'more insulin asked on rises {rise:+.2f} U/day '
+            f'({floor_multiple_of(report, "rise_vs_base_U"):.1f} x floor); '
             f'extra elsewhere {max(rest, 0.0):.2f} U/day; low-side flags {low:.1f}/day; {pos}{scalar}, over {n} '
             f'day{"s" if n != 1 else ""}')
 
 
+def gentler_why(report):
+    """The candidate `why` of question gentler, the mirror of earlier_why: 'less insulin asked on rises 0.80 U/day
+    (4.0 x floor); elsewhere -0.10 U/day; zero temps +0.3/day vs base; on the Pareto front, scalar -0.83, over 3
+    days'."""
+    m = report.mean
+    rise = m.get('rise_vs_base_U', 0.0) or 0.0
+    rest = m.get('rest_vs_base_U', 0.0) or 0.0
+    zt = max(m.get('zero_temp_vs_base', 0.0) or 0.0, 0.0)
+    n = len(report.days)
+    pos = 'on the Pareto front' if report.pareto else 'behind the Pareto front'
+    scalar = f', scalar {report.scalar:+.2f}' if _num(report.scalar) else ''
+    return (f'less insulin asked on rises {max(-rise, 0.0):.2f} U/day '
+            f'({floor_multiple_of(report, "rise_vs_base_U"):.1f} x floor); elsewhere {rest:+.2f} U/day; '
+            f'zero temps {zt:+.1f}/day vs base; {pos}{scalar}, over {n} day{"s" if n != 1 else ""}')
+
+
+def no_step_why(report, question):
+    """The tie `why` of a variant that is not a step of question earlier / gentler: it asks for no more (earlier) or
+    no less (gentler) insulin on rises than the floor lets one see, or it goes the other way."""
+    rise = report.mean.get('rise_vs_base_U', 0.0) or 0.0
+    fm = floor_multiple_of(report, 'rise_vs_base_U')
+    floor = report.step_floor_U if _num(report.step_floor_U) else M.effective_floor(None)
+    word, sign = ('earlier', 1) if question == 'earlier' else ('gentler', -1)
+    more = 'more' if sign > 0 else 'less'
+    n = len(report.days)
+    over = f'over {n} day{"s" if n != 1 else ""}'
+    if sign * rise > 0:
+        return (f'not an {word} step: on rises it asks for {abs(rise):.2f} U/day {more} than base, inside the floor of '
+                f'{floor:.2f} U/day ({fm:.1f} x floor), {over}; a tie for this question')
+    other = 'less' if sign > 0 else 'more'
+    if abs(rise) <= floor:
+        return (f'not an {word} step: asks for no {more} insulin on rises than base ({abs(rise):.2f} U/day {other}, '
+                f'inside the floor of {floor:.2f} U/day), {over}; a tie for this question')
+    return (f'not an {word} step: on rises it asks for {abs(rise):.2f} U/day {other} than base ({fm:.1f} x floor), '
+            f'the other direction, {over}; a tie for this question')
+
+
+def envelope_why(report, question='explore'):
+    """The `why` of an envelope-limited variant (metrics.envelope_limited_text over its search days); question
+    earlier / gentler: a variant that goes the other way on rises says so (it is no step of the question either)."""
+    text = M.envelope_limited_text(report.envelope_days, limit=4)
+    if report.step is False and question in M.QUESTION_DIRECTION:
+        rise = report.mean.get('rise_vs_base_U', 0.0) or 0.0
+        text += (f'; on rises it asks for {abs(rise):.2f} U/day {"more" if rise > 0 else "less"} than base: no '
+                 f'{question} step either')
+    return text
+
+
 def candidate_why(report, question='explore'):
     """The candidate verdict's `why`: direction, size and floor multiple (floor_multiple_of) of the primary
-    component, days; question earlier: earlier_why()."""
+    component, days; question earlier: earlier_why(); gentler: gentler_why()."""
     if question == 'earlier':
         return earlier_why(report)
+    if question == 'gentler':
+        return gentler_why(report)
     comp = report.review_component
     v = report.mean.get(comp, 0.0) or 0.0
     other = 'rest_vs_base_U' if comp == 'rise_vs_base_U' else 'rise_vs_base_U'
@@ -388,6 +475,8 @@ def verdict_of(report, dead_keys, search_days, objective=None, question='explore
     if missing and all(set(r) <= {'not replayed on this day'} for r in report.infeasible_reasons.values()):
         return 'pending', f'replayed on {len(report.days)} of {len(search_days)} search days; verdict pending'
     if not report.feasible:
+        if report.envelope_limited:                          # E is a validity envelope, not a safety rule
+            return 'envelope-limited', envelope_why(report, question)
         return 'infeasible', _infeasible_why(report)
     tail = ''
     if report.validation and report.validation.get('reasons'):
@@ -400,6 +489,8 @@ def verdict_of(report, dead_keys, search_days, objective=None, question='explore
     if report.tie_with_base:                                 # rule 4 before rule 5: a tie is never recommended
         return dead or ('tie', 'indistinguishable from base within the noise floor on every component and every day'
                         + tail)
+    if report.step is False and question in M.QUESTION_DIRECTION:   # not an earlier / gentler step: never a candidate
+        return dead or ('tie', no_step_why(report, question))
     if report.recommended and report.validation:
         v = report.validation
         share = v.get('fold_share')
@@ -529,6 +620,11 @@ def analyze(study, rows, settings=None, now=None):
             rep.pareto, rep.scalar, rep.rank = v.pareto, v.scalar, v.rank
             rep.recommended, rep.recommend_reasons = v.recommended_for_review, list(v.recommend_reasons)
             rep.flags = list(v.flags)
+            rep.envelope_limited, rep.envelope_days = v.envelope_limited, dict(v.envelope_days)
+            rep.step, rep.step_floor_U = v.step, v.step_floor_U
+        elif name == M.BASE_VARIANT:                         # base: the manual-bolus keys of its search days (0 coverage)
+            agg = M.aggregate_days({d: m for d, m in per_day.items() if d in search_days})['mean']
+            rep.mean = {k: agg[k] for k in MANUAL_EFFECT_KEYS if k in agg}
         if holdout_ranking is not None and name != M.BASE_VARIANT:
             rep.holdout_rank = _rank_in(holdout_ranking.order, name)
             rep.holdout_total = len(holdout_ranking.order)
@@ -570,7 +666,8 @@ def candidate_of(report):
                      params=dict(report.params), rank=report.rank, days=len(report.days),
                      feasible=report.feasible, effect=report.effect, flags=flags,
                      tie_with=list(report.tie_with[:TIE_WITH_MAX]),
-                     validation=dict(report.validation) if report.validation else None)
+                     validation=dict(report.validation) if report.validation else None,
+                     envelope=report.envelope)
 
 
 def round_sensitivity(analysis):
@@ -618,6 +715,21 @@ def build_round(study_dir, round_no=None, phase=None, settings=None, now=None, s
                      f'hold-out day(s), {len(val.folds)} leave-one-day-out folds, Kendall tau search vs hold-out '
                      f'{tau}; {len(val.recommended)} recommended for review (a caveat over '
                      f'{len(val.scored_days)} days, not a statistic)')
+    if analysis.question in M.QUESTION_DIRECTION:
+        rk = analysis.ranking
+        steps = len(rk.order) - len(rk.no_step)
+        word = 'more' if analysis.question == 'earlier' else 'less'
+        notes.insert(0, f'{analysis.question}: {steps} of {len(rk.order)} feasible variant(s) ask for {word} insulin on '
+                        f'rises than the floor and are steps; the Pareto front ({len(rk.front)}) is taken among them, '
+                        f'the other {len(rk.no_step)} are ties for this question')
+        ph = validate_phase(analysis.study)
+        top_note = M.validate_top_note(rk, ph.top) if ph is not None else None
+        if top_note:
+            notes.insert(1, top_note)
+    n_env = len(analysis.ranking.envelope_limited)
+    if n_env:
+        notes.append(f'{n_env} envelope-limited variant(s): every hard check passes on every day, beyond the validity '
+                     'envelope on some days; never ranked, listed with those days')
     doc = Round(round=int(round_no), phase=str(phase), started=started or now or contracts.now_iso(),
                 finished=now or contracts.now_iso(), trials=analysis.trials,
                 variants=[candidate_of(r) for r in analysis.ordered(include_base=True)],

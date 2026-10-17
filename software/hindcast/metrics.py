@@ -790,36 +790,64 @@ def _objective(objective: Optional[dict]) -> dict:
     return cfg
 
 
-def feasibility_day(metrics: dict, base_metrics: dict, floors: dict, objective: Optional[dict] = None) -> List[str]:
-    """the infeasibility reasons of one trial on one day (empty = feasible), DESIGN.md 5.3 rule 1:
-    P <= P_base + floor_P; inside the envelope E; max_single_smb_U <= the phone's maxBolus; cap_binding_pct < 50 %;
-    loop count equal to base.  Reasons are short labels for the greyed leaderboard row."""
+ENVELOPE_PREFIX = 'out of envelope'                     # the reason text of an envelope E breach (feasibility_split)
+
+
+def feasibility_split(metrics: dict, base_metrics: dict, floors: dict, objective: Optional[dict] = None
+                      ) -> Tuple[List[str], List[str]]:
+    """(hard reasons, envelope reasons) of one trial on one day, DESIGN.md 5.3 rule 1. Hard: loop count equal to
+    base, a failed replay, P <= P_base + floor_P, max_single_smb_U <= the phone's maxBolus, cap_binding_pct < 50 %.
+    Envelope E (at most max_3h_U vs base in any 3 h window, at most max_day_pct_tdd of the phone's TDD): a VALIDITY
+    envelope, not a safety rule - beyond it the replay cannot judge, so a variant that breaks only E on some days is
+    'envelope-limited' (rank_variants), not infeasible. Reasons are short labels for the greyed leaderboard row."""
     cfg = _objective(objective)
-    reasons = []
+    hard, env = [], []
     if metrics.get('loops') != base_metrics.get('loops'):
-        reasons.append(f'loop count {metrics.get("loops")} differs from base {base_metrics.get("loops")}')
+        hard.append(f'loop count {metrics.get("loops")} differs from base {base_metrics.get("loops")}')
     if 'error' in metrics or metrics.get('loops') in (None, 0):
-        reasons.append('failed replay')
-        return reasons
+        hard.append('failed replay')
+        return hard, env
     p = metrics.get('prehypo_extra_U')
     if p is not None:
         p_base = base_metrics.get('prehypo_extra_U') or 0.0
         limit = p_base + effective_floor(floors.get('floor_P_U'))
         if p > limit + 1e-9:
-            reasons.append(f'asks for {p:.2f} U more than base in the two hours before a recorded low (limit {limit:.2f} U)')
+            hard.append(f'asks for {p:.2f} U more than base in the two hours before a recorded low (limit {limit:.2f} U)')
     env3 = metrics.get('env_3h_max_U')
     if env3 is not None and env3 > cfg['envelope']['max_3h_U'] + 1e-9:
-        reasons.append(f'out of envelope: {env3:.2f} U vs base in a 3 h window (limit {cfg["envelope"]["max_3h_U"]} U)')
+        env.append(f'{ENVELOPE_PREFIX}: {env3:.2f} U vs base in a 3 h window (limit {cfg["envelope"]["max_3h_U"]} U)')
     envd = metrics.get('env_day_pct_tdd')
     if envd is not None and envd > cfg['envelope']['max_day_pct_tdd'] + 1e-9:
-        reasons.append(f'out of envelope: {envd:.1f} % of the phone\'s TDD vs base (limit {cfg["envelope"]["max_day_pct_tdd"]} %)')
+        env.append(f'{ENVELOPE_PREFIX}: {envd:.1f} % of the phone\'s TDD vs base (limit {cfg["envelope"]["max_day_pct_tdd"]} %)')
     over = metrics.get('smb_over_maxbolus_loops')
     if over:
-        reasons.append(f'emulated SMB above the phone\'s maxBolus in {over} loops')
+        hard.append(f'emulated SMB above the phone\'s maxBolus in {over} loops')
     cap = metrics.get('cap_binding_pct')
     if cap is not None and cap >= cfg['feasible']['cap_binding_max_pct']:
-        reasons.append(f'factor on a cap in {cap:.1f} % of loops (not really tested; limit {cfg["feasible"]["cap_binding_max_pct"]} %)')
-    return reasons
+        hard.append(f'factor on a cap in {cap:.1f} % of loops (not really tested; limit {cfg["feasible"]["cap_binding_max_pct"]} %)')
+    return hard, env
+
+
+def feasibility_day(metrics: dict, base_metrics: dict, floors: dict, objective: Optional[dict] = None) -> List[str]:
+    """the infeasibility reasons of one trial on one day (empty = feasible), DESIGN.md 5.3 rule 1:
+    P <= P_base + floor_P; inside the envelope E; max_single_smb_U <= the phone's maxBolus; cap_binding_pct < 50 %;
+    loop count equal to base. feasibility_split() keeps the envelope reasons apart (envelope-limited)."""
+    hard, env = feasibility_split(metrics, base_metrics, floors, objective)
+    if 'failed replay' in hard:
+        return hard
+    head = [r for r in hard if r.startswith('loop count') or r.startswith('asks for')]
+    return head + env + [r for r in hard if r not in head]
+
+
+def envelope_day_record(metrics: dict, reasons: Sequence[str]) -> dict:
+    """What an envelope-limited variant reports for one day beyond E: the signed sum of its largest 3 h window vs
+    base (env_3h_signed_U, else env_3h_max_U), the share of the phone's TDD, the reason labels."""
+    signed = metrics.get('env_3h_signed_U')
+    if not isinstance(signed, (int, float)) or isinstance(signed, bool):
+        signed = metrics.get('env_3h_max_U')
+    pct = metrics.get('env_day_pct_tdd')
+    return {'env_3h_U': None if signed is None else round(float(signed), 3),
+            'env_day_pct_tdd': None if pct is None else round(float(pct), 1), 'reasons': list(reasons)}
 
 
 def aggregate_days(by_day: Dict[str, dict]) -> dict:
@@ -907,6 +935,11 @@ class VariantSummary:
     missing_days: List[str] = field(default_factory=list)
     floor_multiples: Dict[str, Optional[float]] = field(default_factory=dict)   # REVIEW_COMPONENTS -> floor_multiple()
     floor_multiple: float = 0.0                       # floor_multiples[review_component]: THE review order key (H-715)
+    envelope_limited: bool = False                    # passes every hard check on every day, beyond E on some (not all)
+    envelope_days: Dict[str, dict] = field(default_factory=dict)   # day beyond E -> envelope_day_record()
+    step: Optional[bool] = None                       # earlier / gentler: rise_vs_base_U beyond the floor in the
+                                                      # question's direction (None for explore)
+    step_floor_U: Optional[float] = None              # the mean over the scored days of the effective floor_rise_U
 
     def to_dict(self):
         return asdict(self)
@@ -925,6 +958,8 @@ class Ranking:
     front: List[str]
     rule_text: str
     warnings: List[str] = field(default_factory=list)
+    envelope_limited: List[str] = field(default_factory=list)      # subset of `infeasible`: only E broken, on some days
+    no_step: List[str] = field(default_factory=list)               # earlier / gentler: feasible, not a step (a tie)
 
     def to_dict(self):
         d = asdict(self)
@@ -991,6 +1026,8 @@ def rank_variants(rows: Iterable[dict], question: str = 'explore', objective: Op
         scores: List[float] = []
         comps: List[str] = []
         vflags = set()
+        hard_days: set = set()
+        env_days: Dict[str, dict] = {}
         for d in all_days:
             m = by_day.get(d)
             if m is None:
@@ -1003,6 +1040,11 @@ def rank_variants(rows: Iterable[dict], question: str = 'explore', objective: Op
             r = feasibility_day(m, base_days[d], floors[d], cfg)
             if r:
                 reasons[d] = r
+                hard, env = feasibility_split(m, base_days[d], floors[d], cfg)
+                if hard:
+                    hard_days.add(d)
+                elif env:
+                    env_days[d] = envelope_day_record(m, env)
             ties[d] = tie_with_base(m, floors[d])
             sc, comp = effect_over_floor(m, floors[d])
             scores.append(sc)
@@ -1015,37 +1057,79 @@ def rank_variants(rows: Iterable[dict], question: str = 'explore', objective: Op
             infeasible_reasons=reasons, tie_with_base=bool(ties) and all(ties.values()), tie_days=ties,
             review_score=statistics.fmean(scores) if scores else 0.0, review_component=comp,
             mean=agg['mean'], sign_frac=agg['sign_frac'], flags=sorted(vflags),
-            missing_days=[d for d in all_days if d not in by_day], floor_multiples=fms, floor_multiple=fm)
+            missing_days=[d for d in all_days if d not in by_day], floor_multiples=fms, floor_multiple=fm,
+            envelope_limited=bool(env_days) and set(reasons) == set(env_days) and len(env_days) < len(all_days),
+            envelope_days=env_days)
     feasible = [n for n, v in variants.items() if v.feasible]
     infeasible = [n for n, v in variants.items() if not v.feasible]
+    envelope_limited = [n for n in infeasible if variants[n].envelope_limited]
     front: List[str] = []
+    no_step: List[str] = []
     if question == 'explore':
         order = sorted(feasible, key=lambda n: review_order_key(variants[n]))
     else:
-        pts = {n: pareto_objectives(variants[n].mean, question) for n in feasible}
-        front = pareto_front(pts)
+        for n in variants:                           # envelope-limited too: the card says on which side it is
+            variants[n].step_floor_U = step_floor(floors, variants[n].days)
+            variants[n].step = is_step(variants[n].mean, question, variants[n].step_floor_U)
+        steps = [n for n in feasible if variants[n].step]
+        no_step = [n for n in feasible if not variants[n].step]
+        pts = {n: pareto_objectives(variants[n].mean, question) for n in steps}
+        front = pareto_front(pts)                    # among the steps only: a non-step is never on the front
         for n in feasible:
             variants[n].scalar = scalar_objective(variants[n].mean, question, cfg['scalar_weights'])
             variants[n].pareto = n in front
-        order = sorted(feasible, key=lambda n: (0 if n in front else 1, -(variants[n].scalar or 0.0), n))
+        order = sorted(feasible, key=lambda n: (0 if n in front else 1 if variants[n].step else 2,
+                                                -(variants[n].scalar or 0.0), n))
     for i, n in enumerate(order, 1):
         variants[n].rank = i
     return Ranking(question=question, objective=cfg, base_variant=base_variant, days=all_days, floors=floors,
                    variants=variants, order=order, infeasible=infeasible, front=front,
-                   rule_text=ranking_rule_text(question, cfg, floors), warnings=warnings)
+                   rule_text=ranking_rule_text(question, cfg, floors), warnings=warnings,
+                   envelope_limited=envelope_limited, no_step=no_step)
+
+
+QUESTION_DIRECTION = {'earlier': 1, 'gentler': -1}     # the fixed direction of rise_vs_base_U a step asks for
+
+
+def step_floor(floors: Dict[str, dict], days: Optional[Iterable[str]] = None) -> Optional[float]:
+    """The floor a step on rises must clear: the mean over the scored days (`days`, default every day of `floors`)
+    of the effective per-day floor_rise_U; None when no day has a floor."""
+    vals = [effective_floor(floors[d].get('floor_rise_U')) for d in (sorted(floors) if days is None else days)
+            if d in floors]
+    return statistics.fmean(vals) if vals else None
+
+
+def is_step(agg_mean: dict, question: str, floor_U: Optional[float]) -> Optional[bool]:
+    """Is a variant a step of the question (GOAL.md): earlier = rise_vs_base_U above the floor (the loop would
+    have asked for more insulin on rises than the noise floor allows to see), gentler = below -floor. A variant
+    inside the floor asks for no more (or no less) on rises and is a tie, never a front member. None for explore."""
+    if question not in QUESTION_DIRECTION:
+        return None
+    rise = agg_mean.get('rise_vs_base_U', 0.0) or 0.0
+    return QUESTION_DIRECTION[question] * rise > (floor_U if floor_U is not None else effective_floor(None)) + 1e-12
 
 
 def validate_top(ranking: Ranking, top: Optional[int] = None) -> List[str]:
-    """The top-N a validate round replays on the hold-out days (validate_variants, search.validate_points):
-    explore: the first N of the review order (review_order_key). earlier / gentler: the Pareto front members first
-    (in scalar order), then the best scalar of the rest, up to N in all - which is ranking.order[:N], because
-    rank_variants orders the front first and each group by the scalar. A front larger than N keeps its N best scalars."""
+    """THE top-N a validate round replays on the hold-out days (validate_variants and search.validate_points both
+    call this): explore: the first N of the review order (review_order_key). earlier / gentler: the Pareto front
+    members first (in scalar order), then the best scalar of the other steps, up to N in all; a variant that is not
+    a step (rise inside the floor, or the wrong direction) is never validated. N (phase.top) is applied after the
+    front: a front larger than N keeps its first N by the scalar, and validate_top_note() says so."""
     top = int(top or DEFAULT_VALIDATE_TOP)
     if ranking.question == 'explore':
         return list(ranking.order[:top])
     front = [n for n in ranking.order if n in set(ranking.front)]
-    rest = [n for n in ranking.order if n not in set(ranking.front)]
+    rest = [n for n in ranking.order if n not in set(ranking.front) and ranking.variants[n].step]
     return (front + rest)[:top]
+
+
+def validate_top_note(ranking: Ranking, top: Optional[int] = None) -> Optional[str]:
+    """The note of a validate round whose Pareto front is larger than N (earlier / gentler), else None."""
+    top = int(top or DEFAULT_VALIDATE_TOP)
+    if ranking.question == 'explore' or len(ranking.front) <= top:
+        return None
+    return (f'validate: the Pareto front has {len(ranking.front)} members, more than the top {top} the validate phase'
+            f' replays; the first {top} by the scalar were validated, the other {len(ranking.front) - top} were not')
 
 
 def primary_direction(question: str, mean_value) -> int:
@@ -1127,6 +1211,8 @@ def recommend(ranking: Ranking, folds: Dict[str, List[str]], holdout_order: Opti
                                f' (needs {share_pct(cfg["fold_share"])})')
         else:
             reasons.append('fewer than two days: no leave-one-day-out folds')
+        if v.step is False:
+            reasons.append(no_step_reason(ranking.question))
         primary = v.review_component if ranking.question == 'explore' else 'rise_vs_base_U'
         sign = v.sign_frac.get(primary, 0.0)
         if ranking.question == 'earlier':            # the direction of earlier is fixed: more on rises (rise > 0)
@@ -1317,6 +1403,8 @@ def validate_variants(rows: Sequence[dict], question: str = 'explore', objective
         reasons = []                                 # one entry per failed condition (details in brackets)
         if sv.tie_with_base:
             reasons.append(TIE_REASON)
+        if sv.step is False:
+            reasons.append(no_step_reason(question))
         if not holdout_days:
             reasons.append('no hold-out days')
         if missing:
@@ -1356,6 +1444,13 @@ def validate_variants(rows: Sequence[dict], question: str = 'explore', objective
                       validated=validated, search_rank=search_rank, holdout_ranking=holdout_ranking,
                       holdout_order=holdout_order, full_ranking=full, folds=folds, per_variant=per, tau=tau,
                       sign_share=share_needed, fold_top=fold_top, fold_share=fold_needed, holdout_top=holdout_top)
+
+
+def no_step_reason(question: str) -> str:
+    """The reason a variant that is not a step of the question is never recommended for review."""
+    if question == 'gentler':
+        return 'not a gentler step: asks for no less insulin on rises than the floor'
+    return 'not an earlier step: asks for no more insulin on rises than the floor'
 
 
 def validation_caveat(v: Optional[dict]) -> Optional[str]:
@@ -1433,16 +1528,71 @@ def ranking_rule_text(question: str = 'explore', objective: Optional[dict] = Non
     return '\n'.join(lines)
 
 
+def envelope_days_text(envelope_days: Dict[str, dict], limit: Optional[int] = None) -> str:
+    """'2026-09-04 (+1.6 U in 3 h), 2026-09-12 (17 % of TDD)' for the days beyond the envelope (largest 3 h window
+    first); `limit` cuts the list with ', ...'."""
+    def size(item):
+        r = item[1]
+        return -abs(r.get('env_3h_U') or 0.0), item[0]
+    parts = []
+    for day, r in sorted(envelope_days.items(), key=size):
+        u = r.get('env_3h_U')
+        if u is not None and any('3 h window' in x for x in r.get('reasons', [])):
+            parts.append(f'{day} ({u:+.1f} U in 3 h)')
+        elif r.get('env_day_pct_tdd') is not None:
+            parts.append(f'{day} ({r["env_day_pct_tdd"]:.0f} % of TDD)')
+        else:
+            parts.append(day)
+    if limit is not None and len(parts) > limit:
+        parts = parts[:limit] + ['...']
+    return ', '.join(parts)
+
+
+def envelope_max_3h(envelope_days: Dict[str, dict]) -> Optional[float]:
+    """The largest 3 h window vs base (signed, by magnitude) over the days beyond the envelope, or None."""
+    vals = [r['env_3h_U'] for r in envelope_days.values() if r.get('env_3h_U') is not None]
+    return max(vals, key=abs) if vals else None
+
+
+ENVELOPE_DAYS_MAX = 10                                 # days listed per envelope-limited variant in round.json (size)
+
+
+def envelope_summary(envelope_days: Dict[str, dict], n_days: int, limit: int = ENVELOPE_DAYS_MAX) -> dict:
+    """round.json's Candidate.envelope of an envelope-limited variant: the days beyond E (largest 3 h window first,
+    at most `limit`), their count, the largest 3 h window vs base and how many of the `n_days` stayed inside."""
+    items = sorted(envelope_days.items(), key=lambda kv: (-abs(kv[1].get('env_3h_U') or 0.0), kv[0]))
+    return {'days': {d: {k: r[k] for k in ('env_3h_U', 'env_day_pct_tdd') if r.get(k) is not None}
+                     for d, r in items[:limit]},
+            'n_days': len(envelope_days), 'max_3h_U': envelope_max_3h(envelope_days),
+            'inside_days': int(n_days) - len(envelope_days)}
+
+
+def envelope_limited_text(envelope_days: Dict[str, dict], limit: Optional[int] = 6) -> str:
+    """The `why` of an envelope-limited variant: 'beyond what the replay can judge on 2 days: 2026-09-04 (+1.6 U in
+    3 h), ...; inside the envelope and every hard check on the other days'."""
+    n = len(envelope_days)
+    return (f'beyond what the replay can judge on {n} day{"s" if n != 1 else ""}: '
+            f'{envelope_days_text(envelope_days, limit)}; passes the pre-hypo, maxBolus, cap and loop-count checks on'
+            f' every day')
+
+
 def leaderboard_rows(ranking: Ranking) -> List[dict]:
-    """flat rows for a table or round.json: one per variant (base excluded), ranked first, then infeasible, with the
-    verdict word (recommended / candidate / tie / infeasible) and a `why` string"""
+    """flat rows for a table or round.json: one per variant (base excluded), ranked first, then envelope-limited,
+    then infeasible, with the verdict word (recommended / candidate / tie / envelope-limited / infeasible) and a
+    `why` string"""
     out = []
-    for name in ranking.order + ranking.infeasible:
+    lim = set(ranking.envelope_limited)
+    for name in (ranking.order + list(ranking.envelope_limited)
+                 + [n for n in ranking.infeasible if n not in lim]):
         v = ranking.variants[name]
-        if not v.feasible:
+        if v.envelope_limited:
+            verdict, why = 'envelope-limited', envelope_limited_text(v.envelope_days)
+        elif not v.feasible:
             verdict, why = 'infeasible', '; '.join(f'{d}: {", ".join(r)}' for d, r in sorted(v.infeasible_reasons.items()))
         elif v.tie_with_base:                        # rule 4 before rule 5: a tie is never recommended for review
             verdict, why = 'tie', 'indistinguishable from base within the noise floor on every day'
+        elif v.step is False:
+            verdict, why = 'tie', no_step_reason(ranking.question)
         elif v.recommended_for_review:
             verdict, why = 'recommended', 'feasible on all days, stable across folds, days and hold-out'
         else:
@@ -1453,6 +1603,7 @@ def leaderboard_rows(ranking: Ranking) -> List[dict]:
                     'floor_multiples': dict(v.floor_multiples), 'review_score': v.review_score,
                     'review_component': v.review_component, 'feasible': v.feasible,
                     'recommended_for_review': v.recommended_for_review, 'tie_with_base': v.tie_with_base,
+                    'envelope_limited': v.envelope_limited, 'envelope_days': dict(v.envelope_days), 'step': v.step,
                     'mean': {k: v.mean.get(k) for k in ('rise_vs_base_U', 'rest_vs_base_U', 'delta_vs_base_U',
                                                         'changed_vs_base', 'lowside_flags', 'prehypo_extra_U',
                                                         'env_3h_max_U', 'env_day_pct_tdd', 'zero_temp_vs_base',
@@ -1471,5 +1622,6 @@ __all__ = ['OBJECTIVE_VERSION', 'LoopSeries', 'trial_metrics', 'metrics_from_csv
            'DEFAULT_VALIDATE_TOP', 'VALIDATE_SIGN_SHARE', 'VALIDATION_KEYS', 'TIE_REASON', 'floor_multiple',
            'floor_band', 'tie_every_day', 'review_component_of', 'review_order_key', 'study_floor', 'share_pct', 'recommend_config', 'recommend_rule_text',
            'RULE5_TIE', 'manual_bolus_coverage', 'MANUAL_KEYS', 'MANUAL_WINDOW_S', 'PREEMPT_SHARE', 'validate_top',
-           'primary_direction', 'weights_sensitivity', 'SENSITIVITY_FACTORS', 'SENSITIVITY_TOP', 'QUESTION_WEIGHTS',
+           'primary_direction', 'weights_sensitivity', 'validate_top_note', 'step_floor', 'is_step', 'no_step_reason',
+           'QUESTION_DIRECTION', 'feasibility_split', 'envelope_days_text', 'envelope_max_3h', 'envelope_summary', 'ENVELOPE_DAYS_MAX', 'envelope_limited_text', 'envelope_day_record', 'ENVELOPE_PREFIX', 'SENSITIVITY_FACTORS', 'SENSITIVITY_TOP', 'QUESTION_WEIGHTS',
            'FLOOR_COMPONENTS', 'REVIEW_COMPONENTS', 'TIE_FACTOR', 'BASE_VARIANT', 'QUESTIONS']

@@ -770,6 +770,10 @@ def verdict_text(c, floors=None, linter=None):
         text = _infeasible_text(c)
     elif c.verdict == 'tie':
         text = _safe_text(c.why, linter, fallback='indistinguishable from base within the noise floor')
+    elif c.verdict == 'envelope-limited':
+        n = len((c.envelope or {}).get('days') or [])
+        text = ('beyond the validity envelope on %s, not judged' % _days_text(n)) if n else \
+            'beyond the validity envelope on some days, not judged'
     if text is None:
         return _safe_text(c.why, linter)
     return _safe_text(text, linter)

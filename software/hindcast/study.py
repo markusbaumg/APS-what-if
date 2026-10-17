@@ -1868,7 +1868,9 @@ def build_status(study_dir, now=None):
         from hindcast import metrics as _m                   # lazy: metrics imports emulator_optimize
         status.dead_parameters = [d.key for d in rnd.dead_parameters]
         by_vhash = {c.vhash: c for c in rnd.variants}
-        order = [v for v in rnd.front if v in by_vhash] or [c.vhash for c in rnd.variants if c.verdict != 'base']
+        order = ([v for v in rnd.front if v in by_vhash]                     # no step: candidates, then the
+                 or [c.vhash for c in rnd.variants                            # envelope-limited ones; never a tie
+                     if c.verdict in ('recommended', 'candidate', 'envelope-limited')])
         if rnd.validation:                                   # validate round: recommended for review first, then the order
             order = ([v for v in order if by_vhash[v].verdict == 'recommended']
                      + [v for v in order if by_vhash[v].verdict != 'recommended'])

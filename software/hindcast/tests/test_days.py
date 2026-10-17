@@ -315,18 +315,19 @@ def test_gap_at_the_day_end():
 
 
 def test_loop_gap_alone_never_quarantines(tmp_path):
-    """CGM every 5 min, the phone not looping for 10 h: cgm_gap_min 0 (no gap >= 15 min), loop_gap_min 600, a badge
-    but no quarantine reason."""
+    """CGM every 5 min, the phone not looping for 6 h: cgm_gap_min 0 (no gap >= 15 min), loop_gap_min 365, loop_hours
+    18.0 (above the partial-day threshold), badges but no quarantine reason."""
     root = str(tmp_path / 'host')
     prev_start, _ = day_bounds('2026-09-05')
     _write_entries(root, '2026-09-05', _every_5(prev_start, START))
     _write_entries(root, DAY, _every_5(START, END))
-    loops = [make_loop(ms) for ms in _every_5(START, START + 6 * H) + _every_5(START + 16 * H, END)]
+    loops = [make_loop(ms) for ms in _every_5(START, START + 6 * H) + _every_5(START + 12 * H, END)]
     ch = days.character(DAY, object(), loops, cache_root=root)
     assert ch['cgm_gap_min'] == 0 and ch['cgm_gaps'] == 0 and ch['cgm_values'] == 288
-    assert ch['loop_gap_min'] == 605                                                              # 05:55 .. 16:00
+    assert ch['loop_gap_min'] == 365                                                              # 05:55 .. 12:00
+    assert ch['loop_hours'] == 18.0                                                               # no devicestatus: the loops
     out = days.confounders(DAY, {}, object(), loops, cache_root=root)
-    assert out == ['phone not looping for 605 min 07h55-18h00 local']
+    assert out == ['phone not looping for 365 min 07h55-14h00 local', 'looped 18.0 h']
     from hindcast import lint
     for badge in out:
         lint.lint_text(badge, kind='line')
@@ -340,7 +341,9 @@ def test_day_without_an_entries_file(tmp_path):
     assert ch['cgm_gap_min'] is None and ch['cgm_gaps'] is None and ch['cgm_values'] is None
     assert ch['cgm_note'] == days.NO_CGM_FILE and ch['bg_mean'] is None
     assert days.NO_CGM_FILE in days.confounders(DAY, {}, object(), [make_loop(START)], cache_root=root)
-    assert days.quarantine_reasons(DAY, meta={'character': ch}) == []
+    # no CGM file is no reason; the one loop run is a partial day
+    assert days.quarantine_reasons(DAY, meta={'character': ch}) == \
+        ['partial day: the phone looped 0.1 h of 24 (threshold 16 h)']
 
 
 # ----------------------------------------------------------------------------- H-714: looped vs silent CGM gaps
@@ -409,7 +412,7 @@ def test_gap_without_devicestatus_file_falls_back_to_the_whole_gap(tmp_path):
     ch = days.character(DAY, object(), [make_loop(START)], cache_root=root)
     assert ch['cgm_gap_looped_min'] == 180 and ch['phone_silent_min'] is None
     assert 'cgm gap 180 min 12h00-15h00 local' in days.confounders(DAY, {}, object(), [make_loop(START)], cache_root=root)
-    assert days.quarantine_reasons(DAY, meta={'character': ch}) == ['CGM gap 180 min (threshold 120 min)']
+    assert days.quarantine_reasons(DAY, meta={'character': ch})[0] == 'CGM gap 180 min (threshold 120 min)'
 
 
 def test_loop_stamps_reads_only_loop_results():
@@ -420,3 +423,46 @@ def test_loop_stamps_reads_only_loop_results():
             {'pump': {}, 'created_at': to_iso(START + 3 * MIN)},
             {'openaps': {'suggested': {'deliverAt': to_iso(END)}}}, 'junk']                 # outside
     assert days.loop_stamps(recs, START, END) == [START + MIN]
+
+
+# ----------------------------------------------------------------------------- partial days (loop coverage)
+
+def test_loop_hours_caps_each_run_at_5_min():
+    assert days.loop_hours([], END) == 0.0
+    assert days.loop_hours(_every_5(START, END), END) == 24.0
+    assert days.loop_hours([START, START + MIN, START + 20 * MIN], END) == round(11 / 60.0, 1)   # 1 + 5 + 5 min
+    assert days.loop_hours([END - 2 * MIN], END) == 0.0                                            # the last run: to 24:00Z
+    assert days.loop_hours([START + 20 * MIN, START], END) == days.loop_hours([START, START + 20 * MIN], END)
+
+
+def test_partial_day_from_devicestatus_quarantines(tmp_path):
+    """The phone looped 02:00-05:30Z only (the 2026-10-03 shape): loop_hours 3.5 from the devicestatus runs, a
+    'looped 3.5 h' badge and the partial-day reason; the devicestatus runs win over the replayed loops."""
+    from hindcast import lint
+    root = str(tmp_path / 'host')
+    _write_entries(root, DAY, _every_5(START, END))
+    ds = _every_5(START + 2 * H, START + 5 * H + 30 * MIN)
+    _write_devicestatus(root, DAY, ds)
+    loops = [make_loop(ms) for ms in ds[:12]]                                                     # the replay kept 1 h
+    ch = days.character(DAY, object(), loops, cache_root=root)
+    assert ch['loop_hours'] == 3.5
+    out = days.confounders(DAY, {}, object(), loops, cache_root=root)
+    assert 'looped 3.5 h' in out
+    reasons = days.quarantine_reasons(DAY, meta={'character': ch, 'confounders': out})
+    assert reasons == ['partial day: the phone looped 3.5 h of 24 (threshold 16 h)']
+    for text in out + reasons:
+        lint.lint_text(text, kind='line')
+        lint.lint_text(text, kind='issue')
+    assert days.character(DAY, object(), loops)['loop_hours'] == 1.0                             # no cache: the loops
+
+
+def test_partial_day_threshold_and_badge_edges():
+    assert days.quarantine_reasons(DAY, meta={'character': {'loop_hours': 16.0}}) == []
+    assert days.quarantine_reasons(DAY, meta={'character': {'loop_hours': 15.9}}) == \
+        ['partial day: the phone looped 15.9 h of 24 (threshold 16 h)']
+    assert days.quarantine_reasons(DAY, meta={'character': {'loop_hours': 12.0}},
+                                   thresholds={'loop_hours_min': 12}) == []
+    full = [make_loop(ms) for ms in _every_5(START, END - 4 * H)]                                 # 20.0 h: no badge
+    assert not any(b.startswith('looped') for b in days.confounders(DAY, {}, object(), full))
+    short = [make_loop(ms) for ms in _every_5(START, END - 4 * H - 5 * MIN)]
+    assert 'looped 19.9 h' in days.confounders(DAY, {}, object(), short)
